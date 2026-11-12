@@ -525,7 +525,6 @@ class SetupCatalogue:
 
 
 class _Superseded:
-    """Cancellation flag for one lookup: set on shutdown, eviction or a newer lookup."""
     def __init__(self, store, catalogue_id, revision):
         self.store, self.catalogue_id, self.revision = store, catalogue_id, revision
 

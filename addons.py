@@ -1,4 +1,3 @@
-"""Stremio's own subtitle addon: the only module that opens internet sockets."""
 from dataclasses import dataclass, field
 import json
 import re
@@ -74,7 +73,6 @@ SUBS_HOST = re.compile(r'subs\d*\.strem\.io')
 
 
 class AddonError(Exception):
-    """A failed Stremio request; carries a code and never any URL or upstream text."""
     def __init__(self, code):
         super().__init__(MESSAGES[code])
         self.code = code

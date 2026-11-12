@@ -1,4 +1,3 @@
-"""Fakes shared by the addon store and route tests."""
 import time
 
 from addons import Listing, MetaId, Match, Offer
