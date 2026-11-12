@@ -360,6 +360,7 @@ def http_get(url, *, cap, deadline, cancelled=None):
     except AddonError:
         raise
     except HTTPError as error:
+        error.close()
         raise AddonError('busy' if error.code == 429 else 'bad_response') from None
     except TimeoutError:
         raise AddonError('timeout') from None
