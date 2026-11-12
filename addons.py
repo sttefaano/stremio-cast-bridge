@@ -342,7 +342,7 @@ def http_get(url, *, cap, deadline, cancelled=None):
         raise AddonError('bad_response')
     limit = time.monotonic() + deadline
     try:
-        with OPENER.open(Request(url, headers={'User-Agent': USER_AGENT}), timeout=min(deadline / 5, 2.0)) as response:
+        with OPENER.open(Request(url, headers={'User-Agent': USER_AGENT}), timeout=min(deadline / 2, 4.0)) as response:
             if response.status != 200:
                 raise AddonError('bad_response')
             body = bytearray()
@@ -412,7 +412,7 @@ class StremioAddon:
     def fetch(self, offer, cancelled):
         if not valid_subtitle_url(offer.url):
             raise AddonError('bad_response')
-        body = self.get(ENGINE + quote(offer.url, safe=''), cap=MAX_SUBTITLE, deadline=5, cancelled=cancelled)
+        body = self.get(ENGINE + quote(offer.url, safe=''), cap=MAX_SUBTITLE, deadline=3.5, cancelled=cancelled)
         try:
             return body.decode('utf-8')
         except UnicodeDecodeError:

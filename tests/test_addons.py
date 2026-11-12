@@ -406,9 +406,16 @@ class HttpGetTest(unittest.TestCase):
             self.get(CINEMETA_SEARCH, http_error(302, 'Found'))
         self.assertEqual(error.exception.code, 'bad_response')
 
-    def test_one_stalled_read_cannot_stretch_a_five_second_budget_past_six(self):
-        _, opener = self.get(CINEMETA_SEARCH, FakeResponse([b'x']), deadline=5)
-        self.assertLessEqual(5 + opener.timeouts[0], 6)
+    def test_one_stalled_read_cannot_stretch_a_subtitle_fetch_past_the_panels_six_second_abort(self):
+        budgets = []
+        def get(url, *, cap, deadline, cancelled=None):
+            budgets.append(deadline)
+            return self.get(url, FakeResponse([b'WEBVTT\n']), cap=cap, deadline=deadline)[0]
+        offer = Offer('o', 'spa', 'Español', 'x', None, 'https://subs5.strem.io/a')
+        StremioAddon(get=get).fetch(offer, None)
+        _, opener = self.get(CINEMETA_SEARCH, FakeResponse([b'x']), deadline=budgets[0])
+        self.assertLessEqual(budgets[0] + opener.timeouts[0], 6)
+        self.assertGreaterEqual(opener.timeouts[0], 1.5)
 
     def test_the_opener_ignores_environment_proxies(self):
         self.assertFalse([h for h in addons.OPENER.handlers if isinstance(h, ProxyHandler)])
