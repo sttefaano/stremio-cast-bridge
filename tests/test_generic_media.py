@@ -286,7 +286,7 @@ class CatalogueTest(unittest.TestCase):
             self.assertTrue(release.wait(4))
             return Analysis(0, 1, 90)
         with patch('bridge.discover_receivers', side_effect=devices), patch('bridge.urlopen', side_effect=sources), patch('bridge.probe', side_effect=analysis):
-            bridge = Bridge(arguments([]))
+            bridge = Bridge(arguments(['--no-stremio-subtitles']))
             try:
                 self.assertTrue(device_entered.wait(1))
                 self.assertTrue(source_entered.wait(1))
@@ -582,7 +582,7 @@ class CatalogueTest(unittest.TestCase):
             self.assertTrue(release.wait(3))
             return []
         with patch('bridge.discover_receivers', side_effect=blocked), patch('bridge.urlopen', side_effect=OSError('synthetic offline')):
-            bridge = Bridge(arguments([]))
+            bridge = Bridge(arguments(['--no-stremio-subtitles']))
             self.assertTrue(entered.wait(1))
             bridge.submit('discover_devices', {})
             self.assertFalse(bridge.status().get('command_pending', False))
