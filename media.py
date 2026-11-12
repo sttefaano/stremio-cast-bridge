@@ -123,7 +123,7 @@ def upload_label(filename):
     return label
 
 
-def normalize_subtitles(format, text):
+def normalize_subtitles(format, text, lenient=False):
     if format not in ('srt', 'vtt') or not isinstance(text, str):
         raise MediaError('Usá texto UTF-8 SRT o VTT.', 422, 'invalid_subtitle')
     try:
@@ -133,6 +133,8 @@ def normalize_subtitles(format, text):
     if len(encoded) > MAX_UPLOAD:
         raise MediaError('El archivo supera 1 MiB.', 413, 'upload_limit')
     text = text.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if lenient:
+        text = strip_format_characters(text)
     if any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in text):
         raise MediaError('El archivo contiene controles no permitidos.', 422, 'invalid_subtitle')
     if format == 'vtt':
@@ -150,8 +152,7 @@ def normalize_subtitles(format, text):
         return round(seconds * 1000)
     def timestamp(value):
         return f'{value // 3600000:02d}:{value // 60000 % 60:02d}:{value // 1000 % 60:02d}.{value % 1000:03d}'
-    cues = []
-    for block in re.split(r'\n[ \t]*\n', text):
+    def cue(block):
         lines = block.splitlines()
         if lines and not timing.fullmatch(lines[0]):
             if format == 'srt' and lines[0].isdigit() or format == 'vtt' and len(lines) > 1 and not re.search(r'(?i)STYLE|REGION|NOTE|-->', lines[0]):
@@ -171,18 +172,33 @@ def normalize_subtitles(format, text):
                 character = chr(int(reference[1], 16) if reference[1] else int(reference[2]))
             except (ValueError, OverflowError):
                 raise MediaError('Referencia de texto inválida.', 422, 'invalid_subtitle') from None
-            if unicodedata.category(character).startswith('C'):
+            if unicodedata.category(character).startswith('C') and not (lenient and unicodedata.category(character) == 'Cf'):
                 raise MediaError('El archivo contiene controles no permitidos.', 422, 'invalid_subtitle')
         content = html.unescape(re.sub(r'<[^>]*>', '', content)).strip()
+        if lenient:
+            content = strip_format_characters(content).strip()
         if (end <= start or not content or any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in content)
                 or re.search(r'-->|[<>]', content)):
             raise MediaError('Cue de subtítulos inválido.', 422, 'invalid_subtitle')
-        cues.append(f'{timestamp(start)} --> {timestamp(end)}\n{content}')
+        return f'{timestamp(start)} --> {timestamp(end)}\n{content}'
+    cues, blocks = [], re.split(r'\n[ \t]*\n', text)
+    for block in blocks:
+        try:
+            cues.append(cue(block))
+        except MediaError:
+            if not lenient:
+                raise
         if len(cues) > 20000:
             raise MediaError('Demasiados cues.', 413, 'upload_limit')
     if not cues:
         raise MediaError('El archivo no tiene cues.', 422, 'invalid_subtitle')
+    if lenient and (len(blocks) - len(cues)) * 10 >= len(blocks):
+        raise MediaError('Demasiados cues inválidos.', 422, 'invalid_subtitle')
     return ('WEBVTT\n\n' + '\n\n'.join(cues) + '\n').encode('utf-8')
+
+
+def strip_format_characters(text):
+    return ''.join(c for c in text if unicodedata.category(c) != 'Cf')
 
 
 def validate_vtt_settings(settings):
