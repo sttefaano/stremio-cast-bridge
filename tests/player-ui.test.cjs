@@ -56,13 +56,14 @@ function harness(initial) {
      async poll(s){status=fixture(s);timers.shift()();await settle();}};
 }
 
-const catalogue = id => ({id:'cat-'+id,source_id:id,duration:500,entries:[{id:'text-'+id,kind:'embedded',label:'日本語',language:'jpn',supported:true,reason:null},{id:'image-'+id,kind:'embedded',label:'Image',language:'eng',supported:false,reason:'Subtítulos de imagen no compatibles'}]});
+const addonOff = {state:'off',revision:0,match:null,message:null,count:0};
+const catalogue = (id,addon=addonOff,extra=[]) => ({id:'cat-'+id,source_id:id,duration:500,entries:[{id:'text-'+id,kind:'embedded',label:'日本語',language:'jpn',supported:true,reason:null},{id:'image-'+id,kind:'embedded',label:'Image',language:'eng',supported:false,reason:'Subtítulos de imagen no compatibles'},...extra],addon});
 function fixture(s) {
-  const catalogues = Object.fromEntries((s.sources || []).map(source=>[source.id,{state:'ready',catalogue:catalogue(source.id)}]));
+  const catalogues = Object.fromEntries((s.sources || []).map(source=>[source.id,{state:'ready',catalogue:catalogue(source.id,s.addons?.[source.id],s.extra?.[source.id])}]));
   const active = ['playing','paused','preparing','buffering','loading'].includes(s.phase);
-  return {...destination,source_discovery:'ready',catalogues,...(active ? {playback_id:'play-a',active_catalogue:catalogue(s.source_id || 'a'),subtitle_choice:{catalogue_id:'cat-'+(s.source_id || 'a'),subtitle_id:'text-'+(s.source_id || 'a'),enabled:true,delay_ms:s.subtitle_delay_ms ?? 0,label:'日本語',language:'jpn'}} : {}),...s};
+  return {...destination,source_discovery:'ready',catalogues,...(active ? {playback_id:'play-a',active_catalogue:catalogue(s.source_id || 'a',s.addons?.[s.source_id || 'a'],s.extra?.[s.source_id || 'a']),subtitle_choice:{catalogue_id:'cat-'+(s.source_id || 'a'),subtitle_id:'text-'+(s.source_id || 'a'),enabled:true,delay_ms:s.subtitle_delay_ms ?? 0,label:'日本語',language:'jpn'}} : {}),...s};
 }
-const playbackPost = r => r.options?.method === 'POST' && !['/api/catalogue','/api/subtitle_upload','/api/discover','/api/discover_devices'].includes(r.path);
+const playbackPost = r => r.options?.method === 'POST' && !['/api/catalogue','/api/subtitle_upload','/api/subtitle_lookup','/api/subtitle_offers','/api/subtitle_fetch','/api/discover','/api/discover_devices'].includes(r.path);
 const startBody = source => ({device_id:'tv-a',device_revision:1,source_id:source,catalogue_id:'cat-'+source,subtitle_id:null,delay_ms:0});
 const captionBody = (enabled,delay_ms=0) => ({device_id:'tv-a',device_revision:1,playback_id:'play-a',catalogue_id:'cat-a',subtitle_id:'text-a',enabled,delay_ms});
 const destination = {selected_device:{id:'tv-a',name:'Sala',host:'192.0.2.2',model:'Chromecast',available:true},device_revision:1,devices:[{id:'tv-a',name:'Sala',host:'192.0.2.2',model:'Chromecast'},{id:'tv-b',name:'Sala',host:'192.0.2.3',model:'Google TV'}],device_discovery:'ready',can_change_device:false};
@@ -804,4 +805,251 @@ test('an older Start receipt cannot hide a newer subtitle upload draft',async()=
     $('setup-cancel').click();finishFile(new Uint8Array([65]).buffer);await h.settle();
     assert.equal(h.requests.filter(r=>r.path==='/api/subtitle_upload').length,0);
   }
+});
+
+const matchOf = (label='MobLand (2025) · T1 E7',confidence='exact') => ({label,confidence});
+const offerList = [
+  {id:'o-spl',language:'spl',language_name:'Español (Latinoamérica)',label:'MobLand S01E07 1080p WEB',note:null},
+  {id:'o-spa',language:'spa',language_name:'Español',label:'MobLand S01E07 BluRay',note:'mismo origen'},
+  {id:'o-sdh',language:'spa',language_name:'Español',label:'MobLand S01E07 SDH',note:'para sordos'},
+  {id:'o-eng',language:'eng',language_name:'Inglés',label:'MobLand S01E07 WEB',note:null}];
+const alternativeList = [1,2,3,4,5].map(n=>({id:'tt000000'+n,title:'Otra '+n,year:2000+n}));
+const listingOf = (patch={}) => ({state:'ready',revision:1,match:matchOf(),message:null,alternatives:alternativeList.slice(0,2),offers:offerList,...patch});
+const summaryOf = listing => ({state:listing.state,revision:listing.revision,match:listing.match,message:listing.message,count:listing.offers?.length||0});
+const respondListing = (h,listing) => h.respond('/api/subtitle_offers',async()=>({ok:true,json:async()=>listing}));
+const ok = body => ({ok:true,json:async()=>body}), failed = (message,code) => ({ok:false,json:async()=>({message,code})});
+const idleB = (listing,extra={}) => ({...playing,phase:'idle',source_id:null,addons:{b:summaryOf(listing)},...extra});
+const stremioEntry = (id,label='MobLand S01E07 BluRay') => ({id,kind:'addon',label,language:'spa',supported:true,reason:null});
+const calls = (h,path) => h.requests.filter(r=>r.path===path).map(r=>JSON.parse(r.options.body));
+const lookupFinished = listing => ({catalogue:catalogue('b',summaryOf(listing))});
+async function openSetup(listing,extra={},respond=true) {
+  const h=harness(idleB(listing,extra));if(respond)respondListing(h,listing);await h.settle();
+  h.select('b');await h.settle();await h.settle();return h;
+}
+async function chooseOffer(h,id='o-spa',prefix='setup-addon') {
+  const $=h.element,offer=offerList.find(o=>o.id===id);
+  $(prefix+'-language').value=offer.language;$(prefix+'-language').onchange();
+  $(prefix+'-version').value=id;$(prefix+'-version').onchange();
+}
+
+test('both Stremio blocks have every element the one renderer drives, with the contract copy',()=>{
+  const names=[...new Set([...fs.readFileSync('player.js','utf8').matchAll(/part\('([a-z]+)'\)/g)].map(match=>match[1]))];
+  assert.ok(names.length>=12);
+  for(const prefix of ['setup-addon','active-addon']) {
+    assert.ok(markupIds.has(prefix));
+    for(const name of names)assert.ok(markupIds.has(`${prefix}-${name}`),`#${prefix}-${name} exists`);
+    assert.match(html,new RegExp(`id="${prefix}-heading">Subtítulos de Stremio<`));
+    assert.match(html,new RegExp(`for="${prefix}-language">Idioma<`));
+    assert.match(html,new RegExp(`for="${prefix}-version">Versión<`));
+    assert.match(html,new RegExp(`id="${prefix}-use"[^>]*>Usar este subtítulo<`));
+    assert.match(html,new RegExp(`id="${prefix}-wrong"[^>]*>No es esta<`));
+    assert.match(html,new RegExp(`id="${prefix}-retry"[^>]*>Reintentar<`));
+    assert.match(html,new RegExp(`for="${prefix}-hint">Título con año y episodio, o ID de IMDb<`));
+    assert.match(html,new RegExp(`id="${prefix}-search"[^>]*>Buscar<`));
+  }
+  assert.ok(html.indexOf('id="setup-addon"')>html.indexOf('id="setup-subtitle"'));
+  assert.ok(html.indexOf('id="active-addon"')>html.indexOf('id="active-subtitle"'));
+});
+test('setup shows the match line, languages in server order and ranked versions from the offers call only',async()=>{
+  const listing=listingOf(),h=await openSetup(listing),$=h.element;
+  assert.equal($('setup-addon').hidden,false);
+  assert.equal($('setup-addon-match').textContent,'Coincidencia: MobLand (2025) · T1 E7');
+  assert.deepEqual(calls(h,'/api/subtitle_offers'),[{source_id:'b',catalogue_id:'cat-b'}]);
+  assert.deepEqual($('setup-addon-language').children.map(o=>[o.value,o.textContent]),[['spl','Español (Latinoamérica) · 1'],['spa','Español · 2'],['eng','Inglés · 1']]);
+  assert.equal($('setup-addon-language').value,'spl');
+  assert.deepEqual($('setup-addon-version').children.map(o=>o.textContent),['MobLand S01E07 1080p WEB']);
+  $('setup-addon-language').value='spa';$('setup-addon-language').onchange();
+  assert.deepEqual($('setup-addon-version').children.map(o=>o.textContent),['MobLand S01E07 BluRay · mismo origen','MobLand S01E07 SDH · para sordos']);
+  assert.equal($('setup-addon-version').value,'o-spa');
+  assert.equal($('setup-addon-use').hidden,false);assert.equal($('setup-addon-use').disabled,false);
+  assert.equal($('setup-addon-status').hidden,true);assert.equal($('setup-addon-correction').hidden,true);
+  await h.poll(idleB(listing));assert.equal(calls(h,'/api/subtitle_offers').length,1,'an unchanged revision is never pulled again');
+  assert.equal(h.requests.filter(playbackPost).length,0);
+});
+test('a doubtful match is announced as a question',async()=>{
+  const listing=listingOf({match:matchOf('MobLand (2025) · T1 E7','doubtful')}),h=await openSetup(listing);
+  assert.equal(h.element('setup-addon-match').textContent,'Coincidencia dudosa: ¿MobLand (2025) · T1 E7?');
+});
+test('Usar este subtítulo downloads once, adds a Stremio entry, selects it, and Start never touches the network for it',async()=>{
+  const listing=listingOf(),entry=stremioEntry('addon-b'),h=await openSetup(listing),$=h.element;
+  let finish;h.respond('/api/subtitle_fetch',()=>new Promise(resolve=>{finish=resolve;}));
+  await chooseOffer(h);$('setup-addon-use').click();await h.settle();
+  assert.deepEqual(calls(h,'/api/subtitle_fetch'),[{source_id:'b',catalogue_id:'cat-b',offer_id:'o-spa'}]);
+  assert.equal($('setup-addon-use').textContent,'Descargando…');assert.equal($('setup-addon-use').disabled,true);
+  assert.equal($('start').disabled,true);assert.equal($('subtitle-file').disabled,true);
+  h.setStatus(idleB(listing,{extra:{b:[entry]}}));
+  finish(ok({entry,catalogue:catalogue('b',summaryOf(listing),[entry])}));await h.settle();
+  assert.equal($('setup-subtitle').value,'addon-b');
+  assert.match($('setup-subtitle').children.find(n=>n.value==='addon-b').textContent,/MobLand S01E07 BluRay · spa · Stremio$/);
+  assert.match($('setup-addon-status').textContent,/^Subtítulo listo: MobLand S01E07 BluRay\. Se usará solo al iniciar\.$/);
+  assert.equal($('setup-addon-use').textContent,'Usar este subtítulo');assert.equal($('start').disabled,false);
+  const before=h.requests.length;$('start').click();await h.settle();
+  assert.deepEqual(JSON.parse(h.requests.find(r=>r.path==='/api/start').options.body),{...startBody('b'),subtitle_id:'addon-b'});
+  assert.deepEqual(h.requests.slice(before).filter(r=>/subtitle_/.test(r.path)),[]);
+  assert.equal(calls(h,'/api/subtitle_fetch').length,1);
+});
+test('every non-ready state has one status line, never disables Start and never borrows the catalogue error',async()=>{
+  const cases=[
+    ['loading',{state:'loading',message:'Buscando subtítulos de Stremio…',match:null,offers:[]},/^Buscando subtítulos de Stremio…$/],
+    ['unidentified',{state:'unidentified',message:'No pude reconocer la película. Elegí una opción o escribí el título.',match:null,offers:[]},/^No pude reconocer la película\. Elegí una opción o escribí el título\.$/],
+    ['empty',{offers:[]},/^Stremio no tiene subtítulos para MobLand \(2025\) · T1 E7\.$/],
+    ['error',{state:'error',message:'No se pudieron buscar subtítulos de Stremio. Las pistas y los archivos locales siguen disponibles.',match:null,offers:[]},/^No se pudieron buscar subtítulos de Stremio\. Las pistas y los archivos locales siguen disponibles\.$/],
+    ['busy',{state:'error',message:'Stremio está limitando las consultas. Esperá unos segundos y reintentá.',match:null,offers:[]},/^Stremio está limitando las consultas\. Esperá unos segundos y reintentá\.$/]];
+  for(const [name,patch,copy] of cases) {
+    const listing=listingOf(patch),h=await openSetup(listing),$=h.element;
+    assert.equal($('setup-addon').hidden,false,name);
+    assert.match($('setup-addon-status').textContent,copy,name);assert.equal($('setup-addon-status').hidden,false,name);
+    assert.equal($('setup-addon-picker').hidden,true,name);assert.equal($('setup-addon-use').hidden,true,name);
+    assert.equal($('setup-addon-retry').hidden,patch.state!=='error',name);
+    assert.equal($('setup-addon-wrong').hidden,name!=='empty',name);
+    assert.equal($('setup-addon-correction').hidden,name!=='unidentified',name);
+    assert.equal($('start').disabled,false,name);assert.doesNotMatch($('catalogue-status').textContent,/Stremio/,name);
+    assert.equal(h.requests.filter(playbackPost).length,0,name);
+  }
+});
+test('Reintentar repeats the lookup for the same catalogue with an automatic hint',async()=>{
+  const listing=listingOf({state:'error',message:'No se pudieron buscar subtítulos de Stremio. Las pistas y los archivos locales siguen disponibles.',match:null,offers:[]});
+  const h=await openSetup(listing),$=h.element;
+  assert.equal(calls(h,'/api/subtitle_offers').length,0);
+  h.respond('/api/subtitle_lookup',async()=>ok(lookupFinished({...listing,state:'loading',revision:2,message:'Buscando subtítulos de Stremio…'})));
+  $('setup-addon-retry').click();await h.settle();
+  assert.deepEqual(calls(h,'/api/subtitle_lookup'),[{source_id:'b',catalogue_id:'cat-b',hint:null}]);
+  assert.match($('setup-addon-status').textContent,/Buscando/);assert.equal($('setup-addon-retry').hidden,true);
+});
+test('a state of off hides the block and nothing is requested',async()=>{
+  const h=harness({...playing,phase:'idle',source_id:null});await h.settle();h.select('b');await h.settle();
+  assert.equal(h.element('setup-addon').hidden,true);
+  assert.equal(h.requests.filter(r=>/subtitle_/.test(r.path)).length,0);
+});
+test('No es esta reveals at most four alternatives and a field that both feed the same lookup',async()=>{
+  const listing=listingOf({alternatives:alternativeList}),h=await openSetup(listing),$=h.element;
+  assert.equal($('setup-addon-correction').hidden,true);assert.equal($('setup-addon-wrong').attributes['aria-expanded'],'false');
+  $('setup-addon-wrong').click();
+  assert.equal($('setup-addon-correction').hidden,false);assert.equal($('setup-addon-wrong').attributes['aria-expanded'],'true');
+  const buttons=$('setup-addon-alternatives').children;
+  assert.deepEqual(buttons.map(b=>b.textContent),['Otra 1 (2001)','Otra 2 (2002)','Otra 3 (2003)','Otra 4 (2004)']);
+  const next=listingOf({revision:2,match:matchOf('Otra 2 (2002)'),offers:[offerList[3]]});
+  const loading={...next,state:'loading',match:null,offers:[],message:'Buscando subtítulos de Stremio…'};
+  h.respond('/api/subtitle_lookup',async()=>{h.setStatus(idleB(loading));return ok(lookupFinished(loading));});
+  buttons[1].onclick();await h.settle();
+  assert.deepEqual(calls(h,'/api/subtitle_lookup'),[{source_id:'b',catalogue_id:'cat-b',hint:'tt0000002 Otra 2 2002'}]);
+  assert.match($('setup-addon-status').textContent,/Buscando/);assert.equal($('setup-addon-correction').hidden,true);
+  respondListing(h,next);await h.poll(idleB(next));await h.settle();
+  assert.equal(calls(h,'/api/subtitle_offers').length,2);
+  assert.equal($('setup-addon-match').textContent,'Coincidencia: Otra 2 (2002)');
+  assert.deepEqual($('setup-addon-language').children.map(o=>o.value),['eng']);
+  $('setup-addon-wrong').click();
+  $('setup-addon-hint').value='  tt1234567 S01E07  ';$('setup-addon-form').onsubmit({preventDefault(){}});await h.settle();
+  assert.equal(calls(h,'/api/subtitle_lookup')[1].hint,'tt1234567 S01E07');
+  $('setup-addon-hint').value='   ';$('setup-addon-form').onsubmit({preventDefault(){}});await h.settle();
+  $('setup-addon-hint').value='x'.repeat(201);$('setup-addon-form').onsubmit({preventDefault(){}});await h.settle();
+  assert.equal(calls(h,'/api/subtitle_lookup').length,2);
+  assert.match($('setup-addon-status').textContent,/200 caracteres/);
+});
+test('an unidentified film opens the correction on its own and has no No es esta toggle',async()=>{
+  const listing=listingOf({state:'unidentified',message:'No pude reconocer la película. Elegí una opción o escribí el título.',match:null,offers:[],alternatives:alternativeList.slice(0,3)});
+  const h=await openSetup(listing),$=h.element;
+  assert.equal($('setup-addon-correction').hidden,false);assert.equal($('setup-addon-wrong').hidden,true);
+  assert.deepEqual(calls(h,'/api/subtitle_offers'),[{source_id:'b',catalogue_id:'cat-b'}]);
+  assert.deepEqual($('setup-addon-alternatives').children.map(b=>b.textContent),['Otra 1 (2001)','Otra 2 (2002)','Otra 3 (2003)']);
+  assert.equal($('setup-addon-match').hidden,true);
+});
+test('an unreadable subtitle says so, stays listed and leaves Start and the catalogue status alone',async()=>{
+  const listing=listingOf(),h=await openSetup(listing),$=h.element;
+  const copy='Ese subtítulo no se pudo leer. Probá otra versión.';
+  h.respond('/api/subtitle_fetch',async()=>failed(copy,'invalid_subtitle'));
+  await chooseOffer(h);$('setup-addon-use').click();await h.settle();
+  assert.equal($('setup-addon-status').textContent,copy);
+  assert.deepEqual($('setup-addon-version').children.map(o=>o.textContent),['MobLand S01E07 BluRay · mismo origen · no se pudo leer','MobLand S01E07 SDH · para sordos']);
+  assert.equal($('setup-addon-use').disabled,false);assert.equal($('start').disabled,false);
+  assert.doesNotMatch($('catalogue-status').textContent,/leer/);assert.equal($('setup-subtitle').value,'');
+  h.respond('/api/subtitle_fetch',async()=>failed('No se pudo conectar. Revisá tu conexión y que Stremio esté abierto.','addon_unavailable'));
+  $('setup-addon-version').value='o-sdh';$('setup-addon-version').onchange();$('setup-addon-use').click();await h.settle();
+  assert.match($('setup-addon-status').textContent,/No se pudo conectar/);
+  assert.deepEqual($('setup-addon-version').children.map(o=>o.textContent),['MobLand S01E07 BluRay · mismo origen · no se pudo leer','MobLand S01E07 SDH · para sordos']);
+  h.respond('/api/subtitle_fetch',async()=>{throw Object.assign(new Error('timeout'),{name:'AbortError'});});
+  $('setup-addon-use').click();await h.settle();
+  assert.equal($('setup-addon-status').textContent,'La consulta tardó demasiado. Reintentá.');assert.equal($('start').disabled,false);
+});
+test('late downloads cannot select a subtitle for another movie, an abandoned setup or a refreshed catalogue',async()=>{
+  for(const mode of ['other-movie','cancel','refresh','pick']) {
+    const listing=listingOf(),entry=stremioEntry('addon-b'),h=harness({...playing,phase:'idle',source_id:null,addons:{a:summaryOf(listing),b:summaryOf(listing)}});
+    respondListing(h,listing);await h.settle();const $=h.element;
+    h.select('b');await h.settle();await h.settle();
+    let finish;h.respond('/api/subtitle_fetch',()=>new Promise(resolve=>{finish=resolve;}));
+    await chooseOffer(h);$('setup-addon-use').click();await h.settle();
+    if(mode==='other-movie'){h.select('a');await h.settle();}
+    if(mode==='cancel'){$('setup-cancel').click();}
+    if(mode==='refresh'){h.respond('/api/catalogue',()=>new Promise(()=>{}));$('refresh-catalogue').click();await h.settle();}
+    if(mode==='pick'){$('setup-subtitle').value='text-b';$('setup-subtitle').onchange();}
+    finish(ok({entry,catalogue:catalogue('b',summaryOf(listing),[entry])}));await h.settle();
+    assert.notEqual($('setup-subtitle').value,'addon-b',mode);
+    assert.equal(h.requests.filter(playbackPost).length,0,mode);
+  }
+});
+test('an older addon revision of the same catalogue never replaces a newer one',async()=>{
+  const first=listingOf(),third=listingOf({revision:3,match:matchOf('Newer (2024)')}),h=await openSetup(first),$=h.element;
+  let finish;h.respond('/api/subtitle_lookup',()=>new Promise(resolve=>{finish=resolve;}));
+  $('setup-addon-wrong').click();$('setup-addon-alternatives').children[0].onclick();await h.settle();
+  respondListing(h,third);await h.poll(idleB(third));await h.settle();
+  assert.equal($('setup-addon-match').textContent,'Coincidencia: Newer (2024)');
+  finish(ok(lookupFinished({...first,state:'loading',revision:2,match:null,offers:[],message:'Buscando subtítulos de Stremio…'})));await h.settle();
+  assert.equal($('setup-addon-match').textContent,'Coincidencia: Newer (2024)');
+  assert.doesNotMatch($('setup-addon-status').textContent,/Buscando/);
+});
+test('entries are labelled by origin and addon entries never replace the local upload label',async()=>{
+  const listing=listingOf(),addon=stremioEntry('addon-b'),local={id:'upload-b',kind:'upload',label:'local.srt',language:null,supported:true,reason:null};
+  const h=await openSetup(listing,{extra:{b:[addon,local]}}),$=h.element;
+  const label=id=>$('setup-subtitle').children.find(n=>n.value===id).textContent;
+  assert.match(label('addon-b'),/ · Stremio$/);assert.match(label('upload-b'),/ · Archivo local$/);
+  assert.doesNotMatch(label('text-b'),/Stremio|Archivo local/);
+});
+test('the live editor renders the same block and a downloaded subtitle becomes a draft that Aplicar sends',async()=>{
+  const listing=listingOf(),entry=stremioEntry('addon-a'),h=harness({...playing,addons:{a:summaryOf(listing)}});
+  respondListing(h,listing);await h.settle();const $=h.element;
+  assert.equal(calls(h,'/api/subtitle_offers').length,0,'a closed editor requests nothing');
+  $('open-subtitles').click();await h.settle();await h.settle();
+  assert.equal($('active-addon').hidden,false);assert.equal($('active-addon-match').textContent,'Coincidencia: MobLand (2025) · T1 E7');
+  assert.deepEqual(calls(h,'/api/subtitle_offers'),[{source_id:'a',catalogue_id:'cat-a'}]);
+  assert.equal($('active-addon-language').children.length,3);
+  const subtitled={...playing,addons:{a:summaryOf(listing)},extra:{a:[entry]}};
+  h.respond('/api/subtitle_fetch',async()=>{h.setStatus(subtitled);return ok({entry,catalogue:catalogue('a',summaryOf(listing),[entry])});});
+  await chooseOffer(h,'o-spa','active-addon');$('active-addon-use').click();await h.settle();
+  assert.deepEqual(calls(h,'/api/subtitle_fetch'),[{source_id:'a',catalogue_id:'cat-a',offer_id:'o-spa'}]);
+  assert.equal($('active-subtitle').value,'addon-a');assert.equal($('subtitles').checked,true);assert.equal($('apply').disabled,false);
+  assert.match($('active-addon-status').textContent,/Se usará solo al aplicar\./);
+  assert.equal(h.requests.filter(playbackPost).length,0);
+  h.respond('/api/subtitles',async()=>{h.setStatus({...subtitled,subtitle_choice:{catalogue_id:'cat-a',subtitle_id:'addon-a',enabled:true,delay_ms:0,label:entry.label,language:'spa'}});return ok({accepted:true});});
+  $('apply').click();await h.settle();
+  assert.deepEqual(h.requests.filter(playbackPost).map(r=>[r.path,JSON.parse(r.options.body)]),[['/api/subtitles',{...captionBody(true),subtitle_id:'addon-a'}]]);
+});
+test('a download finishing after the playback instance changed cannot become the caption draft',async()=>{
+  const listing=listingOf(),entry=stremioEntry('addon-a'),h=harness({...playing,addons:{a:summaryOf(listing)}});
+  respondListing(h,listing);await h.settle();const $=h.element;
+  $('open-subtitles').click();await h.settle();await h.settle();
+  let finish;h.respond('/api/subtitle_fetch',()=>new Promise(resolve=>{finish=resolve;}));
+  await chooseOffer(h,'o-spa','active-addon');$('active-addon-use').click();await h.settle();
+  await h.poll({...playing,playback_id:'play-new',addons:{a:summaryOf(listing)}});
+  finish(ok({entry,catalogue:catalogue('a',summaryOf(listing),[entry])}));await h.settle();
+  assert.notEqual($('active-subtitle').value,'addon-a');assert.equal($('apply').disabled,true);
+});
+test('the live block stays inert while a caption Apply is pending',async()=>{
+  const listing=listingOf(),h=harness({...playing,addons:{a:summaryOf(listing)}});
+  respondListing(h,listing);await h.settle();const $=h.element;
+  $('open-subtitles').click();await h.settle();await h.settle();h.delay(.2);
+  h.respond('/api/subtitles',()=>new Promise(()=>{}));
+  $('apply').click();await h.settle();
+  assert.equal($('active-addon-use').disabled,true);assert.equal($('active-addon-language').disabled,true);
+});
+test('a late lookup receipt with an older addon revision cannot roll the live editor back',async()=>{
+  const first=listingOf(),third=listingOf({revision:3,match:matchOf('Newer (2024)')}),h=harness({...playing,addons:{a:summaryOf(first)}});
+  respondListing(h,first);await h.settle();const $=h.element;
+  $('open-subtitles').click();await h.settle();await h.settle();
+  let finish;h.respond('/api/subtitle_lookup',()=>new Promise(resolve=>{finish=resolve;}));
+  $('active-addon-wrong').click();$('active-addon-alternatives').children[0].onclick();await h.settle();
+  respondListing(h,third);await h.poll({...playing,addons:{a:summaryOf(third)}});await h.settle();
+  assert.equal($('active-addon-match').textContent,'Coincidencia: Newer (2024)');
+  finish(ok({catalogue:catalogue('a',summaryOf({...first,state:'loading',revision:2,match:null,offers:[],message:'Buscando subtítulos de Stremio…'}))}));await h.settle();
+  assert.equal($('active-addon-match').textContent,'Coincidencia: Newer (2024)');
+  assert.doesNotMatch($('active-addon-status').textContent,/Buscando/);
 });

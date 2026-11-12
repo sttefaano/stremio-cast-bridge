@@ -26,6 +26,8 @@ if (typeof document !== 'undefined') {
   let captionDraft = {catalogueId:null,subtitleId:null,enabled:null,delay:null}, dirtyCaption = false, captionApply = null;
   let dismissedBackendError = null, observedBackendError = null, visibleError = '', focusTicket = null, interaction = 0;
   let sheetPanel = null, returnFocus = null, confirmation = null, startTicket = null;
+  const KIND_LABEL = {upload:'Archivo local',addon:'Stremio'};
+  const ADDON_LOADING = 'Buscando subtítulos de Stremio…', ADDON_ERROR = 'No se pudieron buscar subtítulos de Stremio. Las pistas y los archivos locales siguen disponibles.';
   const errorIdentity = s => s.action_error ? `${s.action_error_revision || 0}:${s.action_error}` : null;
   const busy = () => inFlight || !!state.command_pending || !!state.pending || ['preparing','buffering','loading'].includes(state.phase);
   const active = () => online && ['playing','paused'].includes(state.phase) && !busy();
@@ -54,7 +56,7 @@ if (typeof document !== 'undefined') {
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(),6000);
     try {
       const response = await fetch(path,{...options,signal:controller.signal}), body = await response.json();
-      if (!response.ok) throw Error(typeof body.message === 'string' ? body.message : 'No se pudo completar la acción. Revisá el estado y reintentá.');
+      if (!response.ok) throw Object.assign(Error(typeof body.message === 'string' ? body.message : 'No se pudo completar la acción. Revisá el estado y reintentá.'),{code:body.code});
       return body;
     } finally { clearTimeout(timeout); }
   }
@@ -93,9 +95,10 @@ if (typeof document !== 'undefined') {
     }
     render(state);
   }
+  const addonRevision = catalogue => catalogue?.addon?.revision ?? 0;
   function acceptCatalogue(catalogue) {
     if (!catalogue || catalogue.source_id !== selectedId) return;
-    if (setup.catalogue?.id === catalogue.id && catalogue.entries.length < setup.catalogue.entries.length) return;
+    if (setup.catalogue?.id === catalogue.id && (catalogue.entries.length < setup.catalogue.entries.length || addonRevision(catalogue) < addonRevision(setup.catalogue))) return;
     if (setup.catalogue?.id !== catalogue.id) { setup.subtitleId = null; setup.upload++; setup.uploading = false; setup.uploadMessage = ''; startTicket = null; }
     setup.catalogue = catalogue;
   }
@@ -106,7 +109,7 @@ if (typeof document !== 'undefined') {
       const none = document.createElement('option'); none.value = ''; none.textContent = 'Sin subtítulos'; element.append(none);
       for (const entry of catalogue?.entries || []) {
         const option = document.createElement('option'); option.value = entry.id; option.disabled = entry.supported !== true;
-        option.textContent = [entry.label || 'Pista sin nombre',entry.language,entry.kind === 'upload' ? 'Archivo local' : null,entry.supported !== true ? entry.reason || 'Formato no compatible' : null].filter(Boolean).join(' · ');
+        option.textContent = [entry.label || 'Pista sin nombre',entry.language,KIND_LABEL[entry.kind],entry.supported !== true ? entry.reason || 'Formato no compatible' : null].filter(Boolean).join(' · ');
         element.append(option);
       }
     }
@@ -130,7 +133,7 @@ if (typeof document !== 'undefined') {
     subtitleOptions($('setup-subtitle'),catalogue,setup.subtitleId);
     $('setup-subtitle').disabled = !online || !catalogue || setup.loading;
     $('refresh-catalogue').disabled = !online || !selected || setup.loading;
-    $('subtitle-file').disabled = !online || !catalogue || setup.loading || setup.uploading;
+    $('subtitle-file').disabled = !online || !catalogue || setup.loading || setup.uploading || setupAddon.fetching;
     $('catalogue-status').textContent = setup.error || (setup.loading ? 'Consultando pistas de esta película…' : catalogue ? catalogue.entries?.length ? 'Elegí cualquier idioma o continuá sin subtítulos. Las pistas de imagen no son compatibles.' : 'No hay pistas de texto. Podés subir un archivo o continuar sin subtítulos.' : 'Elegí una película para consultar sus pistas.');
     $('upload-status').textContent = setup.uploading ? 'Validando y subiendo el archivo…' : setup.uploadMessage;
     $('upload-action').textContent = setup.uploading ? 'Subiendo archivo…' : 'Subir archivo SRT / VTT';
@@ -139,9 +142,10 @@ if (typeof document !== 'undefined') {
     $('setup-summary').textContent = selected?.title || '';
     $('setup-choice').textContent = entry ? [entry.label,entry.language].filter(Boolean).join(' · ') : 'Sin subtítulos';
     const duplicate = samePlan(selectedId,catalogue?.id,setup.subtitleId);
-    $('start').disabled = !canStart() || !selected || !catalogue || setup.loading || setup.uploading || !!setup.error || duplicate || !!(setup.subtitleId && entry?.supported !== true);
+    $('start').disabled = !canStart() || !selected || !catalogue || setup.loading || setup.uploading || setupAddon.fetching || !!setup.error || duplicate || !!(setup.subtitleId && entry?.supported !== true);
     $('start').textContent = duplicate ? 'Ya está en la TV' : replacing ? 'Cambiar película en la TV' : 'Iniciar en la TV';
     $('setup').hidden = !$('remote').hidden && !view.setup;
+    setupAddon.render();
     for (const id of ['change-source','choose-film','choose-device']) { $(id).setAttribute('aria-controls','setup'); $(id).setAttribute('aria-expanded',String(!$('setup').hidden)); }
   }
   $('setup-subtitle').onchange = () => {
@@ -175,6 +179,132 @@ if (typeof document !== 'undefined') {
     } catch (e) { if (current()) setup.uploadMessage = e.message; }
     finally { if (current()) { setup.uploading = false; $('subtitle-file').value = ''; render(state); } }
   };
+  function addonPanel(prefix,ctx) {
+    const part = name => $(`${prefix}-${name}`);
+    const panel = {listing:null,listingKey:'',pulling:'',pullFailed:'',pullTicket:0,language:'',offerId:'',correction:false,fetching:false,looking:false,message:null,lastHint:null,unreadable:new Set()};
+    const keyOf = catalogue => catalogue?.addon ? `${catalogue.id}:${catalogue.addon.revision}` : '';
+    const say = (catalogue,text) => { panel.message = text ? {text,key:keyOf(catalogue)} : null; };
+    const failure = e => e.name === 'AbortError' ? 'La consulta tardó demasiado. Reintentá.' : e.message;
+    const offersOf = () => { const catalogue = ctx.catalogue(); return catalogue?.addon && panel.listingKey === keyOf(catalogue) && panel.listing?.revision === catalogue.addon.revision ? panel.listing : null; };
+    async function pull(catalogue) {
+      const key = keyOf(catalogue), ticket = ++panel.pullTicket; panel.pulling = key;
+      try {
+        const listing = await post('subtitle_offers',{source_id:catalogue.source_id,catalogue_id:catalogue.id});
+        if (ticket !== panel.pullTicket) return;
+        panel.listing = listing; panel.listingKey = key; panel.pullFailed = '';
+      } catch (_) { if (ticket === panel.pullTicket) panel.pullFailed = key; }
+      finally { if (ticket === panel.pullTicket) { panel.pulling = ''; render(state); } }
+    }
+    function fill(select,pairs,value) {
+      const signature = JSON.stringify(pairs);
+      if (select.pairsSignature !== signature) {
+        select.pairsSignature = signature; select.replaceChildren();
+        for (const [id,text] of pairs) { const option = document.createElement('option'); option.value = id; option.textContent = text; select.append(option); }
+      }
+      select.value = value;
+    }
+    function alternatives(list,enabled) {
+      const container = part('alternatives'), signature = JSON.stringify(list);
+      if (container.listSignature !== signature) {
+        container.listSignature = signature; container.replaceChildren(); container.buttons = [];
+        for (const candidate of list.slice(0,4)) {
+          const button = document.createElement('button'); button.type = 'button';
+          button.textContent = candidate.year ? `${candidate.title} (${candidate.year})` : candidate.title;
+          button.onclick = () => { if (!button.disabled) lookup(`${candidate.id} ${candidate.title} ${candidate.year ?? ''}`.trim().slice(0,200)); };
+          container.append(button); container.buttons.push(button);
+        }
+      }
+      for (const button of container.buttons) button.disabled = !enabled;
+    }
+    function show() {
+      const catalogue = ctx.catalogue(), addon = catalogue?.addon;
+      $(prefix).hidden = !addon || addon.state === 'off'; if ($(prefix).hidden) return;
+      const key = keyOf(catalogue), listable = addon.state === 'ready' || addon.state === 'unidentified';
+      if (listable && ctx.shown() && panel.listingKey !== key && panel.pulling !== key && panel.pullFailed !== key) pull(catalogue);
+      const listing = listable ? offersOf() : null, offers = listing?.offers || [], enabled = ctx.canAct() && !panel.fetching && !panel.looking;
+      const pullFailed = listable && panel.pullFailed === key, unidentified = addon.state === 'unidentified';
+      part('match').hidden = !addon.match;
+      part('match').textContent = addon.match ? addon.match.confidence === 'doubtful' ? `Coincidencia dudosa: ¿${addon.match.label}?` : `Coincidencia: ${addon.match.label}` : '';
+      const languages = [];
+      for (const offer of offers) { const found = languages.find(l => l.code === offer.language); if (found) found.count++; else languages.push({code:offer.language,name:offer.language_name,count:1}); }
+      if (!languages.some(l => l.code === panel.language)) panel.language = languages[0]?.code || '';
+      const versions = offers.filter(o => o.language === panel.language);
+      if (!versions.some(o => o.id === panel.offerId)) panel.offerId = versions[0]?.id || '';
+      const picking = addon.state === 'ready' && versions.length > 0;
+      part('picker').hidden = !picking;
+      fill(part('language'),languages.map(l => [l.code,`${l.name} · ${l.count}`]),panel.language);
+      fill(part('version'),versions.map(o => [o.id,[o.label,o.note].filter(Boolean).join(' · ') + (panel.unreadable.has(o.id) ? ' · no se pudo leer' : '')]),panel.offerId);
+      part('language').disabled = part('version').disabled = !enabled;
+      part('use').hidden = !picking; part('use').disabled = !enabled || !panel.offerId; part('use').textContent = panel.fetching ? 'Descargando…' : 'Usar este subtítulo';
+      part('retry').hidden = !(addon.state === 'error' || pullFailed); part('retry').disabled = !enabled;
+      part('wrong').hidden = addon.state !== 'ready'; part('wrong').disabled = !enabled;
+      const open = unidentified || addon.state === 'ready' && panel.correction;
+      part('wrong').setAttribute('aria-expanded',String(open)); part('correction').hidden = !open;
+      alternatives(listing?.alternatives || [],enabled);
+      part('hint').disabled = part('search').disabled = !enabled;
+      const status = panel.message?.key === key ? panel.message.text : pullFailed ? ADDON_ERROR : addon.state === 'ready' ? addon.count === 0 ? `Stremio no tiene subtítulos para ${addon.match?.label || 'esta película'}.` : listing ? '' : ADDON_LOADING : addon.message || '';
+      part('status').textContent = status; part('status').hidden = !status;
+    }
+    async function lookup(hint) {
+      const catalogue = ctx.catalogue();
+      if (!catalogue || panel.fetching || panel.looking || !ctx.canAct()) return;
+      const current = ctx.guard(false); panel.looking = true; panel.lastHint = hint; say(catalogue,''); render(state);
+      try {
+        const result = await post('subtitle_lookup',{source_id:catalogue.source_id,catalogue_id:catalogue.id,hint});
+        if (!current()) return;
+        ctx.accept(result.catalogue,null); panel.correction = false; part('hint').value = '';
+      } catch (e) { if (current()) say(ctx.catalogue(),failure(e)); }
+      finally { panel.looking = false; render(state); }
+    }
+    async function use() {
+      const catalogue = ctx.catalogue(), offer = offersOf()?.offers.find(o => o.id === panel.offerId);
+      if (!catalogue || !offer || panel.fetching || panel.looking || !ctx.canAct()) return;
+      const current = ctx.guard(true); panel.fetching = true; say(catalogue,''); render(state);
+      try {
+        const result = await post('subtitle_fetch',{source_id:catalogue.source_id,catalogue_id:catalogue.id,offer_id:offer.id});
+        if (!current()) return;
+        if (result.catalogue?.id !== catalogue.id || result.catalogue?.source_id !== catalogue.source_id || result.entry?.supported !== true || !result.catalogue.entries?.some(e => e.id === result.entry.id && e.supported === true)) throw Error('La lista de pistas cambió. Actualizala y probá otra vez.');
+        ctx.accept(result.catalogue,result.entry); say(ctx.catalogue(),`Subtítulo listo: ${result.entry.label}. ${ctx.when}`);
+      } catch (e) { if (current()) { if (e.code === 'invalid_subtitle') panel.unreadable.add(offer.id); say(ctx.catalogue(),failure(e)); } }
+      finally { panel.fetching = false; render(state); }
+    }
+    part('language').onchange = () => { if (!part('language').disabled) { panel.language = part('language').value; panel.offerId = ''; render(state); } };
+    part('version').onchange = () => { if (!part('version').disabled) { panel.offerId = part('version').value; render(state); } };
+    part('use').onclick = use;
+    part('retry').onclick = () => { if (!part('retry').disabled) lookup(panel.lastHint); };
+    part('wrong').onclick = () => { if (part('wrong').disabled) return; panel.correction = !panel.correction; render(state); if (panel.correction) part('hint').focus(); };
+    part('form').onsubmit = e => {
+      e.preventDefault(); const hint = part('hint').value.trim();
+      if (part('search').disabled || !hint) return;
+      if (hint.length > 200) { say(ctx.catalogue(),'Escribí un título de hasta 200 caracteres.'); render(state); return; }
+      lookup(hint);
+    };
+    return {render:show,get fetching() { return panel.fetching; }};
+  }
+  const setupAddon = addonPanel('setup-addon',{
+    when:'Se usará solo al iniciar.',
+    catalogue:() => setup.catalogue,
+    shown:() => !$('setup').hidden && !$('setup-subtitles').hidden,
+    canAct:() => online && !setup.loading && !setup.uploading && !!setup.catalogue,
+    guard:strong => {
+      const epoch = setup.epoch, source = selectedId, id = setup.catalogue?.id, request = setup.request, ticket = strong ? ++setup.upload : setup.upload;
+      return () => epoch === setup.epoch && source === selectedId && id === setup.catalogue?.id && request === setup.request && (!strong || ticket === setup.upload);
+    },
+    accept:(catalogue,entry) => { acceptCatalogue(catalogue); if (entry) { startTicket = null; setup.subtitleId = entry.id; } }
+  });
+  const activeAddon = addonPanel('active-addon',{
+    when:'Se usará solo al aplicar.',
+    catalogue:() => state.active_catalogue,
+    shown:() => !$('subtitles-panel').hidden,
+    canAct:() => online && !!state.playback_id && !captionApply && state.active_catalogue?.id === captionDraft.catalogueId,
+    guard:() => { const identity = playingSource, id = state.active_catalogue?.id; return () => identity === playingSource && id === state.active_catalogue?.id; },
+    accept:(catalogue,entry) => {
+      const current = state.active_catalogue;
+      if (!catalogue || catalogue.id !== current?.id || catalogue.entries.length < current.entries.length || addonRevision(catalogue) < addonRevision(current)) return;
+      state = {...state,active_catalogue:catalogue};
+      if (entry) { dirtyCaption = true; captionDraft.subtitleId = entry.id; captionDraft.enabled = true; }
+    }
+  });
   function renderSources() {
     const sources = state.sources || [], signature = JSON.stringify(sources);
     if (selectedId && !sources.some(s => s.id === selectedId)) abandonSetup();
@@ -302,6 +432,7 @@ if (typeof document !== 'undefined') {
     $('subtitles-panel').hidden = !view.captions || !hasCaptions;
     $('open-subtitles').disabled = !hasCaptions;
     $('open-subtitles').setAttribute('aria-controls','subtitles-panel'); $('open-subtitles').setAttribute('aria-expanded',String(!$('subtitles-panel').hidden));
+    activeAddon.render();
     $('active-movie').textContent = s.title || 'Película actual';
     subtitleOptions($('active-subtitle'),s.active_catalogue,captionDraft.subtitleId);
     const captionUsable = usable && !!s.playback_id && !!s.active_catalogue && s.active_catalogue.id === captionDraft.catalogueId;

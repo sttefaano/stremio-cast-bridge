@@ -262,6 +262,19 @@ def probe(source, cancelled=None):
         raise BridgeError('No se pudo analizar la fuente en 30 segundos; abrila en Stremio y reintentá.') from None
 
 
+def subtitle_ids(data, *strings, nullable=()):
+    required = {'source_id', 'catalogue_id', *strings}
+    if (set(data) != required | set(nullable) or not all(isinstance(data[k], str) for k in required)
+            or not all(data[k] is None or isinstance(data[k], str) for k in nullable)):
+        raise BridgeError('Solicitud de subtítulos inválida.')
+
+
+def lookup_hint(hint):
+    if hint is not None and (len(hint) > 200 or any(unicodedata.category(c) == 'Cc' for c in hint)):
+        raise BridgeError('Título o ID inválido.')
+    return hint and hint.strip() or None
+
+
 class Bridge:
     """A single mutation worker; status reads never wait for probe or discovery."""
     def __init__(self, args, lan_ip=None):
@@ -420,10 +433,7 @@ class Bridge:
     def _subtitle_target(self, data, *strings, nullable=()):
         if self.quit.is_set():
             raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
-        required = {'source_id', 'catalogue_id', *strings}
-        if (set(data) != required | set(nullable) or not all(isinstance(data[k], str) for k in required)
-                or not all(data[k] is None or isinstance(data[k], str) for k in nullable)):
-            raise BridgeError('Solicitud de subtítulos inválida.')
+        subtitle_ids(data, *strings, nullable=nullable)
         return self._retained(data['catalogue_id'])
 
     def subtitle_upload(self, data):
@@ -435,10 +445,7 @@ class Bridge:
 
     def subtitle_lookup(self, data):
         retained = self._subtitle_target(data, nullable=('hint',))
-        hint = data['hint']
-        if hint is not None and (len(hint) > 200 or any(unicodedata.category(c) == 'Cc' for c in hint)):
-            raise BridgeError('Título o ID inválido.')
-        return self.catalogue.lookup(data['source_id'], data['catalogue_id'], hint and hint.strip() or None, retained)
+        return self.catalogue.lookup(data['source_id'], data['catalogue_id'], lookup_hint(data['hint']), retained)
 
     def subtitle_offers(self, data):
         retained = self._subtitle_target(data)

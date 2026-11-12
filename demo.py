@@ -7,8 +7,23 @@ import threading
 from types import SimpleNamespace
 from http.server import ThreadingHTTPServer
 
-from bridge import BridgeError, ControlHandler, public_status, validate_stop_identity
-from media import normalize_subtitles, validate_choice, upload_label, MAX_STORAGE
+from addons import (FETCH_FAILED, LISTING_ERROR, UNIDENTIFIED, Candidate, Listing, Match, MetaId, match_label,
+                    parse_offers, parse_release, subtitle_language)
+from bridge import BridgeError, ControlHandler, lookup_hint, public_status, subtitle_ids, validate_stop_identity
+from media import MediaError, normalize_subtitles, validate_choice, upload_label, MAX_STORAGE
+
+DEMO_OFFERS = dict(subtitles=[
+    dict(lang=code, url=f'https://subs5.strem.io/demo/{n}', subtitleFileName=name, releaseGroup=group)
+    for n, (code, name, group) in enumerate([
+        ('spl', 'La.noche.del.faro.2026.WEB-DL.EJEMPLO.srt', 'EJEMPLO'),
+        ('spa', 'La.noche.del.faro.2026.BluRay.srt', 'BluRay'),
+        ('spa', 'La.noche.del.faro.2026.1080p.WEB-DL.SDH.srt', 'SDH'),
+        ('eng', 'The.Lighthouse.Night.2026.1080p.WEB-DL.srt', 'WEB'),
+        ('eng', 'The.Lighthouse.Night.2026.720p.HDTV.srt', 'HDTV'),
+        ('eng', 'The.Lighthouse.Night.2026.WEB-DL.SDH.srt', 'SDH'),
+        ('pob', 'A.Noite.do.Farol.2026.WEB-DL.srt', 'WEB'),
+        ('ita', 'La.notte.del.faro.2026.CORRUPTO.srt', 'CORRUPTO')])])
+DEMO_VTT = 'WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nSubtítulo de ejemplo\n\n00:00:05.000 --> 00:00:08.000\nOtra línea de ejemplo\n'
 
 
 class DemoBridge:
@@ -19,6 +34,8 @@ class DemoBridge:
         self.catalogues = {}
         self.uploads = {}
         self.upload_storage = 0
+        self.listings = {}
+        self.fetched = {}
         self.devices = [dict(id='demo-tv-a', name='Sala', host='192.0.2.2', model='Chromecast'),
                         dict(id='demo-tv-b', name='Sala', host='192.0.2.3', model='Google TV')]
         self.sources = [dict(id='demo-a', title='La noche del faro · ejemplo sintético',
@@ -60,11 +77,15 @@ class DemoBridge:
                     for key in [key for key in self.uploads if key[0] == evicted]:
                         self.upload_storage -= len(key[1])
                         del self.uploads[key]
+                    self.listings.pop(evicted, None)
+                    self.fetched = {key: entry for key, entry in self.fetched.items() if key[0] != evicted}
                 identity = secrets.token_hex(12)
                 entries = [dict(id=identity + '-eng', kind='embedded', label='English · ejemplo', language='eng', supported=True, reason=None),
                            dict(id=identity + '-jpn', kind='embedded', label='日本語 · ejemplo', language='jpn', supported=True, reason=None),
                            dict(id=identity + '-pgs', kind='embedded', label='Imagen PGS · ejemplo', language='fra', supported=False, reason='Subtítulos de imagen no compatibles.')]
                 catalogue = dict(id=identity, source_id=source['id'], duration=5400, entries=entries)
+                self.listings[identity] = self._listing(source, None, 1)
+                catalogue['addon'] = self.listings[identity].summary()
                 self.catalogues[identity] = catalogue
                 snapshot = dict(state='ready', catalogue=catalogue)
                 self.state['catalogues'][source['id']] = snapshot
@@ -97,6 +118,75 @@ class DemoBridge:
                 catalogue['entries'].append(entry)
             if self.state['active_catalogue'] and self.state['active_catalogue']['id'] == catalogue['id']:
                 self.state['active_catalogue'] = catalogue
+            return copy.deepcopy(dict(entry=entry, catalogue=catalogue))
+
+    def _listing(self, source, hint, revision):
+        if hint == 'error':
+            return Listing('error', revision, message=LISTING_ERROR)
+        others = (Candidate('tt0000002', 'movie', 'Otra película de ejemplo', 2024),
+                  Candidate('tt0000003', 'movie', 'Un tercer ejemplo', None))
+        if hint == 'nada':
+            return Listing('unidentified', revision, alternatives=others, message=UNIDENTIFIED)
+        guess = parse_release(hint or source['filename'])
+        meta = MetaId('tt0000001')
+        confidence = 'manual' if hint else 'doubtful' if source['id'] == 'demo-b' else 'exact'
+        match = Match(meta, match_label(guess.title or source['title'], guess.year, meta), confidence)
+        return Listing('ready', revision, match, others, parse_offers(DEMO_OFFERS, source['filename']))
+
+    def _target(self, data):
+        catalogue = self.catalogues.get(data['catalogue_id'])
+        if not catalogue or catalogue['source_id'] != data['source_id']:
+            raise BridgeError('El catálogo cambió.', 409, 'stale_catalogue')
+        latest = self.state['catalogues'].get(data['source_id'], {}).get('catalogue', {}).get('id')
+        active = (self.state['active_catalogue'] or {}).get('id')
+        if catalogue['id'] not in (latest, active):
+            raise BridgeError('El catálogo cambió.', 409, 'stale_catalogue')
+        return catalogue
+
+    def _publish(self, catalogue, listing=None):
+        if listing:
+            self.listings[catalogue['id']] = listing
+            catalogue['addon'] = listing.summary()
+        if self.state['active_catalogue'] and self.state['active_catalogue']['id'] == catalogue['id']:
+            self.state['active_catalogue'] = catalogue
+
+    def subtitle_lookup(self, data):
+        subtitle_ids(data, nullable=('hint',))
+        hint = lookup_hint(data['hint'])
+        with self.lock:
+            catalogue = self._target(data)
+            source = next(v for v in self.sources if v['id'] == catalogue['source_id'])
+            self._publish(catalogue, self._listing(source, hint, self.listings[catalogue['id']].revision + 1))
+            return copy.deepcopy(dict(catalogue=catalogue))
+
+    def subtitle_offers(self, data):
+        subtitle_ids(data)
+        with self.lock:
+            return self.listings[self._target(data)['id']].public()
+
+    def subtitle_fetch(self, data):
+        subtitle_ids(data, 'offer_id')
+        with self.lock:
+            catalogue = self._target(data)
+            offer = next((o for o in self.listings[catalogue['id']].offers if o.id == data['offer_id']), None)
+            if offer is None:
+                raise BridgeError('La lista de subtítulos cambió. Volvé a elegir.', 409, 'stale_offer')
+            existing = self.fetched.get((catalogue['id'], offer.id))
+            if existing:
+                return copy.deepcopy(dict(entry=existing, catalogue=catalogue))
+        try:
+            normalize_subtitles('vtt', 'esto no es un subtítulo' if 'CORRUPTO' in offer.label else DEMO_VTT, lenient=True)
+        except MediaError:
+            raise BridgeError(FETCH_FAILED, 422, 'invalid_subtitle') from None
+        with self.lock:
+            catalogue = self._target(data)
+            entry = self.fetched.get((catalogue['id'], offer.id))
+            if entry is None:
+                entry = dict(id=secrets.token_hex(12), kind='addon', label=offer.label,
+                             language=subtitle_language(offer.language), supported=True, reason=None)
+                self.fetched[(catalogue['id'], offer.id)] = entry
+                catalogue['entries'].append(entry)
+            self._publish(catalogue)
             return copy.deepcopy(dict(entry=entry, catalogue=catalogue))
 
     def _choice(self, action, data):
