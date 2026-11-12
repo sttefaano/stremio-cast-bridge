@@ -1,0 +1,75 @@
+"""Synthetic plans for the existing worker and receiver test seams."""
+import queue
+import threading
+from pathlib import Path
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
+
+from media import Analysis, Catalogue, PlaybackPlan, SetupCatalogue, Subtitle
+
+
+def install_media(bridge, source=None, duration=120, delay=500):
+    source = source or dict(id='fixture-source', url='offline-fixture', title='Fixture')
+    bridge.device_lock, bridge.source_lock = threading.Lock(), threading.Lock()
+    bridge.device_snapshot = dict(devices=[], device_discovery='ready', device_error=None)
+    bridge.source_snapshot = dict(sources=[], source_discovery='ready', source_error=None)
+    bridge.device_wake, bridge.source_wake = threading.Event(), threading.Event()
+    bridge.metadata_workers = []
+    bridge.quit = getattr(bridge, 'quit', threading.Event())
+    bridge.jobs = getattr(bridge, 'jobs', queue.Queue(maxsize=16))
+    bridge.devices = getattr(bridge, 'devices', {})
+    selected = bridge.state.get('selected_device')
+    if selected:
+        bridge.devices[selected['id']] = SimpleNamespace(uuid=selected['id'], friendly_name='Fixture',
+            host='192.0.2.2', model_name='Chromecast', port=8009, cast_type='cast')
+    with patch('media.threading.Thread'):
+        bridge.catalogue = SetupCatalogue(Mock(), Path('unused-synthetic-upload-root'))
+    bridge.catalogue.worker.is_alive.return_value = False
+    plan = seed_plan(bridge, source, duration, delay)
+    bridge.active_plan = plan
+    bridge.catalogue.pin(plan.catalogue.id)
+    bridge.sources = [source]
+    bridge.state.update(playback_id='fixture-playback', subtitle_choice=plan.choice(),
+                        active_catalogue=plan.catalogue.public(), subtitle_delay_ms=delay)
+    return plan
+
+
+def seed_plan(bridge, source, duration=120, delay=0):
+    entry = Subtitle('text-' + source['id'], 'embedded', 'English', 'eng', index=2)
+    catalogue = Catalogue('catalogue-' + source['id'], dict(source), Analysis(0, 1, duration, (entry,)))
+    bridge.catalogue.records[catalogue.id] = catalogue
+    bridge.catalogue.snapshots[source['id']] = dict(state='ready', catalogue=catalogue.public())
+    return PlaybackPlan(catalogue, entry, delay, True)
+
+
+def start_data(bridge, source=None, delay=0, subtitle=True):
+    source = source or bridge.sources[0]
+    catalogue_id = 'catalogue-' + source['id']
+    if catalogue_id not in bridge.catalogue.records:
+        seed_plan(bridge, source)
+    return dict(device_id=bridge.state['selected_device']['id'], device_revision=bridge.state['device_revision'],
+                source_id=source['id'], catalogue_id=catalogue_id,
+                subtitle_id='text-' + source['id'] if subtitle else None, delay_ms=delay)
+
+
+def apply_data(bridge, enabled=True, delay=None, subtitle_id=...):
+    choice = bridge.active_plan.choice()
+    return dict(device_id=bridge.state['selected_device']['id'], device_revision=bridge.state['device_revision'],
+                playback_id=bridge.state['playback_id'], catalogue_id=choice['catalogue_id'],
+                subtitle_id=choice['subtitle_id'] if subtitle_id is ... else subtitle_id,
+                enabled=enabled, delay_ms=choice['delay_ms'] if delay is None else delay)
+
+
+def demo_start(bridge, source_id='demo-a', subtitle=True, delay=0):
+    _, response = bridge.request_catalogue(dict(source_id=source_id, refresh=False))
+    catalogue = response['catalogue']
+    return dict(device_id=bridge.state['selected_device']['id'], device_revision=bridge.state['device_revision'],
+                source_id=source_id, catalogue_id=catalogue['id'],
+                subtitle_id=catalogue['entries'][0]['id'] if subtitle else None, delay_ms=delay)
+
+
+def demo_apply(bridge, enabled=True, delay=None):
+    choice = bridge.status()['subtitle_choice']
+    return dict(device_id=bridge.state['selected_device']['id'], device_revision=bridge.state['device_revision'],
+                playback_id=bridge.state['playback_id'], catalogue_id=choice['catalogue_id'],
+                subtitle_id=choice['subtitle_id'], enabled=enabled, delay_ms=choice['delay_ms'] if delay is None else delay)

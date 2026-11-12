@@ -1,4 +1,6 @@
 import tempfile
+import io
+import json
 import unittest
 from pathlib import Path
 import subprocess
@@ -7,8 +9,14 @@ import re
 import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from uuid import UUID
+
+from pychromecast import Chromecast
+from pychromecast.models import CastInfo
 
 from bridge import main, Bridge, safe_media_path, subtitle_filter, FFMPEG, playback_position, public_status, ffmpeg_command, probe
+from media import Catalogue, PlaybackPlan
+from backend_fixtures import install_media, apply_data
 
 
 class RestartPolicyTest(unittest.TestCase):
@@ -18,9 +26,12 @@ class RestartPolicyTest(unittest.TestCase):
         bridge.lan_ip = '192.0.2.1'
         bridge.sessions = root
         bridge.state_lock = threading.Lock()
-        bridge.state = dict(subtitle_delay_ms=500, absolute_time=65, playlist_duration=80)
+        bridge.state = dict(subtitle_delay_ms=500, absolute_time=65, playlist_duration=80, selected_device={'id':'fixture-device','available':True}, device_revision=1)
+        bridge.selected_device_id = 'fixture-device'
+        bridge.media_server = None
         bridge.selected = dict(url='offline-fixture', title='Fixture')
-        bridge.source_delays = {'offline-fixture': 500}
+        install_media(bridge)
+        bridge.selected = bridge.active_plan.catalogue.source
         bridge.quit = threading.Event()
         bridge.browser = bridge.process = None
         bridge.session = root / 'old'
@@ -45,7 +56,7 @@ class RestartPolicyTest(unittest.TestCase):
             with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
                  patch('bridge.subprocess.Popen', return_value=producer) as launch, \
                  patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
-                bridge.mutate('seek', {'position': 60})
+                bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
                 bridge.cast.media_controller.stop.assert_not_called()
                 bridge.cast.media_controller.seek.assert_not_called()
                 command = launch.call_args.args[0]
@@ -53,7 +64,7 @@ class RestartPolicyTest(unittest.TestCase):
                 self.assertEqual(command[command.index('-ss') + 1], '60.0')
                 self.assertEqual(command[command.index('-t') + 1], '30.0')
                 self.assertTrue(bridge.status()['pending'])
-                self.assertEqual(bridge.source_delays['offline-fixture'], 500)
+                self.assertEqual(bridge.active_plan.delay_ms, 500)
                 (bridge.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
                 (bridge.session / 'video_vtt.m3u8').touch()
                 (bridge.session / 'master.m3u8').touch()
@@ -99,14 +110,18 @@ class RestartPolicyTest(unittest.TestCase):
                 with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
                      patch('bridge.subprocess.Popen', return_value=producer), \
                      patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
-                    bridge.mutate('seek', {'position': 999})
+                    bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 999})
                     self.assertAlmostEqual(bridge.status()['origin'], expected)
                     bridge.cast.media_controller.stop.assert_called_once()
                     bridge.update(absolute_time=65)
-                    bridge.mutate('delay', {'delay_ms': 500})
+                    bridge.loaded = True
+                    bridge.media_url = 'http://synthetic-rebuilt/master.m3u8'
+                    bridge.cast.media_controller.status.content_id = bridge.media_url
+                    bridge.cast.media_controller.status.player_state = 'PAUSED'
+                    bridge.mutate('subtitles', apply_data(bridge, delay=1000))
                     self.assertEqual(bridge.status()['origin'], 65)
                     self.assertTrue(bridge.paused)
-                    self.assertEqual(bridge.source_delays['offline-fixture'], 500)
+                    self.assertEqual(bridge.active_plan.delay_ms, 1000)
 
 
 class ReceiverOwnershipTest(unittest.TestCase):
@@ -173,44 +188,43 @@ class ReceiverOwnershipTest(unittest.TestCase):
 
 
 class StartupCleanupTest(unittest.TestCase):
-    def run_failure(self, bind_failure=None, start_failure=None):
-        bridge = Mock(lan_ip='192.0.2.1')
-        media, control = Mock(), Mock()
-        servers = [media, control]
-        if bind_failure is not None:
-            servers[bind_failure] = OSError('occupied')
-        threads = [Mock(), Mock()]
-        if start_failure is not None:
-            threads[start_failure].start.side_effect = RuntimeError('thread failed')
-        with patch('bridge.Bridge', return_value=bridge), \
-             patch('bridge.lan_address', return_value='192.0.2.1'), \
-             patch('bridge.ThreadingHTTPServer', side_effect=servers), \
-             patch('bridge.threading.Thread', side_effect=threads), \
-             patch('builtins.print'):
-            self.assertEqual(main(['--device-host', '192.0.2.2']), 1)
-        bridge.close.assert_called_once()
-        return media, control
+    def test_discovery_lifecycle_always_releases_metadata_resources(self):
+        from bridge import arguments
+        for failure in (None, 'service', 'wait'):
+            with self.subTest(failure=failure):
+                service, zconf = Mock(), Mock()
+                with patch('bridge.threading.Thread'), patch('bridge.Path.mkdir'):
+                    b = Bridge(arguments([]))
+                with patch('zeroconf.ServiceBrowser', side_effect=RuntimeError('synthetic failure') if failure == 'service' else None, return_value=service), \
+                     patch('zeroconf.Zeroconf', return_value=zconf), \
+                     patch('bridge.time.sleep', side_effect=RuntimeError('synthetic failure') if failure == 'wait' else None), \
+                     patch('socket.socket', side_effect=AssertionError('network forbidden')):
+                    if failure:
+                        from bridge import BridgeError
+                        with self.assertRaises(BridgeError):
+                            b.mutate('discover_devices', {})
+                        self.assertEqual(b.status()['device_discovery'], 'error')
+                    else:
+                        b.mutate('discover_devices', {})
+                        self.assertEqual(b.status()['devices'], [])
+                zconf.close.assert_called_once()
+                self.assertEqual(service.cancel.call_count, int(failure != 'service'))
 
-    def test_second_bind_failure_closes_unused_media_without_shutdown(self):
-        media, control = self.run_failure(bind_failure=1)
-        media.shutdown.assert_not_called()
-        media.server_close.assert_called_once()
-        control.shutdown.assert_not_called()
-
-    def test_first_bind_failure_has_no_server_to_shutdown(self):
-        media, control = self.run_failure(bind_failure=0)
-        for server in (media, control):
-            server.shutdown.assert_not_called()
-            server.server_close.assert_not_called()
-
-    def test_thread_start_failure_only_shuts_down_started_servers(self):
-        for failed in (0, 1):
-            with self.subTest(failed=failed):
-                media, control = self.run_failure(start_failure=failed)
-                self.assertEqual(media.shutdown.call_count, int(failed == 1))
-                control.shutdown.assert_not_called()
-                media.server_close.assert_called_once()
-                control.server_close.assert_called_once()
+    def test_control_bind_and_thread_failures_close_only_owned_servers(self):
+        for failure in ('bind', 'thread', None):
+            with self.subTest(failure=failure):
+                b, server, thread = Mock(), Mock(), Mock()
+                b.quit.wait.return_value = True
+                if failure == 'thread':
+                    thread.start.side_effect = RuntimeError('synthetic failure')
+                with patch('bridge.Bridge', return_value=b), \
+                     patch('bridge.ThreadingHTTPServer', side_effect=OSError('occupied') if failure == 'bind' else None, return_value=server), \
+                     patch('bridge.threading.Thread', return_value=thread), patch('bridge.signal.signal'), \
+                     patch('builtins.print'), patch('socket.socket', side_effect=AssertionError('network forbidden')):
+                    self.assertEqual(main([]), 0 if failure is None else 1)
+                b.close.assert_called_once()
+                self.assertEqual(server.shutdown.call_count, int(failure is None))
+                self.assertEqual(server.server_close.call_count, int(failure != 'bind'))
 
 
 class MediaPathsTest(unittest.TestCase):
@@ -232,6 +246,68 @@ class MediaPathsTest(unittest.TestCase):
 
 
 class SubtitleTimingTest(unittest.TestCase):
+    def test_mkv_input_seek_clips_preroll_and_preserves_shifted_cue_ends(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            root = Path(folder)
+            srt = root / 'boundary.srt'
+            srt.write_text(
+                '1\n00:00:05,000 --> 00:00:09,000\nPast\n\n'
+                '2\n00:00:09,000 --> 00:00:13,000\nCrossing\n\n'
+                '3\n00:00:10,200 --> 00:00:10,400\nEarly\n\n'
+                '4\n00:00:11,000 --> 00:00:15,000\nFuture\n\n'
+                '5\n00:00:17,000 --> 00:00:21,000\nLater\n')
+            source = root / 'boundary.mkv'
+            fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
+                'color=c=black:s=160x90:r=24:d=24', '-f', 'lavfi', '-i',
+                'anullsrc=r=48000:cl=stereo', '-i', str(srt), '-map', '0:v',
+                '-map', '1:a', '-map', '2:s', '-t', '24', '-c:v', 'libx264',
+                '-preset', 'ultrafast', '-c:a', 'aac', '-c:s', 'srt',
+                '-metadata:s:s:0', 'language=spa', str(source)],
+                capture_output=True, timeout=15)
+            self.assertEqual(fixture.returncode, 0, fixture.stderr.decode())
+            analysis = probe(str(source))
+            catalogue = Catalogue('synthetic', dict(id='synthetic', url=str(source)), analysis)
+
+            # Literal times relative to seek=10; allow only the small AAC offset.
+            cases = (
+                (500, {'Crossing': (0, 3.5), 'Early': (0.7, 0.9),
+                       'Future': (1.5, 5.5), 'Later': (7.5, 11.5)}),
+                (0, {'Crossing': (0, 3), 'Early': (0.2, 0.4),
+                     'Future': (1, 5), 'Later': (7, 11)}),
+                (-500, {'Crossing': (0, 2.5), 'Future': (0.5, 4.5),
+                        'Later': (6.5, 10.5)}),
+            )
+            for delay, expected in cases:
+                with self.subTest(delay_ms=delay):
+                    session = root / str(delay)
+                    session.mkdir()
+                    result = subprocess.run(ffmpeg_command(str(source), session,
+                        PlaybackPlan(catalogue, analysis.entries[0], delay, True), origin=10, duration=12, readrate=1000),
+                        capture_output=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
+                    cues = {}
+                    for path in sorted(session.glob('*.vtt')):
+                        for start, end, label in re.findall(
+                                r'(\d+(?::\d+){1,2}\.\d+)\s+-->\s+'
+                                r'(\d+(?::\d+){1,2}\.\d+)[^\n]*\n([^\n]+)',
+                                path.read_text()):
+                            times = []
+                            for stamp in (start, end):
+                                seconds = 0
+                                for part in stamp.split(':'):
+                                    seconds = seconds * 60 + float(part)
+                                times.append(seconds)
+                            self.assertGreater(times[1], times[0], (label, times))
+                            if label in cues:
+                                self.assertEqual(cues[label], times)
+                            cues[label] = times
+                    for label, (start, end) in expected.items():
+                        with self.subTest(cue=label):
+                            self.assertIn(label, cues)
+                            self.assertAlmostEqual(cues[label][0], start, delta=0.1)
+                            self.assertAlmostEqual(cues[label][1], end, delta=0.1)
+                    self.assertEqual(set(cues), set(expected))
+
     def test_input_seek_normalizes_source_cue_before_500ms_delay(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             source = Path(folder) / 'seek.srt'
@@ -279,12 +355,13 @@ class GrowingHLSTest(unittest.TestCase):
                 '-c:a', 'aac', '-c:s', 'srt', '-metadata:s:s:0', 'language=spa', str(source)],
                 capture_output=True, timeout=15)
             self.assertEqual(fixture.returncode, 0)
-            streams, duration = probe(str(source))
-            self.assertGreaterEqual(duration, 30)
+            analysis = probe(str(source))
+            self.assertGreaterEqual(analysis.duration, 30)
+            catalogue = Catalogue('synthetic', dict(id='synthetic', url=str(source)), analysis)
             session = root / 'session-test'
             session.mkdir()
-            process = subprocess.Popen(ffmpeg_command(str(source), session, streams,
-                delay_ms=500, duration=30, readrate=4), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            process = subprocess.Popen(ffmpeg_command(str(source), session,
+                PlaybackPlan(catalogue, analysis.entries[0], 500, True), duration=30, readrate=4), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             try:
                 deadline = time.monotonic() + 15
                 seen_growing = False
