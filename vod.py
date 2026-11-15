@@ -15,7 +15,8 @@ SEGMENT_SECONDS = 6
 TAIL_SECONDS = 0.25
 SEGMENT_NAME = re.compile(r'segment-(\d{4,})\.ts')
 CUE_NAME = re.compile(r'video(0|[1-9]\d*)\.vtt')
-# A held segment this close to the producer arrives well inside the receiver's ~10.5 s retry.
+# A segment this close to the producer arrives within a retry or two of the receiver (~10.5 s each);
+# a farther one is quicker to restart at.
 REACH = 3
 # Held below the receiver's ~45 s give-up, measured from the first request for that segment.
 HOLD_SECONDS = 40
@@ -100,7 +101,6 @@ class ProducerState(NamedTuple):
     alive: bool
     suspended: bool
     returncode: int | None
-    run: Run
 
 
 class Producer:
@@ -234,7 +234,7 @@ class Producer:
         with self.lock:
             run = self._run()
             return ProducerState(self.process.pid if self.process else None, run.state == 'running',
-                                 self.suspended, self.process.poll() if self.process else None, run)
+                                 self.suspended, self.process.poll() if self.process else None)
 
     def close(self):
         with self.lock:
