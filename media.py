@@ -321,9 +321,9 @@ class SetupCatalogue:
                 if self.closed:
                     continue
                 if catalogue:
+                    self.records[catalogue.id] = catalogue
                     if self.addon:
                         catalogue = self._begin_lookup(catalogue, None)
-                    self.records[catalogue.id] = catalogue
                     snapshot = dict(state='ready', catalogue=catalogue.public())
                 else:
                     snapshot = dict(state='error', analysis_id=analysis_id,
@@ -332,12 +332,14 @@ class SetupCatalogue:
 
     def _begin_lookup(self, catalogue, hint):
         revision = catalogue.addon.revision + 1
+        catalogue = replace(catalogue, addon=Listing('loading', revision, message=LOADING))
+        self._commit(catalogue)
         try:
             self.lookups.put_nowait((catalogue.id, revision, dict(catalogue.source), hint))
-            listing = Listing('loading', revision, message=LOADING)
         except queue.Full:
-            listing = Listing('error', revision, message=LISTING_ERROR)
-        return replace(catalogue, addon=listing)
+            catalogue = replace(catalogue, addon=Listing('error', revision, message=LISTING_ERROR))
+            self._commit(catalogue)
+        return catalogue
 
     def _look(self):
         while not self.cancelled.is_set():
@@ -422,7 +424,6 @@ class SetupCatalogue:
             if self.lookups.full():
                 raise MediaError('Hay demasiadas búsquedas pendientes. Esperá unos segundos.', 409, 'busy')
             catalogue = self._begin_lookup(catalogue, hint)
-            self._commit(catalogue)
             return dict(catalogue=catalogue.public())
 
     def offers(self, source_id, catalogue_id, allow_retained=False):

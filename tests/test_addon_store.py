@@ -88,6 +88,33 @@ class AddonStoreTest(unittest.TestCase):
         with self.assertRaises(MediaError):
             store.offers('other', new['id'])
 
+    def hold_each_enqueue_until_the_lookup_worker_moves_on(self, store):
+        moved_on = threading.Event()
+        get, put = store.lookups.get, store.lookups.put_nowait
+        def watched_get(*args, **kwargs):
+            moved_on.set()
+            return get(*args, **kwargs)
+        def held_put(item):
+            moved_on.clear()
+            put(item)
+            moved_on.wait(.5)
+        store.lookups.get, store.lookups.put_nowait = watched_get, held_put
+
+    def test_an_automatic_lookup_picked_up_before_the_probe_publishes_still_runs(self):
+        store = self.store(FakeAddon())
+        self.hold_each_enqueue_until_the_lookup_worker_moves_on(store)
+        self.catalogue(store)
+        self.assertEqual(self.listed(store)['addon']['state'], 'ready')
+
+    def test_a_manual_lookup_picked_up_before_it_is_published_still_runs(self):
+        store = self.store(FakeAddon())
+        catalogue = self.catalogue(store)
+        self.listed(store)
+        self.hold_each_enqueue_until_the_lookup_worker_moves_on(store)
+        store.lookup('source', catalogue['id'], 'tt0000042')
+        final = self.listed(store)['addon']
+        self.assertEqual((final['state'], final['revision']), ('ready', 2))
+
     def test_a_manual_lookup_passes_the_hint_and_a_stale_result_is_dropped(self):
         started, release_first = threading.Event(), threading.Event()
         def listing(source, hint, cancelled):
