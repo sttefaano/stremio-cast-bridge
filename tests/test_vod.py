@@ -488,34 +488,54 @@ class ProducerTest(unittest.TestCase):
         producer.cover(15)
         self.assertEqual(self.launched[-1].command, ['ffmpeg', 15, 20])
 
-    def test_a_newer_request_takes_the_run_and_the_displaced_hold_waits_without_restarting(self):
+    def test_a_request_ahead_of_a_waiting_one_never_takes_the_run_from_it(self):
+        # Seen as concurrent N and N+4 (a prefetch), or N then N+1 while N waits out a backoff.
         self.layout = VodLayout(6000)
-        producer = self.producer(hold_seconds=.6)
+        for stopped in (False, True):
+            with self.subTest(stopped=stopped):
+                self.launched.clear()
+                producer = self.producer(hold_seconds=1, backoff_seconds=0)
+                result = {}
+                def ask(index):
+                    result[index] = producer.request(index)
+                first = threading.Thread(target=ask, args=(100,))
+                first.start()
+                time.sleep(.05)
+                if stopped:
+                    self.launched[0].code = 0
+                second = threading.Thread(target=ask, args=(104,))
+                second.start()
+                time.sleep(.1)
+                self.assertEqual([p.command[1] for p in self.launched], [100, 100] if stopped else [100])
+                self.write(*range(100, 105))
+                first.join(1)
+                second.join(1)
+                self.assertEqual(result, {100: 'serve', 104: 'serve'})
+                for index in range(100, 105):
+                    (self.directory / self.layout.segment_name(index)).unlink()
+
+    def test_a_request_held_from_before_a_seek_never_pulls_the_run_back(self):
+        self.layout = VodLayout(6000)
+        producer = self.producer(hold_seconds=1, backoff_seconds=0)
         result = {}
         def ask(index):
             result[index] = producer.request(index)
-        first = threading.Thread(target=ask, args=(100,))
-        first.start()
+        stale = threading.Thread(target=ask, args=(100,))
+        stale.start()
         time.sleep(.05)
-        started = time.monotonic()
-        second = threading.Thread(target=ask, args=(105,))
-        second.start()
+        producer.seek(300)
+        target = threading.Thread(target=ask, args=(300,))
+        target.start()
+        time.sleep(.05)
+        self.launched[-1].code = 1
         time.sleep(.1)
-        self.assertEqual([p.command[1] for p in self.launched], [100, 105])
-        self.write(105)
-        second.join(1)
-        self.assertEqual(result, {105: 'serve'})
-        time.sleep(.1)
-        self.assertEqual(len(self.launched), 2, 'the displaced hold does not take the run back')
-        first.join(2)
+        self.assertEqual([p.command[1] for p in self.launched], [100, 300, 300])
+        self.write(300)
+        target.join(1)
+        self.assertEqual(result, {300: 'serve'})
+        stale.join(2)
         self.assertEqual(result[100], 'missing')
-        self.assertGreater(time.monotonic() - started, .4, 'answered at its deadline, not when the run changed')
-        retry = threading.Thread(target=ask, args=(100,))
-        retry.start()
-        time.sleep(.05)
-        self.assertEqual(self.launched[-1].command[1], 100, 'a receiver retry is a new demand')
-        self.write(100)
-        retry.join(1)
+        self.assertEqual(len(self.launched), 3)
 
     def test_cover_never_replaces_a_run_a_held_request_waits_on(self):
         self.layout = VodLayout(6000)

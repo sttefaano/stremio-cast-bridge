@@ -101,10 +101,11 @@ class Run(NamedTuple):
 
 
 # Who may replace the run when a segment needs a restart, given whether it is running and whether
-# another waiting segment request comes first. The newest explicit demand wins: a new request or a seek
+# another waiting segment request comes first. The newest explicit demand decides: a new request or a seek
 # always; a held request only revives a run that stopped, and only the newest one; the playhead
 # heuristic never moves the producer away from a waiting request. Receivers fetch subtitle windows
-# ahead of the video, so a cue never moves it at all.
+# ahead of the video, so a cue never moves it at all. A request restarts the run at the earliest
+# segment still awaited since the last seek, so one ahead never starves one behind it.
 MAY_RESTART = {
     'arrival': lambda running, yields: True,
     'held': lambda running, yields: not running and not yields,
@@ -167,7 +168,7 @@ class Producer:
         self.start = self.limit = self.position = 0
         self.suspended = self.closed = False
         self.holds = {}  # arrival number -> (index, cue), for every request held right now
-        self.arrivals = 0
+        self.arrivals = self.seek_arrival = 0  # holds that arrived before the last seek were left behind by it
         self.first_seen = {}  # (index, cue) -> when the receiver first asked, across its retries
 
     def complete(self, index):
@@ -269,6 +270,7 @@ class Producer:
         with self.lock:
             if self.closed:
                 return
+            self.seek_arrival = self.arrivals
             run = self._run()
             if segment_action(index, self.complete(index), run) == 'restart':
                 self._restart(index)
@@ -322,8 +324,12 @@ class Producer:
         if expired or caller == 'cue' and action == 'wait':
             return 'missing'
         if action == 'restart':
+            target = min([index] + [i for other, (i, cue) in self.holds.items()
+                                    if not cue and other > self.seek_arrival])
+            if target != index and segment_action(target, self._servable(target, run), run, caller, newer) != 'restart':
+                return None
             try:
-                self._restart(index)
+                self._restart(target)
             except MediaError:
                 return 'missing'
         return None
