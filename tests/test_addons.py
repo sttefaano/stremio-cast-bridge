@@ -482,7 +482,21 @@ class LenientNormalizationTest(unittest.TestCase):
             with self.subTest(name=name):
                 canonical = normalize_subtitles('vtt', self.text(name), lenient=True).decode()
                 self.assertTrue(canonical.startswith('WEBVTT\n\n00:'))
-                self.assertFalse(re.search(r'[\u200b-\u200f\u202a-\u202e\ufeff]', canonical))
+                self.assertFalse(re.search(r'[\u200b\u2060\ufeff]', canonical))
+
+    def test_lenient_keeps_the_joiners_and_bidi_marks_rtl_text_needs(self):
+        lines = ('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645', '\u200f\u05e9\u05dc\u05d5\u05dd!\u200e',
+                 '\u202b\u05e9\u05dc\u05d5\u05dd!\u202c', '\u2067\u0645\u0631\u062d\u0628\u0627\u2069 \u061c1',
+                 'a\u200db')
+        for line in lines:
+            with self.subTest(line=line):
+                text = f'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{line}\n'
+                self.assertEqual(normalize_subtitles('vtt', text, lenient=True).decode(), text)
+
+    def test_lenient_strips_invisible_format_characters_that_carry_no_meaning(self):
+        text = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHo\u200bla\u2060 mun\ufeffdo\u00ad\n'
+        self.assertEqual(normalize_subtitles('vtt', text, lenient=True).decode(),
+                         'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHola mundo\n')
 
     def test_strict_still_rejects_bidi_marks_and_stray_angle_brackets(self):
         for name in self.NAMES:

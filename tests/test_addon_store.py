@@ -236,7 +236,7 @@ class AddonStoreTest(unittest.TestCase):
         self.assertEqual(store.snapshot()['source']['catalogue']['entries'], [entry])
 
     def test_fetch_normalises_leniently_and_stores_the_hls_language_tag(self):
-        text = '\ufeffWEBVTT\n\n00:00:01.000 --> 00:00:03.000\n\u202bHola\u200f\n'
+        text = '\ufeffWEBVTT\n\n00:00:01.000 --> 00:00:03.000\n\u200bHola\u2060\n'
         store = self.store(FakeAddon(text=text))
         _, result = self.fetched(store)
         plan = store.resolve('source', result['catalogue']['id'], result['entry']['id'], 0, True)

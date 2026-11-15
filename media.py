@@ -30,6 +30,7 @@ MAX_STORAGE = 16 * MAX_UPLOAD
 UPLOAD_BODY_LIMIT = 6 * MAX_UPLOAD + 4096
 SUBTITLE_LIMITS = {'upload': 'Límite de subtítulos locales alcanzado.', 'addon': 'Límite de subtítulos de Stremio alcanzado.'}
 EXTERNAL_RESOURCE = re.compile(r'(?i)[a-z][a-z0-9+.-]*://|(?:https?|file|data|javascript):|www\.')
+JOINERS_AND_BIDI = '\u061c\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,7 @@ def normalize_subtitles(format, text, lenient=False):
     text = text.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
     if lenient:
         text = strip_format_characters(text)
-    if any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in text):
+    if has_controls(text, lenient):
         raise MediaError('El archivo contiene controles no permitidos.', 422, 'invalid_subtitle')
     if format == 'vtt':
         header, separator, text = text.partition('\n\n')
@@ -186,7 +187,7 @@ def normalize_subtitles(format, text, lenient=False):
         content = html.unescape(re.sub(r'<[^>]*>', '', content)).strip()
         if lenient:
             content = strip_format_characters(content).strip()
-        if (end <= start or not content or any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in content)
+        if (end <= start or not content or has_controls(content, lenient)
                 or re.search(r'-->|[<>]', content)):
             raise MediaError('Cue de subtítulos inválido.', 422, 'invalid_subtitle')
         return f'{timestamp(start)} --> {timestamp(end)}\n{content}'
@@ -207,7 +208,12 @@ def normalize_subtitles(format, text, lenient=False):
 
 
 def strip_format_characters(text):
-    return ''.join(c for c in text if unicodedata.category(c) != 'Cf')
+    return ''.join(c for c in text if unicodedata.category(c) != 'Cf' or c in JOINERS_AND_BIDI)
+
+
+def has_controls(text, lenient):
+    allowed = '\n\t' + (JOINERS_AND_BIDI if lenient else '')
+    return any(unicodedata.category(c) in ('Cc', 'Cf') and c not in allowed for c in text)
 
 
 def validate_vtt_settings(settings):
