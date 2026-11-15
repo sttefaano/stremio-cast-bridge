@@ -89,11 +89,13 @@ class Run(NamedTuple):
 # Who may replace the run when a segment needs a restart, given whether it is running and whether
 # another waiting segment request comes first. The newest explicit demand wins: a new request or a seek
 # always; a held request only revives a run that stopped, and only the newest one; the playhead
-# heuristic never moves the producer away from a waiting request.
+# heuristic never moves the producer away from a waiting request. Receivers fetch subtitle windows
+# ahead of the video, so a cue never moves it at all.
 MAY_RESTART = {
     'arrival': lambda running, yields: True,
     'held': lambda running, yields: not running and not yields,
     'cover': lambda running, yields: not yields,
+    'cue': lambda running, yields: False,
 }
 
 
@@ -130,7 +132,7 @@ class Producer:
         self.process = None
         self.start = self.limit = self.position = 0
         self.suspended = self.closed = False
-        self.holds = {}  # arrival number -> segment index, for every request held right now
+        self.holds = {}  # arrival number -> (index, cue), for every request held right now
         self.arrivals = 0
         self.first_seen = {}
 
@@ -195,7 +197,8 @@ class Producer:
             until = self.layout.count if horizon is None else min(
                 self.layout.count, self.layout.index_at(self.layout.start(index) + horizon) + 1)
             need = self._first_missing(index, until)
-            if need is not None and segment_action(need, False, self._run(), 'cover', bool(self.holds)) == 'restart':
+            waiting = any(not cue for _, cue in self.holds.values())
+            if need is not None and segment_action(need, False, self._run(), 'cover', waiting) == 'restart':
                 self._restart(need)
 
     def seek(self, index):
@@ -204,14 +207,17 @@ class Producer:
             if not self.closed and segment_action(index, self.complete(index), self._run()) == 'restart':
                 self._restart(index)
 
-    def request(self, index, extra=()):
-        """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming."""
+    def request(self, index, extra=(), cue=False):
+        """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming.
+
+        A cue request only waits for what the running producer reaches; it never restarts it."""
+        caller, again = ('cue', 'cue') if cue else ('arrival', 'held')
         with self.lock:
             if self.closed:
                 return False
             run = self._run()
-            action = segment_action(index, self.complete(index), run)
-            if action == 'missing':
+            action = segment_action(index, self.complete(index), run, caller)
+            if action in ('missing', 'wait'):
                 return False
             if action == 'serve' and not self._coming(extra, run):
                 return True
@@ -227,7 +233,7 @@ class Producer:
             deadline = seen + self.hold_seconds
             self.arrivals += 1
             ticket = self.arrivals
-            self.holds[ticket] = index
+            self.holds[ticket] = index, cue
             self._resume()
         try:
             while True:
@@ -235,14 +241,14 @@ class Producer:
                     if self.closed:
                         return False
                     run = self._run()
-                    newer = any(other > ticket for other in self.holds)
-                    action = segment_action(index, self.complete(index), run, 'held', newer)
+                    newer = any(other > ticket and not held_cue for other, (_, held_cue) in self.holds.items())
+                    action = segment_action(index, self.complete(index), run, again, newer)
                     expired = time.monotonic() >= deadline
                     if action == 'serve':
                         if not self._coming(extra, run) or expired:
                             self.first_seen.pop(index, None)
                             return True
-                    elif action == 'missing' or expired:
+                    elif action in ('missing', 'wait') and again == 'cue' or action == 'missing' or expired:
                         return False
                     elif action == 'restart':
                         try:

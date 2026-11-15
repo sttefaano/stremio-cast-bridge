@@ -82,10 +82,10 @@ def subtitle_segment(root, producer, index, delay_ms):
     layout = producer.layout
     window = layout.window(index)
     # A negative delay pulls cues from later segments, so wait for those while the producer is making them.
+    # Out of its reach the window is answered at once from what is on disk, never with a 404.
     last = max(index, layout.index_at((window[1] - 1 - delay_ms) / 1000))
     first = max(0, layout.index_at((window[0] - delay_ms) / 1000) - CUE_LOOKBACK)
-    if not producer.request(index, extra=range(index + 1, last + 1)):
-        return None
+    producer.request(index, extra=range(index + 1, last + 1), cue=True)
     cues = []
     for source in range(first, last + 1):
         # A .vtt is written in place; it is final only once its .ts segment exists.

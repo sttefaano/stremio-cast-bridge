@@ -478,7 +478,7 @@ class SubtitleTimingTest(unittest.TestCase):
             cases = (
                 (500, {'Early': (12.7, 12.9), 'Future': (13.5, 17.5), 'Later': (19.5, 23.5)}),
                 (0, {'Early': (12.2, 12.4), 'Future': (13, 17), 'Later': (19, 23)}),
-                (-500, {'Future': (12.5, 16.5), 'Later': (18.5, 22.5)}),
+                (-500, {'Early': (11.7, 11.9), 'Future': (12.5, 16.5), 'Later': (18.5, 22.5)}),
             )
             with media_server(sessions, finished_producer(session, 24)) as fetch:
                 for delay, expected in cases:
@@ -590,6 +590,21 @@ class DelayedSubtitleViewTest(unittest.TestCase):
                 self.assertNotIn('Late', fetch('/session-view/d-6000/video1.vtt').read().decode())
                 self.assertLess(time.monotonic() - started, 1, 'a segment the producer will not write is not awaited')
 
+    def test_a_cue_out_of_the_producer_reach_answers_at_once_and_never_restarts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = self.session(Path(folder))
+            producer = finished_producer(session, 60, hold_seconds=5)
+            producer.process.poll.return_value = None
+            producer.start = producer.position = 3
+            (session / 'segment-0001.ts').unlink()
+            with media_server(Path(folder), producer) as fetch:
+                started = time.monotonic()
+                self.assertEqual(fetch('/session-view/d0/video8.vtt').read().decode(), 'WEBVTT\n')
+                self.assertEqual(fetch('/session-view/d4000/video1.vtt').read().decode(),
+                                 'WEBVTT\n\n00:00:08.800 --> 00:00:09.900\nEdge\n', 'behind the run: what is on disk')
+                self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(producer.process.kill.call_count, 0)
+
     def test_a_cue_from_two_runs_is_shown_once_from_its_earlier_start(self):
         with tempfile.TemporaryDirectory() as folder:
             session = self.session(Path(folder))
@@ -618,9 +633,11 @@ class DelayedSubtitleViewTest(unittest.TestCase):
                 partial = fetch('/session-view/d1500/video1.vtt', Range='bytes=0-5')
                 self.assertEqual((partial.status, partial.headers['Content-Range'], partial.read()),
                                  (206, f'bytes 0-5/{len(whole)}', whole[:6]))
+                self.assertEqual(fetch('/session-view/d0/video2.vtt').read().decode(), 'WEBVTT\n',
+                                 'a linked segment is not on disk, so neither are its cues')
                 for path in ('/session-view/video0.vtt', '/session-view/d1500/video3.vtt',
                              '/session-view/d1500/missing.vtt', '/session-view/d0/secret.json',
-                             '/session-view/d0/segment-0002.ts', '/session-view/d0/video2.vtt',
+                             '/session-view/d0/segment-0002.ts',
                              '/session-view/d0/segment-0000.ts.tmp', '/linked/d0/segment-0000.ts',
                              '/other-session/d0/segment-0000.ts', '/session-view/d0/video_vtt0.vtt',
                              '/session-view/d1500/%2e%2e/session-view/video0.vtt',

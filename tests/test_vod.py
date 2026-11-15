@@ -246,6 +246,21 @@ class ProducerTest(unittest.TestCase):
         self.assertTrue(producer.request(5, extra=range(18, 22)), 'cues the producer will not write are not awaited')
         self.assertEqual(len(self.launched), 1)
 
+    def test_a_held_cue_never_pins_the_producer(self):
+        producer = self.producer(hold_seconds=2)
+        producer.cover(0)
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(2, cue=True)))
+        holder.start()
+        time.sleep(.05)
+        self.assertEqual(result, [], 'held while the running producer reaches it')
+        producer.cover(15)
+        holder.join(1)
+        self.assertEqual(result, [False], 'answered as soon as the producer moved away')
+        self.assertEqual([p.command[1] for p in self.launched], [0, 15])
+        self.assertFalse(producer.request(3, cue=True))
+        self.assertEqual(len(self.launched), 2)
+
     def test_hold_is_bounded_per_segment_across_receiver_retries(self):
         producer = self.producer(hold_seconds=.3)
         producer.cover(0)

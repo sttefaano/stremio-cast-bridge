@@ -643,7 +643,7 @@ class GenericProducerTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
                     # The restart at 12 s clips Crossing to its first segment; times are movie times.
                     for delay, expected in [(500, {'Crossing': (12.5, 15.5), 'Early': (12.7, 12.9), 'Future': (13.5, 17.5)}),
-                                            (-500, {'Crossing': (11.5, 14.5), 'Future': (12.5, 16.5)})]:
+                                            (-500, {'Crossing': (11.5, 14.5), 'Early': (11.7, 11.9), 'Future': (12.5, 16.5)})]:
                         with self.subTest(format=format, delay=delay), \
                                 media_server(sessions, finished_producer(session, 24)) as fetch:
                             cues = served_cues(fetch, session.name, delay)
