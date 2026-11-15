@@ -18,15 +18,18 @@ import subprocess
 import threading
 import time
 import tempfile
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 from urllib.request import urlopen
 from dataclasses import replace
+from addons import StremioAddon
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
 ROOT = Path(__file__).resolve().parent
+PRIVATE_SOURCE_KEYS = ('url', 'release')
 MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
@@ -259,6 +262,19 @@ def probe(source, cancelled=None):
         raise BridgeError('No se pudo analizar la fuente en 30 segundos; abrila en Stremio y reintentá.') from None
 
 
+def subtitle_ids(data, *strings, nullable=()):
+    required = {'source_id', 'catalogue_id', *strings}
+    if (set(data) != required | set(nullable) or not all(isinstance(data[k], str) for k in required)
+            or not all(data[k] is None or isinstance(data[k], str) for k in nullable)):
+        raise BridgeError('Solicitud de subtítulos inválida.')
+
+
+def lookup_hint(hint):
+    if hint is not None and (len(hint) > 200 or any(unicodedata.category(c) == 'Cc' for c in hint)):
+        raise BridgeError('Título o ID inválido.')
+    return hint and hint.strip() or None
+
+
 class Bridge:
     """A single mutation worker; status reads never wait for probe or discovery."""
     def __init__(self, args, lan_ip=None):
@@ -298,7 +314,8 @@ class Bridge:
         self.device_scans = 0
         self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[])
         self.device_wake, self.source_wake = threading.Event(), threading.Event()
-        self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local')
+        self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local',
+                                        None if args.no_stremio_subtitles else StremioAddon())
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
         self.metadata_workers = [threading.Thread(target=self._scan_loop, args=(self.scan_devices, self.device_wake), daemon=True),
@@ -407,15 +424,35 @@ class Bridge:
             return 200, dict(catalogue=snapshot['catalogue'])
         return 202, dict(accepted=True, source_id=source['id'], analysis_id=snapshot['analysis_id'])
 
+    def _retained(self, catalogue_id):
+        with self.state_lock:
+            active = self.active_plan
+            return bool(active and active.catalogue.id == catalogue_id)
+
+    def _subtitle_target(self, data, *strings, nullable=()):
+        if self.quit.is_set():
+            raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+        subtitle_ids(data, *strings, nullable=nullable)
+        return self._retained(data['catalogue_id'])
+
     def subtitle_upload(self, data):
         if self.quit.is_set():
             raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
         if set(data) != {'source_id', 'catalogue_id', 'filename', 'format', 'text'} or not all(isinstance(data[k], str) for k in data):
             raise BridgeError('Solicitud de archivo inválida.')
-        with self.state_lock:
-            active = self.active_plan
-            retained = bool(active and active.catalogue.id == data['catalogue_id'])
-        return self.catalogue.upload(**data, allow_retained=retained)
+        return self.catalogue.upload(**data, allow_retained=self._retained(data['catalogue_id']))
+
+    def subtitle_lookup(self, data):
+        retained = self._subtitle_target(data, nullable=('hint',))
+        return self.catalogue.lookup(data['source_id'], data['catalogue_id'], lookup_hint(data['hint']), retained)
+
+    def subtitle_offers(self, data):
+        retained = self._subtitle_target(data)
+        return self.catalogue.offers(data['source_id'], data['catalogue_id'], retained)
+
+    def subtitle_fetch(self, data):
+        retained = self._subtitle_target(data, 'offer_id')
+        return self.catalogue.fetch(data['source_id'], data['catalogue_id'], data['offer_id'], retained)
 
     def _validate_plan_fields(self, action, data):
         fields = {'device_id', 'device_revision', 'catalogue_id', 'subtitle_id', 'delay_ms'}
@@ -627,7 +664,7 @@ class Bridge:
                         sources.append({'url': f'http://127.0.0.1:11470/{infohash}/{index}',
                                         'title': Path(name).stem.replace('.', ' ').replace('_', ' ')[:180],
                                         'filename': Path(name).name, 'length': file.get('length'),
-                                        'index': int(index)})
+                                        'index': int(index), 'release': str(torrent.get('name') or '')[:180]})
         except Exception:
             if not sources:
                 with self.source_lock:
@@ -643,7 +680,7 @@ class Bridge:
         with self.source_lock:
             if not self.quit.is_set():
                 self.sources = list(unique.values())
-                self.source_snapshot.update(sources=[{k: v for k, v in s.items() if k != 'url'} for s in self.sources],
+                self.source_snapshot.update(sources=[{k: v for k, v in s.items() if k not in PRIVATE_SOURCE_KEYS} for s in self.sources],
                                             source_discovery='ready', source_error=None)
 
     def connect(self, revision=None):
@@ -1262,6 +1299,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.reply(code, body)
             elif self.path == '/api/subtitle_upload':
                 self.reply(201, self.server.bridge.subtitle_upload(data))
+            elif self.path == '/api/subtitle_lookup':
+                self.reply(202, self.server.bridge.subtitle_lookup(data))
+            elif self.path == '/api/subtitle_offers':
+                self.reply(200, self.server.bridge.subtitle_offers(data))
+            elif self.path == '/api/subtitle_fetch':
+                self.reply(201, self.server.bridge.subtitle_fetch(data))
             else:
                 self.server.bridge.submit(self.path[5:], data)
                 self.reply(202, {'accepted': True})
@@ -1287,6 +1330,8 @@ def arguments(argv=None):
     parser.add_argument('--media-port', type=int, default=18766)
     parser.add_argument('--control-port', type=int, default=18767)
     parser.add_argument('--autostart', action='store_true')
+    parser.add_argument('--no-stremio-subtitles', action='store_true',
+                        help='No consultar los subtítulos de Stremio (OpenSubtitles v3 y Cinemeta)')
     parser.add_argument('--no-open', action='store_true', help='Aceptado; nunca se abre un navegador automáticamente')
     parser.add_argument('--state-file', nargs='?', const=str(ROOT / '.local' / 'state.json'))
     args = parser.parse_args(argv)
