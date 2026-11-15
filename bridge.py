@@ -1295,6 +1295,8 @@ class Bridge:
             raise BridgeError(message)
 
 
+FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
+FONTS = {f'/fonts/{n}': (ROOT / 'fonts' / n).read_bytes() for n in FONT_NAMES if (ROOT / 'fonts' / n).is_file()}
 PANEL = (ROOT / "player.html").read_text().replace("__SCRIPT__", (ROOT / "player.js").read_text())
 
 
@@ -1394,13 +1396,24 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(payload)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def reply_font(self, payload):
+        self.send_response(200)
+        self.send_header('Content-Type', 'font/woff2')
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
         if not self.trusted_host():
             self.reply(403, {})
+        elif self.path in FONTS:
+            self.reply_font(FONTS[self.path])
         elif self.path == '/':
             import html
             panel = PANEL.replace('__TOKEN__', self.server.token).replace('__DEVICE__', html.escape(self.server.bridge.args.device_name or 'Sin dispositivo')).replace('__DELAY__', str(self.server.bridge.args.subtitle_delay_ms))
