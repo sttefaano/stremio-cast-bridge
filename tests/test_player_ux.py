@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from bridge import Bridge, BridgeError, ControlHandler
-from backend_fixtures import install_media, seed_plan, start_data, apply_data, demo_start, demo_apply
+from backend_fixtures import install_media, seed_plan, start_data, apply_data, demo_start, demo_apply, produce, running_producer
 
 
 class PlayerControlsTest(unittest.TestCase):
@@ -27,7 +27,7 @@ class PlayerControlsTest(unittest.TestCase):
             player_state='PLAYING', subtitle_tracks=[{'type': 'TEXT', 'trackId': 7}])
         b.cast.status = SimpleNamespace(volume_level=0.3, volume_muted=False)
         install_media(b)
-        b.origin = 0
+        b.load_time = 0
         return b
 
     def test_volume_mute_and_subtitles_control_only_owned_loaded_content(self):
@@ -100,23 +100,20 @@ class PlayerControlsTest(unittest.TestCase):
             b.cast.media_controller.status.subtitle_tracks = [{'type': 'TEXT', 'trackId': 7}]
             b.cast.media_controller.status.player_state = 'PAUSED'
             b.cast.status = SimpleNamespace(volume_level=.2, volume_muted=True)
-            b.process = Mock(pid=123)
-            b.process.poll.return_value = None
-            b.last_playing_segments = None
+            running_producer(b)
             b.mutate('subtitles', apply_data(b, enabled=False))
             b.tick()
             b.cast.media_controller.enable_subtitle.assert_not_called()
             self.assertEqual(b.status()['volume'], .2)
             self.assertTrue(b.status()['muted'])
             with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
-                 patch('bridge.subprocess.Popen', return_value=b.process), \
+                 patch('bridge.subprocess.Popen', return_value=b.producer.process), \
                  patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
                 b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
             self.assertFalse(b.status()['subtitle_choice']['enabled'])
             self.assertTrue(b.paused)
             b.cast.media_controller.enable_subtitle.assert_not_called()
-            (b.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
-            (b.session / 'video_vtt.m3u8').write_text('#EXTM3U\n#EXTINF:6.0,\nvideo0.vtt\n')
+            produce(b.session, 10, 11, 12)
             (b.session / 'master.m3u8').touch()
             b.tick()
             b.cast.media_controller.status.content_id = b.media_url
@@ -520,17 +517,34 @@ class BufferStatusTest(unittest.TestCase):
 
     def test_actual_hls_interval_is_absolute_clamped_and_cleared_when_inactive(self):
         b = PlayerControlsTest().fixture()
-        b.update(origin=600, playlist_duration=90, absolute_time=630, duration=660, source_id='a')
+        b.update(buffered_start=600, buffered_end=690, absolute_time=630, duration=660, source_id='a')
         s = b.status()
         self.assertEqual((s.get('buffered_start'), s.get('buffered_end'), s.get('buffer_ahead_seconds')), (600, 660, 30))
         self.assertEqual(s.get('source_id'), 'a')
-        for changes in ({'phase': 'stopped'}, {'playlist_duration': float('nan')},
-                        {'origin': None}, {'duration': 0}):
-            b.update(phase='playing', origin=600, duration=660, playlist_duration=90)
+        for changes in ({'phase': 'stopped'}, {'buffered_end': float('nan')},
+                        {'buffered_start': None}, {'duration': 0}):
+            b.update(phase='playing', buffered_start=600, buffered_end=690, duration=660)
             b.update(**changes)
             self.assertIsNone(b.status().get('buffer_ahead_seconds'))
-        b.update(phase='playing', origin=600, duration=660, playlist_duration=12, absolute_time=650)
+        b.update(phase='playing', buffered_start=600, buffered_end=612, duration=660, absolute_time=650)
         self.assertEqual(b.status()['buffer_ahead_seconds'], 0)
+
+    def test_tick_reports_the_run_of_segments_on_disk_around_the_playhead(self):
+        import tempfile
+        from pathlib import Path
+        from test_bridge import RestartPolicyTest
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            b = RestartPolicyTest().fixture(Path(folder))
+            b.update(duration=90)
+            running_producer(b)
+            b.cast.media_controller.status.content_id = b.media_url
+            produce(b.session, 0, 1, 8, 9, 10, 11, 12, 14)
+            b.tick()
+            s = b.status()
+            self.assertEqual((s['buffered_start'], s['buffered_end'], s['buffer_ahead_seconds']), (48, 78, 13))
+            b.cast.media_controller.status.adjusted_current_time = 80
+            b.tick()
+            self.assertIsNone(b.status()['buffered_start'])
 
 
 class DemoTest(unittest.TestCase):

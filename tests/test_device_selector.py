@@ -141,15 +141,14 @@ class DeviceSelectorTest(unittest.TestCase):
         action, data, _ = b.jobs.get_nowait()
         cast, producer = Mock(), Mock()
         cast.media_controller.status.content_id = 'owned'
-        producer.poll.return_value = None
-        b.cast, b.process, b.media_url = cast, producer, 'owned'
+        b.cast, b.producer, b.media_url = cast, producer, 'owned'
         b.update(phase='ended', pending=False)
         with self.assertRaises(BridgeError):
             b.mutate(action, data)
         b.mutate('stop', {'device_id':str(self.info().uuid), 'device_revision':1})
         cast.media_controller.stop.assert_called_once()
         cast.disconnect.assert_called_once()
-        producer.terminate.assert_called_once()
+        producer.close.assert_called_once()
         b.update(command_pending=False)
         self.assertTrue(b.status()['can_change_device'])
         b.mutate(action, data)
@@ -420,12 +419,11 @@ class DeviceSelectorTest(unittest.TestCase):
                 b = self.fixture()
                 cast, producer, server, discovery = Mock(), Mock(), Mock(), Mock()
                 cast.media_controller.status.content_id = 'owned'
-                producer.poll.return_value = None
                 if failure == 'media-stop':
                     cast.media_controller.stop.side_effect = OSError('private stop diagnostic')
                 if failure == 'disconnect':
                     cast.disconnect.side_effect = OSError('private disconnect diagnostic')
-                b.cast, b.process, b.media_server, b.browser = cast, producer, server, discovery
+                b.cast, b.producer, b.media_server, b.browser = cast, producer, server, discovery
                 b.media_url, b.destination_locked = 'owned', True
                 b.update(phase='playing')
                 errors = []
@@ -443,8 +441,7 @@ class DeviceSelectorTest(unittest.TestCase):
                 self.assertEqual(errors, [])
                 cast.disconnect.assert_called_once()
                 cast.media_controller.stop.assert_called_once()
-                producer.terminate.assert_called_once()
-                producer.wait.assert_called_once()
+                producer.close.assert_called_once()
                 discovery.stop_discovery.assert_called_once()
                 server.shutdown.assert_called_once()
                 server.server_close.assert_called_once()

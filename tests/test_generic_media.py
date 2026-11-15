@@ -10,7 +10,7 @@ from pathlib import Path
 from bridge import FFMPEG, probe, ffmpeg_command
 from bridge import Bridge, arguments
 from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, normalize_subtitles
-from backend_fixtures import media_server, served_cues
+from backend_fixtures import media_server, served_cues, finished_producer, produce, running_producer
 import re
 import os
 import sys
@@ -186,12 +186,12 @@ class CatalogueTest(unittest.TestCase):
                 bridge.mutate('subtitles', apply_data(bridge, subtitle_id=uploaded['entry']['id'], delay=250))
                 path = bridge.active_plan.subtitle.path
                 self.assertIn(str(path), launch.call_args.args[0])
-                self.assertEqual(bridge.origin, 65)
+                self.assertEqual(bridge.load_time, 65)
                 self.assertTrue(bridge.paused)
                 bridge.catalogue.request(dict(bridge.active_plan.catalogue.source), refresh=True)
                 self.assertEqual(bridge.catalogue.snapshot()[source_id]['state'], 'loading')
                 bridge.mutate('seek', dict(device_id='fixture-device', device_revision=1, position=75))
-                self.assertEqual(bridge.origin, 75)
+                self.assertEqual(bridge.load_time, 75)
                 self.assertTrue(bridge.paused)
                 self.assertTrue(path.exists())
                 self.assertEqual(bridge.state['playback_id'], identity)
@@ -261,10 +261,8 @@ class CatalogueTest(unittest.TestCase):
             bridge.active_plan = replace(bridge.active_plan, subtitle=None, delay_ms=0, enabled=False)
             bridge.loaded = False
             bridge.started_at = time.monotonic()
-            bridge.process = unittest.mock.Mock()
-            bridge.process.poll.return_value = None
-            bridge.last_playing_segments = None
-            (bridge.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
+            running_producer(bridge)
+            produce(bridge.session, 0, 1, 2)
             (bridge.session / 'master.m3u8').write_text('#EXTM3U')
             bridge.tick()
             bridge.cast.media_controller.play_media.assert_called_once()
@@ -398,17 +396,16 @@ class CatalogueTest(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as folder:
             bridge = RestartPolicyTest().fixture(Path(folder))
-            RestartPolicyTest().subtitle_playlist(bridge)
             bridge.cast.media_controller.status.content_id = bridge.media_url
             bridge.cast.media_controller.status.player_state = 'PAUSED'
             bridge.cast.media_controller.status.subtitle_tracks = [dict(type='TEXT', trackId=7)]
             bridge.begin = Mock(wraps=bridge.begin)
-            producer = bridge.process
+            producer = bridge.producer
             identity = bridge.state['playback_id']
             session = bridge.session
             bridge.mutate('subtitles', apply_data(bridge, enabled=False))
             bridge.begin.assert_not_called()
-            self.assertIs(bridge.process, producer)
+            self.assertIs(bridge.producer, producer)
             self.assertEqual(bridge.session, session)
             self.assertFalse(bridge.state['subtitle_choice']['enabled'])
             self.assertTrue(bridge.paused)
@@ -427,7 +424,7 @@ class CatalogueTest(unittest.TestCase):
             self.assertTrue(bridge.jobs.empty())
             bridge.mutate('subtitles', apply_data(bridge, enabled=True, delay=750))
             bridge.begin.assert_not_called()
-            self.assertIs(bridge.process, producer)
+            self.assertIs(bridge.producer, producer)
             load = bridge.cast.media_controller.play_media.call_args
             self.assertEqual(load.args[0], bridge.media_url)
             self.assertTrue(bridge.media_url.endswith('/old/d750/master.m3u8'))
@@ -604,11 +601,11 @@ class CatalogueTest(unittest.TestCase):
 class GenericProducerTest(unittest.TestCase):
     def synthetic(self, root):
         srt = root / 'boundary.srt'
-        srt.write_text('1\n00:00:05,000 --> 00:00:09,000\nPast\n\n'
-                       '2\n00:00:09,000 --> 00:00:13,000\nCrossing\n\n'
-                       '3\n00:00:10,200 --> 00:00:10,400\nEarly\n\n'
-                       '4\n00:00:11,000 --> 00:00:15,000\nFuture\n\n'
-                       '5\n00:00:27,000 --> 00:00:31,000\nLater\n')
+        srt.write_text('1\n00:00:07,000 --> 00:00:11,000\nPast\n\n'
+                       '2\n00:00:11,000 --> 00:00:15,000\nCrossing\n\n'
+                       '3\n00:00:12,200 --> 00:00:12,400\nEarly\n\n'
+                       '4\n00:00:13,000 --> 00:00:17,000\nFuture\n\n'
+                       '5\n00:00:29,000 --> 00:00:33,000\nLater\n')
         source = root / 'english.mkv'
         fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
             'color=c=black:s=160x90:r=24:d=40', '-f', 'lavfi', '-i',
@@ -637,11 +634,13 @@ class GenericProducerTest(unittest.TestCase):
                     session = sessions / f'session-{format}'
                     session.mkdir()
                     result = subprocess.run(ffmpeg_command(str(source), session, plan,
-                        origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
+                        start_index=2, duration=12, readrate=1000), capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
-                    for delay, expected in [(500, {'Crossing': (.5, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
-                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)})]:
-                        with self.subTest(format=format, delay=delay), media_server(sessions) as fetch:
+                    # The restart at 12 s clips Crossing to its first segment; times are movie times.
+                    for delay, expected in [(500, {'Crossing': (12.5, 15.5), 'Early': (12.7, 12.9), 'Future': (13.5, 17.5)}),
+                                            (-500, {'Crossing': (11.5, 14.5), 'Future': (12.5, 16.5)})]:
+                        with self.subTest(format=format, delay=delay), \
+                                media_server(sessions, finished_producer(session, 24)) as fetch:
                             cues = served_cues(fetch, session.name, delay)
                             self.assertEqual(set(cues), set(expected))
                             for label, (start, end) in expected.items():

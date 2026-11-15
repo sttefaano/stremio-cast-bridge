@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from bridge import BridgeError
 from demo import DemoBridge
 import test_bridge
-from backend_fixtures import apply_data, demo_start, start_data
+from backend_fixtures import apply_data, demo_start, running_producer, start_data
 from media import Analysis, MediaError, SetupCatalogue, normalize_subtitles
 
 
@@ -115,8 +115,8 @@ class ProducerAssociationTest(unittest.TestCase):
                 bridge.cast.media_controller.status.content_id = bridge.media_url
                 bridge.cast.media_controller.status.player_state = 'PAUSED'
                 bridge.state['phase'] = 'paused'
-                bridge.process = Mock(pid=123)
-                old_plan, old_session, old_process = bridge.active_plan, bridge.session, bridge.process
+                running_producer(bridge)
+                old_plan, old_session, old_producer = bridge.active_plan, bridge.session, bridge.producer
                 old_identity, old_url = bridge.state['playback_id'], bridge.media_url
                 old_choice = bridge.status()['subtitle_choice']
                 payload = (apply_data(bridge, enabled=False, subtitle_id=None, delay=0)
@@ -128,12 +128,10 @@ class ProducerAssociationTest(unittest.TestCase):
                 self.assertEqual(bridge.status()['subtitle_choice'], old_choice)
                 self.assertEqual(bridge.state['playback_id'], old_identity)
                 self.assertEqual(bridge.session, old_session)
-                self.assertIs(bridge.process, old_process)
+                self.assertIs(bridge.producer, old_producer)
                 self.assertEqual(bridge.media_url, old_url)
                 self.assertTrue(bridge.loaded)
                 self.assertTrue(bridge._destination_busy())
-                bridge.last_playing_segments = None
-                old_process.poll.return_value = None
                 with patch.object(bridge, 'record_session'):
                     bridge.tick()
                 self.assertIs(bridge.active_plan, old_plan)
@@ -144,9 +142,7 @@ class ReceiverObservationTest(unittest.TestCase):
     def test_unknown_tracks_stay_unknown_and_observed_empty_tracks_are_hidden(self):
         with tempfile.TemporaryDirectory() as folder:
             bridge = test_bridge.RestartPolicyTest().fixture(Path(folder))
-            bridge.process = Mock()
-            bridge.process.poll.return_value = None
-            bridge.last_playing_segments = None
+            running_producer(bridge)
             receiver = bridge.cast.media_controller.status
             receiver.content_id = bridge.media_url
             receiver.subtitle_tracks = [dict(type='TEXT', trackId=7)]

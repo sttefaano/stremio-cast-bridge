@@ -4,6 +4,7 @@ import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -119,7 +120,10 @@ class Producer:
         self.first_seen = {}
 
     def complete(self, index):
-        return os.path.isfile(self.directory / self.layout.segment_name(index))
+        try:
+            return stat.S_ISREG(os.lstat(self.directory / self.layout.segment_name(index)).st_mode)
+        except OSError:
+            return False
 
     def completed(self):
         try:
