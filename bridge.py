@@ -1368,7 +1368,7 @@ class MediaHandler(BaseHTTPRequestHandler):
         kind, index = layout.parse(name) or (None, None)
         if kind == 'segment':
             outcome = producer.request(index)
-            # Past the source's real end: an empty segment, so the TV runs out of media instead of failing.
+            # Past the source's real end: an empty segment rather than an error.
             return open_media(root, producer.directory / name) if outcome == 'serve' else (
                 io.BytesIO() if outcome == 'end' else None)
         if kind == 'cue':
