@@ -1055,7 +1055,7 @@ class Bridge:
             self.paused = action == 'pause'
             (self.cast.media_controller.pause if self.paused else self.cast.media_controller.play)()
         elif action == 'seek':
-            if not self._owns_playback():
+            if not self._owns_playback() or self.cast.media_controller.status.media_session_id is None:
                 raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
             value = data.get('position', data.get('delta'))
             if type(value) not in (int, float) or not math.isfinite(value):

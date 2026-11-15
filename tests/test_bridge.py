@@ -54,7 +54,7 @@ class RestartPolicyTest(unittest.TestCase):
         bridge.cast = Mock()
         bridge.cast.media_controller.status = SimpleNamespace(
             content_id='http://unrelated/movie', player_state='PLAYING',
-            adjusted_current_time=65, current_subtitle_tracks=[], subtitle_tracks=[])
+            adjusted_current_time=65, current_subtitle_tracks=[], subtitle_tracks=[], media_session_id=1)
         return bridge
 
     def test_track_change_restarts_at_the_receiver_position_and_waits_for_matching_receiver(self):
@@ -260,6 +260,18 @@ class ReceiverSeekTest(unittest.TestCase):
             bridge.cast.media_controller.status.adjusted_current_time = 31
             bridge.tick()
             self.assertEqual(bridge.status()['absolute_time'], 31, 'once confirmed, the receiver is the playhead again')
+
+    def test_seek_without_a_receiver_media_session_is_refused_before_touching_the_producer(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:
+            bridge = self.playing(folder)
+            bridge.cast.media_controller.status.media_session_id = None
+            with self.assertRaises(BridgeError) as refused:
+                self.seek(bridge, position=70)
+            self.assertEqual(refused.exception.code, 'receiver_not_ready')
+            launch.assert_not_called()
+            bridge.cast.media_controller._send_command.assert_not_called()
+            self.assertIsNone(bridge.seek_target)
+            self.assertEqual(bridge.status()['absolute_time'], 30)
 
     def test_seek_needs_the_receiver_to_show_this_playback(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -24,7 +24,7 @@ class PlayerControlsTest(unittest.TestCase):
         b.media_url = 'owned-session'
         b.cast = Mock()
         b.cast.media_controller.status = SimpleNamespace(content_id='owned-session',
-            player_state='PLAYING', subtitle_tracks=[{'type': 'TEXT', 'trackId': 7}])
+            player_state='PLAYING', subtitle_tracks=[{'type': 'TEXT', 'trackId': 7}], media_session_id=1)
         b.cast.status = SimpleNamespace(volume_level=0.3, volume_muted=False)
         install_media(b)
         b.load_time = 0
