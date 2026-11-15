@@ -10,6 +10,8 @@ import threading
 import time
 from typing import NamedTuple
 
+from media import MediaError
+
 SEGMENT_SECONDS = 6
 # A remainder this short is audio priming without video frames; FFmpeg writes no segment for it.
 TAIL_SECONDS = 0.25
@@ -147,8 +149,11 @@ class Producer:
         limit = next((i for i in range(index + 1, self.layout.count) if self.complete(i)), self.layout.count)
         for partial in self.directory.glob('*.tmp'):
             partial.unlink(missing_ok=True)
-        self.process = subprocess.Popen(self.command(index, limit), stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.process = subprocess.Popen(self.command(index, limit), stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise MediaError('No se pudo iniciar FFmpeg.', 500, 'producer_failed') from None
         self.start, self.limit, self.position = index, limit, index
         self.suspended = False
         self.first_seen.clear()
@@ -157,7 +162,11 @@ class Producer:
         # SIGKILL, not SIGTERM: a terminated FFmpeg drains its input and finalizes a short segment.
         if self.process and self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=5)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # Its message embeds the arguments, which may hold the source URL.
+        self.process = None
         self.suspended = False
 
     def _resume(self):
@@ -188,7 +197,10 @@ class Producer:
             if action == 'serve' and not self._coming(extra, run):
                 return True
             if action == 'restart':
-                self._restart(index)
+                try:
+                    self._restart(index)
+                except MediaError:
+                    return False
             now = time.monotonic()
             seen = self.first_seen.get(index)
             if seen is None or now - seen > self.hold_seconds + RETRY_GAP_SECONDS:

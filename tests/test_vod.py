@@ -1,4 +1,7 @@
+import contextlib
+import io
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -6,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from media import MediaError
 from vod import Producer, Run, VodLayout, segment_action
 
 
@@ -238,6 +242,31 @@ class ProducerTest(unittest.TestCase):
         self.write(*range(0, 9))
         self.assertFalse(producer.request(9))
         self.assertEqual(len(self.launched), 1)
+
+    def test_a_killed_run_that_will_not_exit_never_leaks_its_arguments(self):
+        producer = self.producer()
+        producer.cover(0)
+        def stuck(timeout=None):
+            raise subprocess.TimeoutExpired(['ffmpeg', '-i', 'http://private/infohash'], timeout)
+        self.launched[0].wait = stuck
+        printed = io.StringIO()
+        with contextlib.redirect_stderr(printed):
+            producer.cover(15)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 15, 20])
+        self.assertNotIn('private', printed.getvalue())
+
+    def test_a_failed_launch_leaves_no_run_and_says_nothing_private(self):
+        producer = self.producer()
+        producer.cover(0)
+        with patch('vod.subprocess.Popen', side_effect=OSError(2, 'No such file', 'http://private/infohash')):
+            with self.assertRaises(MediaError) as failed:
+                producer.cover(15)
+            self.assertNotIn('private', str(failed.exception))
+            self.assertFalse(producer.request(16))
+        self.assertEqual(self.launched[0].signals, [signal.SIGKILL])
+        self.assertEqual(producer.snapshot(), (None, False, False, None))
+        producer.cover(15)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 15, 20])
 
     def test_closed_producer_releases_holds_and_never_starts_again(self):
         producer = self.producer(hold_seconds=2)
