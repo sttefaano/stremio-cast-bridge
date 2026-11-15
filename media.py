@@ -147,9 +147,10 @@ def normalize_subtitles(format, text, lenient=False):
         text = strip_format_characters(text)
     if has_controls(text, lenient):
         raise MediaError('El archivo contiene controles no permitidos.', 422, 'invalid_subtitle')
+    blocks = re.split(r'\n(?:[ \t]*\n)+', text)
     if format == 'vtt':
-        header, separator, text = text.partition('\n\n')
-        if (not separator or not re.fullmatch(r'WEBVTT(?:[ \t][^\n]*)?', header)
+        header = blocks.pop(0)
+        if (not blocks or not re.fullmatch(r'WEBVTT(?:[ \t][^\n]*)?', header.split('\n', 1)[0])
                 or '-->' in header or EXTERNAL_RESOURCE.search(header)):
             raise MediaError('Encabezado VTT inválido.', 422, 'invalid_subtitle')
     stamp = r'\d{2,6}:[0-5]\d:[0-5]\d,\d{3}' if format == 'srt' else r'(?:\d{2,6}:)?[0-5]\d:[0-5]\d\.\d{3}'
@@ -165,7 +166,7 @@ def normalize_subtitles(format, text, lenient=False):
     def cue(block):
         lines = block.splitlines()
         if lines and not timing.fullmatch(lines[0]):
-            if format == 'srt' and lines[0].isdigit() or format == 'vtt' and len(lines) > 1 and not re.search(r'(?i)STYLE|REGION|NOTE|-->', lines[0]):
+            if format == 'srt' and lines[0].strip().isdigit() or format == 'vtt' and len(lines) > 1 and not re.search(r'(?i)STYLE|REGION|-->', lines[0]):
                 lines = lines[1:]
         match = timing.fullmatch(lines[0]) if lines else None
         content = '\n'.join(lines[1:])
@@ -191,7 +192,8 @@ def normalize_subtitles(format, text, lenient=False):
                 or re.search(r'-->|[<>]', content)):
             raise MediaError('Cue de subtítulos inválido.', 422, 'invalid_subtitle')
         return f'{timestamp(start)} --> {timestamp(end)}\n{content}'
-    cues, blocks = [], re.split(r'\n[ \t]*\n', text)
+    cues = []
+    blocks = [block for block in blocks if not (format == 'vtt' and re.match(r'NOTE(?:[ \t\n]|$)', block))]
     for block in blocks:
         try:
             cues.append(cue(block))
