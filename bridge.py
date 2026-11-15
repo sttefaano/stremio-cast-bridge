@@ -1415,10 +1415,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         elif self.path in FONTS:
             self.reply_font(FONTS[self.path])
         elif self.path == '/':
-            import html
-            panel = PANEL.replace('__TOKEN__', self.server.token).replace('__DEVICE__', html.escape(self.server.bridge.args.device_name or 'Sin dispositivo')).replace('__DELAY__', str(self.server.bridge.args.subtitle_delay_ms))
-            if self.server.bridge.status().get('demo'):
-                panel = panel.replace('id="demo-banner" hidden', 'id="demo-banner"')
+            panel = PANEL.replace('__TOKEN__', self.server.token)
             self.reply(200, panel, 'text/html')
         elif self.path == '/api/status':
             self.reply(200, self.server.bridge.status())
