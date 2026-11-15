@@ -691,7 +691,8 @@ class GenericProducerTest(unittest.TestCase):
                 for format, text in [('srt', srt.read_text()), ('vtt', normalize_subtitles('srt', srt.read_text()).decode())]:
                     upload = store.upload('source', catalogue['id'], 'synthetic.' + format, format, text)
                     for delay, expected in [(500, {'Crossing': (0, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
-                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)})]:
+                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)}),
+                                            (2000, {'Past': (0, 1), 'Crossing': (1, 5), 'Early': (2.2, 2.4), 'Future': (3, 7)})]:
                         with self.subTest(format=format, delay=delay):
                             plan = store.resolve('source', catalogue['id'], upload['entry']['id'], delay, True)
                             session = root / f'{format}-{delay}'

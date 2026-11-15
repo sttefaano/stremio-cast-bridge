@@ -84,7 +84,7 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
     command += ['-i', source]
     if subtitle and subtitle.path:
         if origin:
-            command += ['-ss', str(origin)]
+            command += ['-itsoffset', str(-origin)]
         command += ['-i', str(subtitle.path)]
     if duration is not None:
         command += ['-t', str(duration)]
