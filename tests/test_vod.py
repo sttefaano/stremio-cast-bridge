@@ -185,15 +185,34 @@ class ProducerTest(unittest.TestCase):
         producer = self.producer(hold_seconds=2)
         producer.cover(0)
         results = []
-        threads = [threading.Thread(target=lambda: results.append(producer.request(15))) for _ in range(4)]
+        threads = [threading.Thread(target=lambda: results.append(producer.request(15))) for _ in range(2)]
         for thread in threads:
             thread.start()
         time.sleep(.1)
         self.write(15)
         for thread in threads:
             thread.join(3)
-        self.assertEqual(results, ['serve'] * 4)
+        self.assertEqual(results, ['serve'] * 2)
         self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 15, 20]])
+
+    def test_receiver_retries_replace_the_oldest_wait_instead_of_stacking(self):
+        producer = self.producer(hold_seconds=5)
+        results = {}
+        def ask(label):
+            results[label] = producer.request(15), time.monotonic()
+        threads = [threading.Thread(target=ask, args=(label,)) for label in ('first', 'retry', 'again')]
+        for thread in threads:
+            thread.start()
+            time.sleep(.05)
+        threads[0].join(1)
+        self.assertEqual(results['first'][0], 'missing', 'the abandoned wait is released')
+        self.assertEqual(len(producer.holds), 2)
+        self.write(15)
+        for thread in threads:
+            thread.join(1)
+        self.assertEqual({label: answer for label, (answer, _) in results.items()},
+                         {'first': 'missing', 'retry': 'serve', 'again': 'serve'})
+        self.assertEqual(len(self.launched), 1)
 
     def test_held_request_keeps_the_producer_running(self):
         self.write(*range(0, 12))

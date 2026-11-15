@@ -24,6 +24,8 @@ REACH = 3
 HOLD_SECONDS = 40
 # The receiver retries every ~10.5 s; a request after this long a pause starts a fresh hold.
 RETRY_GAP_SECONDS = 15
+# A retry means the receiver dropped its earlier request, so only this many waits per segment are kept.
+WAITS_PER_SEGMENT = 2
 SUSPEND_AHEAD, RESUME_AHEAD = 60, 45
 # Runs in a row that may stop without a new segment before the session gives up, and the pause before each retry.
 RETRIES, BACKOFF_SECONDS = 3, 2
@@ -256,6 +258,9 @@ class Producer:
             if seen is None or now - seen > self.hold_seconds + RETRY_GAP_SECONDS:
                 seen = self.first_seen[index] = now
             deadline = seen + self.hold_seconds
+            same = [other for other, held in self.holds.items() if held == (index, cue)]
+            for abandoned in same[:len(same) + 1 - WAITS_PER_SEGMENT]:
+                del self.holds[abandoned]
             self.arrivals += 1
             ticket = self.arrivals
             self.holds[ticket] = index, cue
@@ -274,7 +279,7 @@ class Producer:
                 self.holds.pop(ticket, None)
 
     def _answer(self, index, extra, ticket, caller, deadline):
-        if self.closed:
+        if self.closed or ticket not in self.holds:
             return 'missing'
         run = self._run()
         newer = any(other > ticket and not cue for other, (_, cue) in self.holds.items())
