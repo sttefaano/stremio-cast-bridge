@@ -1217,7 +1217,7 @@ class Bridge:
                 if can_tick and not self.quit.is_set():
                     self.tick()
             except Exception as error:
-                message = str(error) if isinstance(error, BridgeError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
+                message = str(error) if isinstance(error, MediaError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
                 with self.state_lock:
                     self.cleanup_active = True
                     self.state['command_pending'] = True
