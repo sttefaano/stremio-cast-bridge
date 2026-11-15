@@ -514,6 +514,24 @@ class ProducerTest(unittest.TestCase):
                 for index in range(100, 105):
                     (self.directory / self.layout.segment_name(index)).unlink()
 
+    def test_a_far_request_ahead_of_a_waiting_one_takes_the_run_as_a_seek_from_another_sender_would(self):
+        self.layout = VodLayout(6000)
+        producer = self.producer(hold_seconds=.5)
+        result = {}
+        def ask(index):
+            result[index] = producer.request(index)
+        first = threading.Thread(target=ask, args=(100,))
+        first.start()
+        time.sleep(.05)
+        second = threading.Thread(target=ask, args=(130,))
+        second.start()
+        time.sleep(.1)
+        self.assertEqual([p.command[1] for p in self.launched], [100, 130])
+        self.write(130)
+        second.join(1)
+        first.join(1)
+        self.assertEqual(result, {100: 'missing', 130: 'serve'})
+
     def test_a_request_held_from_before_a_seek_never_pulls_the_run_back(self):
         self.layout = VodLayout(6000)
         producer = self.producer(hold_seconds=1, backoff_seconds=0)

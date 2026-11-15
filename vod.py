@@ -104,8 +104,9 @@ class Run(NamedTuple):
 # another waiting segment request comes first. The newest explicit demand decides: a new request or a seek
 # always; a held request only revives a run that stopped, and only the newest one; the playhead
 # heuristic never moves the producer away from a waiting request. Receivers fetch subtitle windows
-# ahead of the video, so a cue never moves it at all. A request restarts the run at the earliest
-# segment still awaited since the last seek, so one ahead never starves one behind it.
+# ahead of the video, so a cue never moves it at all. A request restarts the run at the earliest segment
+# still awaited since the last seek, when a run there reaches it too, so one ahead never starves one behind
+# it; one farther ahead is a seek from another sender and wins.
 MAY_RESTART = {
     'arrival': lambda running, yields: True,
     'held': lambda running, yields: not running and not yields,
@@ -325,7 +326,7 @@ class Producer:
             return 'missing'
         if action == 'restart':
             target = min([index] + [i for other, (i, cue) in self.holds.items()
-                                    if not cue and other > self.seek_arrival])
+                                    if not cue and other > self.seek_arrival and index <= i + 1 + REACH])
             if target != index and segment_action(target, self._servable(target, run), run, caller, newer) != 'restart':
                 return None
             try:
