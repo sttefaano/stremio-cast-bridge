@@ -35,7 +35,7 @@ END_SLACK = 2
 READ_TIMEOUT_SECONDS = 15
 # So a run that exits sooner than this after its previous segment did not stall (measured: EOF under 5 s, stall ~45 s).
 STALL_SECONDS = READ_TIMEOUT_SECONDS - 5
-# A stalled run finalizes its short last segment 8-22 ms before FFmpeg exits (measured), so a running run's
+# A stalled run finalizes its short last segment 6-26 ms before FFmpeg exits (measured), so a running run's
 # newest segment is served only once it is this old; a healthy run's next segment takes 0.25-5.5 s.
 FRESH_SECONDS = 1
 
