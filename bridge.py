@@ -159,6 +159,9 @@ def timestamp(ms):
 
 CLIP_SEEK_PREROLL = ("noise=amount=0:drop='lte(pts+duration,0)',"
                    "setts=pts='max(PTS,0)':dts='max(DTS,0)':duration='max(0,DURATION+min(0,PTS))'")
+# setts holds each packet until the next one arrives, so a sparse embedded track would write a cue
+# segments after its window. A stored file is read ahead and is not delayed, so it keeps the clip.
+DROP_SEEK_PREROLL = "noise=amount=0:drop='lt(pts,0)'"
 
 
 def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1):
@@ -183,7 +186,7 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
     mapping = 'v:0,a:0'
     if subtitle:
         language = subtitle.language or 'und'
-        captions = ['-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL,
+        captions = ['-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL if subtitle.path else DROP_SEEK_PREROLL,
                     '-metadata:s:s:0', f'language={language}']
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',

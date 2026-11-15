@@ -16,7 +16,8 @@ from uuid import UUID
 from pychromecast import Chromecast
 from pychromecast.models import CastInfo
 
-from bridge import main, Bridge, safe_media_path, CLIP_SEEK_PREROLL, FFMPEG, playback_position, public_status, ffmpeg_command, probe
+from bridge import (main, Bridge, safe_media_path, CLIP_SEEK_PREROLL, FFMPEG, playback_position, public_status,
+                    ffmpeg_command, probe, parse_cues, subtitle_windows)
 from media import Catalogue, PlaybackPlan
 from backend_fixtures import install_media, apply_data, media_server, served_cues
 
@@ -329,7 +330,7 @@ class MediaPathsTest(unittest.TestCase):
 
 
 class SubtitleTimingTest(unittest.TestCase):
-    def test_mkv_input_seek_clips_preroll_and_served_views_shift_cues(self):
+    def test_embedded_seek_drops_cues_that_start_before_it_and_served_views_shift_the_rest(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             root = Path(folder)
             srt = root / 'boundary.srt'
@@ -362,12 +363,9 @@ class SubtitleTimingTest(unittest.TestCase):
             self.assertNotIn('X-TIMESTAMP-MAP', ''.join(p.read_text() for p in session.glob('*.vtt')))
             # Literal times relative to seek=10; allow only the small AAC offset.
             cases = (
-                (500, {'Crossing': (0.5, 3.5), 'Early': (0.7, 0.9),
-                       'Future': (1.5, 5.5), 'Later': (7.5, 11.5)}),
-                (0, {'Crossing': (0, 3), 'Early': (0.2, 0.4),
-                     'Future': (1, 5), 'Later': (7, 11)}),
-                (-500, {'Crossing': (0, 2.5), 'Future': (0.5, 4.5),
-                        'Later': (6.5, 10.5)}),
+                (500, {'Early': (0.7, 0.9), 'Future': (1.5, 5.5), 'Later': (7.5, 11.5)}),
+                (0, {'Early': (0.2, 0.4), 'Future': (1, 5), 'Later': (7, 11)}),
+                (-500, {'Future': (0.5, 4.5), 'Later': (6.5, 10.5)}),
             )
             with media_server(sessions) as fetch:
                 for delay, expected in cases:
@@ -379,6 +377,37 @@ class SubtitleTimingTest(unittest.TestCase):
                                 self.assertAlmostEqual(cues[label][0], start, delta=0.1)
                                 self.assertAlmostEqual(cues[label][1], end, delta=0.1)
                         self.assertEqual(set(cues), set(expected))
+
+    def test_sparse_embedded_cues_are_written_into_their_own_segment(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            root = Path(folder)
+            srt = root / 'sparse.srt'
+            srt.write_text('1\n00:00:01,040 --> 00:00:02,500\nOpening\n\n'
+                           '2\n00:00:20,000 --> 00:00:21,500\nAfterSilence\n\n'
+                           '3\n00:00:47,500 --> 00:00:49,000\nLast\n')
+            source = root / 'sparse.mkv'
+            fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
+                'color=c=black:s=160x90:r=24:d=54', '-f', 'lavfi', '-i',
+                'anullsrc=r=48000:cl=stereo', '-i', str(srt), '-map', '0:v',
+                '-map', '1:a', '-map', '2:s', '-t', '54', '-c:v', 'libx264',
+                '-preset', 'ultrafast', '-c:a', 'aac', '-c:s', 'srt', str(source)],
+                capture_output=True, timeout=30)
+            self.assertEqual(fixture.returncode, 0, fixture.stderr.decode())
+            analysis = probe(str(source))
+            session = root / 'session-sparse'
+            session.mkdir()
+            result = subprocess.run(ffmpeg_command(str(source), session, PlaybackPlan(
+                Catalogue('sparse', dict(id='sparse', url=str(source)), analysis), analysis.entries[0], 0, True),
+                readrate=1000), capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            placed = {}
+            for name, start, end, _ in subtitle_windows((session / 'video_vtt.m3u8').read_text()):
+                for cue_start, _, _, text in parse_cues((session / name).read_text()):
+                    placed[text] = (cue_start, start, end)
+            self.assertEqual(set(placed), {'Opening', 'AfterSilence', 'Last'})
+            for text, (cue_start, start, end) in placed.items():
+                with self.subTest(cue=text):
+                    self.assertTrue(start <= cue_start < end, (cue_start, start, end))
 
     def test_input_seek_normalizes_source_cue_to_the_seek_point(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
