@@ -164,7 +164,7 @@ class ProducerTest(unittest.TestCase):
 
     def producer(self, **kwargs):
         return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
-                        **{'poll_seconds': .01, **kwargs})
+                        **{'poll_seconds': .01, 'fresh_seconds': 0, **kwargs})
 
     def write(self, *indices):
         for index in indices:
@@ -406,6 +406,30 @@ class ProducerTest(unittest.TestCase):
         self.write(2)
         holder.join(1)
         self.assertEqual(result, ['serve'])
+
+    def test_a_running_run_newest_segment_is_served_only_once_it_outlives_a_stall_exit(self):
+        # A stalled FFmpeg finalizes its short last segment 8 to 22 ms before it exits (measured).
+        for exits in (True, False):
+            with self.subTest(exits=exits):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                self.launched.clear()
+                producer = self.producer(hold_seconds=2, backoff_seconds=0, fresh_seconds=.3)
+                producer.cover(0)
+                result = []
+                holder = threading.Thread(target=lambda: result.append(producer.request(2)))
+                holder.start()
+                self.write(0, 1, 2)
+                time.sleep(.15)
+                self.assertEqual(result, [], 'too fresh to tell from a stall finalized while FFmpeg still runs')
+                if exits:
+                    self.launched[0].code = 0
+                    time.sleep(.1)
+                    self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 2, 20]])
+                    self.write(2)
+                holder.join(1)
+                self.assertEqual(result, ['serve'])
+                self.assertEqual(len(self.launched), 2 if exits else 1)
 
     def test_failures_without_a_new_segment_spend_a_bounded_retry_budget(self):
         producer = self.producer(backoff_seconds=0)

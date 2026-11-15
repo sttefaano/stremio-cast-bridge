@@ -35,6 +35,9 @@ END_SLACK = 2
 READ_TIMEOUT_SECONDS = 15
 # So a run that exits sooner than this after its previous segment did not stall (measured: EOF under 5 s, stall ~45 s).
 STALL_SECONDS = READ_TIMEOUT_SECONDS - 5
+# A stalled run finalizes its short last segment 8-22 ms before FFmpeg exits (measured), so a running run's
+# newest segment is served only once it is this old; a healthy run's next segment takes 0.25-5.5 s.
+FRESH_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -152,9 +155,10 @@ class Producer:
     completed segment is never rewritten (FFmpeg writes .vtt files in place, not through temp_file).
     """
     def __init__(self, directory, layout, command, hold_seconds=HOLD_SECONDS, poll_seconds=.1,
-                 retries=RETRIES, backoff_seconds=BACKOFF_SECONDS, stall_seconds=STALL_SECONDS):
+                 retries=RETRIES, backoff_seconds=BACKOFF_SECONDS, stall_seconds=STALL_SECONDS,
+                 fresh_seconds=FRESH_SECONDS):
         self.directory, self.layout, self.command = directory, layout, command
-        self.hold_seconds, self.poll_seconds = hold_seconds, poll_seconds
+        self.hold_seconds, self.poll_seconds, self.fresh_seconds = hold_seconds, poll_seconds, fresh_seconds
         self.retries, self.backoff_seconds, self.stall_seconds = retries, backoff_seconds, stall_seconds
         self.launched_at = time.time()  # wall clock, to compare with segment mtimes
         self.failures, self.retry_at, self.end, self.settled = 0, 0, layout.count, True
@@ -308,7 +312,7 @@ class Producer:
             return 'missing'
         run = self._run()
         newer = any(other > ticket and not cue for other, (_, cue) in self.holds.items())
-        action = segment_action(index, self.complete(index), run, caller, newer)
+        action = segment_action(index, self._servable(index, run), run, caller, newer)
         expired = time.monotonic() >= deadline
         if action == 'serve' and (expired or not self._coming(extra, run)):
             self.first_seen.pop((index, caller == 'cue'), None)
@@ -323,6 +327,16 @@ class Producer:
             except MediaError:
                 return 'missing'
         return None
+
+    def _servable(self, index, run):
+        """On disk, and not a running run's newest segment so fresh it may be the short one a stall leaves."""
+        complete = self.complete(index)
+        if not complete or run.state != 'running' or not run.start <= index == run.position - 1:
+            return complete
+        try:
+            return time.time() - os.lstat(self.directory / self.layout.segment_name(index)).st_mtime >= self.fresh_seconds
+        except OSError:
+            return False
 
     def _coming(self, indices, run):
         return [j for j in indices if not self.complete(j) and run.state == 'running' and run.start <= j < run.limit]
