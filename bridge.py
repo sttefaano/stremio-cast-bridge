@@ -38,7 +38,8 @@ MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': '
 
 DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
-SEEK_CONFIRM_SECONDS = 10
+# The receiver keeps asking for the target segment for about 45 s before it gives up on a seek.
+SEEK_CONFIRM_SECONDS = 45
 # Cues that start this many segments before a window can still be on screen in it.
 CUE_LOOKBACK = 2
 DUPLICATE_MS = 100
@@ -1063,7 +1064,7 @@ class Bridge:
             target = value if 'position' in data else self.status()['absolute_time'] + value
             target = min(max(0, target), max(0, self.duration - 0.1))
             paused = self.cast.media_controller.status.player_state == 'PAUSED'
-            self.producer.cover(self.producer.layout.index_at(target))
+            self.producer.seek(self.producer.layout.index_at(target))
             # pychromecast's seek() always resumes playback; a raw SEEK keeps a paused TV paused.
             self.cast.media_controller._send_command(
                 {'type': 'SEEK', 'currentTime': target,

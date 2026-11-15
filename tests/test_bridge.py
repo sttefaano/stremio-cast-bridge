@@ -254,12 +254,21 @@ class ReceiverSeekTest(unittest.TestCase):
             bridge.tick()
             self.assertEqual(launch.call_count, 1, 'a stale receiver time must not pull the producer back')
             self.assertEqual(bridge.status()['absolute_time'], 70)
+            now = time.monotonic()
+            with patch('bridge.time.monotonic', return_value=now + 30):
+                bridge.tick()
+            self.assertEqual(launch.call_count, 1, 'the target holds while the receiver may still be fetching it')
+            self.assertEqual(bridge.status()['absolute_time'], 70)
             bridge.cast.media_controller.status.adjusted_current_time = 70.5
             bridge.tick()
             self.assertEqual(bridge.status()['absolute_time'], 70.5)
             bridge.cast.media_controller.status.adjusted_current_time = 31
             bridge.tick()
             self.assertEqual(bridge.status()['absolute_time'], 31, 'once confirmed, the receiver is the playhead again')
+            self.seek(bridge, position=70)
+            with patch('bridge.time.monotonic', return_value=time.monotonic() + 50):
+                bridge.tick()
+            self.assertEqual(bridge.status()['absolute_time'], 31, 'a receiver that gave up on the target is the playhead')
 
     def test_seek_without_a_receiver_media_session_is_refused_before_touching_the_producer(self):
         with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:

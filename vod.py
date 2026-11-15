@@ -86,8 +86,20 @@ class Run(NamedTuple):
     state: str
 
 
-def segment_action(index, complete, run, reach=REACH):
-    """serve, hold (the running producer reaches it soon), restart there, or missing (it never will)."""
+# Who may replace the run when a segment needs a restart, given whether it is running and whether
+# another waiting segment request comes first. The newest explicit demand wins: a new request or a seek
+# always; a held request only revives a run that stopped, and only the newest one; the playhead
+# heuristic never moves the producer away from a waiting request.
+MAY_RESTART = {
+    'arrival': lambda running, yields: True,
+    'held': lambda running, yields: not running and not yields,
+    'cover': lambda running, yields: not yields,
+}
+
+
+def segment_action(index, complete, run, caller='arrival', yields=False, reach=REACH):
+    """serve, hold (the running producer reaches it soon), restart there, wait (not this caller's
+    call), or missing (it never will)."""
     if complete:
         return 'serve'
     covered = run.start <= index < run.limit
@@ -95,7 +107,7 @@ def segment_action(index, complete, run, reach=REACH):
         return 'missing'
     if covered and run.state == 'running' and index <= run.position + reach:
         return 'hold'
-    return 'restart'
+    return 'restart' if MAY_RESTART[caller](run.state == 'running', yields) else 'wait'
 
 
 class ProducerState(NamedTuple):
@@ -118,7 +130,8 @@ class Producer:
         self.process = None
         self.start = self.limit = self.position = 0
         self.suspended = self.closed = False
-        self.held = 0
+        self.holds = {}  # arrival number -> segment index, for every request held right now
+        self.arrivals = 0
         self.first_seen = {}
 
     def complete(self, index):
@@ -175,15 +188,21 @@ class Producer:
         self.suspended = False
 
     def cover(self, index, horizon=None):
-        """Make sure the first gap at or after index is being produced."""
+        """Make sure the first gap at or after index is being produced, unless a held request needs the producer."""
         with self.lock:
             if self.closed:
                 return
             until = self.layout.count if horizon is None else min(
                 self.layout.count, self.layout.index_at(self.layout.start(index) + horizon) + 1)
             need = self._first_missing(index, until)
-            if need is not None and segment_action(need, False, self._run()) == 'restart':
+            if need is not None and segment_action(need, False, self._run(), 'cover', bool(self.holds)) == 'restart':
                 self._restart(need)
+
+    def seek(self, index):
+        """An explicit jump: produce from index now unless it is on disk or coming soon."""
+        with self.lock:
+            if not self.closed and segment_action(index, self.complete(index), self._run()) == 'restart':
+                self._restart(index)
 
     def request(self, index, extra=()):
         """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming."""
@@ -206,7 +225,9 @@ class Producer:
             if seen is None or now - seen > self.hold_seconds + RETRY_GAP_SECONDS:
                 seen = self.first_seen[index] = now
             deadline = seen + self.hold_seconds
-            self.held += 1
+            self.arrivals += 1
+            ticket = self.arrivals
+            self.holds[ticket] = index
             self._resume()
         try:
             while True:
@@ -214,18 +235,24 @@ class Producer:
                     if self.closed:
                         return False
                     run = self._run()
-                    action = segment_action(index, self.complete(index), run)
+                    newer = any(other > ticket for other in self.holds)
+                    action = segment_action(index, self.complete(index), run, 'held', newer)
                     expired = time.monotonic() >= deadline
                     if action == 'serve':
                         if not self._coming(extra, run) or expired:
                             self.first_seen.pop(index, None)
                             return True
-                    elif action != 'hold' or expired:
+                    elif action == 'missing' or expired:
                         return False
+                    elif action == 'restart':
+                        try:
+                            self._restart(index)
+                        except MediaError:
+                            return False
                 time.sleep(self.poll_seconds)
         finally:
             with self.lock:
-                self.held -= 1
+                self.holds.pop(ticket, None)
 
     def _coming(self, indices, run):
         return [j for j in indices if not self.complete(j) and run.state == 'running' and run.start <= j < run.limit]
@@ -236,10 +263,10 @@ class Producer:
             if self.closed or not self.process or self.process.poll() is not None:
                 return
             ahead = self.layout.start(self._run().position) - playhead
-            if not self.suspended and not self.held and ahead > SUSPEND_AHEAD:
+            if not self.suspended and not self.holds and ahead > SUSPEND_AHEAD:
                 self.process.send_signal(signal.SIGSTOP)
                 self.suspended = True
-            elif self.suspended and (self.held or ahead < RESUME_AHEAD):
+            elif self.suspended and (self.holds or ahead < RESUME_AHEAD):
                 self._resume()
 
     def snapshot(self):

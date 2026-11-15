@@ -84,6 +84,26 @@ class SegmentActionTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(segment_action(index, complete, run), expected)
 
+    def test_who_may_restart(self):
+        running, stopped = Run(10, 30, 12, 'running'), Run(10, 30, 30, 'finished')
+        cases = (
+            # A new request or an explicit seek is the newest demand and always wins.
+            ('arrival', running, True, 'restart'),
+            ('arrival', stopped, True, 'restart'),
+            # A held request never takes a running run from a newer demand.
+            ('held', running, False, 'wait'),
+            ('held', stopped, False, 'restart'),
+            ('held', stopped, True, 'wait'),
+            # The playhead heuristic yields to any waiting segment request.
+            ('cover', running, False, 'restart'),
+            ('cover', running, True, 'wait'),
+            ('cover', stopped, True, 'wait'),
+        )
+        for caller, run, yields, expected in cases:
+            with self.subTest(caller=caller, state=run.state, yields=yields):
+                self.assertEqual(segment_action(40, False, run, caller, yields), expected)
+                self.assertEqual(segment_action(13, False, running, caller, yields), 'hold')
+
 
 class FakeProcess:
     pids = iter(range(1000, 2000))
@@ -267,6 +287,47 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.snapshot(), (None, False, False, None))
         producer.cover(15)
         self.assertEqual(self.launched[-1].command, ['ffmpeg', 15, 20])
+
+    def test_a_newer_request_takes_the_run_and_the_displaced_hold_waits_without_restarting(self):
+        self.layout = VodLayout(6000)
+        producer = self.producer(hold_seconds=.6)
+        result = {}
+        def ask(index):
+            result[index] = producer.request(index)
+        first = threading.Thread(target=ask, args=(100,))
+        first.start()
+        time.sleep(.05)
+        started = time.monotonic()
+        second = threading.Thread(target=ask, args=(105,))
+        second.start()
+        time.sleep(.1)
+        self.assertEqual([p.command[1] for p in self.launched], [100, 105])
+        self.write(105)
+        second.join(1)
+        self.assertEqual(result, {105: True})
+        time.sleep(.1)
+        self.assertEqual(len(self.launched), 2, 'the displaced hold does not take the run back')
+        first.join(2)
+        self.assertEqual(result[100], False)
+        self.assertGreater(time.monotonic() - started, .4, 'answered at its deadline, not when the run changed')
+        retry = threading.Thread(target=ask, args=(100,))
+        retry.start()
+        time.sleep(.05)
+        self.assertEqual(self.launched[-1].command[1], 100, 'a receiver retry is a new demand')
+        self.write(100)
+        retry.join(1)
+
+    def test_cover_never_replaces_a_run_a_held_request_waits_on(self):
+        self.layout = VodLayout(6000)
+        producer = self.producer(hold_seconds=.5)
+        producer.cover(0)
+        holder = threading.Thread(target=producer.request, args=(300,))
+        holder.start()
+        time.sleep(.05)
+        producer.cover(0, horizon=60)
+        holder.join(1)
+        self.assertEqual([p.command[1] for p in self.launched], [0, 300])
+        self.assertEqual(self.launched[1].signals, [])
 
     def test_closed_producer_releases_holds_and_never_starts_again(self):
         producer = self.producer(hold_seconds=2)
