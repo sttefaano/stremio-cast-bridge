@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 import signal
 import subprocess
 import tempfile
@@ -10,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from media import MediaError
-from vod import Producer, Run, VodLayout, segment_action
+from vod import Producer, Run, VodLayout, exit_outcome, segment_action
 
 
 class VodLayoutTest(unittest.TestCase):
@@ -107,6 +108,24 @@ class SegmentActionTest(unittest.TestCase):
                 self.assertEqual(segment_action(13, False, running, caller, yields), 'hold')
 
 
+class ExitOutcomeTest(unittest.TestCase):
+    def test_how_a_run_that_exited_by_itself_ended(self):
+        # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15).
+        cases = (
+            ('reached its bound', 10, 20, 20, 0, 'complete'),
+            ('reached its bound after a long silence', 10, 20, 20, 60, 'complete'),
+            ('stopped promptly in the last two listed segments', 10, 50, 48, 1, 'end'),
+            ('stopped promptly having written nothing near the end', 49, 50, 49, 1, 'end'),
+            ('stopped in the last two after a silence', 10, 50, 48, 45, 'stalled'),
+            ('wrote nothing near the end after a silence', 49, 50, 49, 45, 'stalled'),
+            ('stopped promptly far from the end', 10, 50, 30, 1, 'stalled'),
+            ('stopped near the end of a run bounded before the list end', 10, 49, 48, 1, 'stalled'),
+        )
+        for label, start, limit, position, quiet, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(exit_outcome(start, limit, position, 50, quiet, stall_seconds=10), expected)
+
+
 class FakeProcess:
     pids = iter(range(1000, 2000))
 
@@ -145,7 +164,7 @@ class ProducerTest(unittest.TestCase):
 
     def producer(self, **kwargs):
         return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
-                        poll_seconds=.01, **kwargs)
+                        **{'poll_seconds': .01, **kwargs})
 
     def write(self, *indices):
         for index in indices:
@@ -310,6 +329,42 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.request(7), 'serve')
         self.assertEqual(producer.snapshot().end, 8)
         self.assertEqual(len(self.launched), 1)
+
+    def test_a_stall_in_the_last_two_segments_is_retried_not_taken_for_the_end(self):
+        producer = self.producer(backoff_seconds=0, stall_seconds=.1)
+        producer.seek(17)
+        self.write(17, 18)
+        written = time.time() - 1
+        os.utime(self.directory / self.layout.segment_name(17), (written, written))
+        self.launched[0].code = 0
+        producer.cover(17)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 18, 20], 'the short segment the stall left is redone')
+        self.assertFalse((self.directory / self.layout.segment_name(18)).exists())
+        time.sleep(.15)
+        self.launched[-1].code = 0
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(18)))
+        holder.start()
+        time.sleep(.05)
+        self.assertEqual(result, [], 'a run that wrote nothing for longer than a read timeout stalled')
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 18, 20])
+        self.assertEqual(len(self.launched), 3)
+        self.write(18)
+        holder.join(1)
+        self.assertEqual(result, ['serve'])
+        self.assertEqual(producer.snapshot().end, 20)
+
+    def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
+        self.layout = VodLayout(60.021)
+        producer = self.producer(stall_seconds=5)
+        producer.seek(8)
+        self.launched[0].code = 0
+        self.assertEqual(producer.request(9), 'end')
+        self.assertEqual(producer.snapshot().end, 8)
+        producer.cover(3)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 3, 10])
+        self.write(*range(3, 9))
+        self.assertEqual(producer.snapshot().end, 10, 'media past the marked end proves it wrong')
 
     def test_a_held_request_restarts_its_run_when_it_dies(self):
         producer = self.producer(hold_seconds=1, backoff_seconds=0)

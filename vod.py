@@ -29,8 +29,12 @@ WAITS_PER_SEGMENT = 2
 SUSPEND_AHEAD, RESUME_AHEAD = 60, 45
 # Runs in a row that may stop without a new segment before the session gives up, and the pause before each retry.
 RETRIES, BACKOFF_SECONDS = 3, 2
-# A run that stops this close to the listed end met the source's real end; the probed duration can run long.
+# A run that stops this close to the listed end may have met the source's real end; the probed duration can run long.
 END_SLACK = 2
+# FFmpeg's -rw_timeout. A source that sends nothing for this long makes FFmpeg exit 0, as at the real end.
+READ_TIMEOUT_SECONDS = 15
+# So a run that exits sooner than this after its previous segment did not stall (measured: EOF under 5 s, stall ~45 s).
+STALL_SECONDS = READ_TIMEOUT_SECONDS - 5
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,16 @@ def segment_action(index, complete, run, caller='arrival', yields=False, reach=R
     return 'restart'
 
 
+def exit_outcome(start, limit, position, count, quiet, stall_seconds=STALL_SECONDS):
+    """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
+    quiet is how long it ran after its previous segment (or its launch) until it exited."""
+    if position == limit:
+        return 'complete'
+    if limit == count and position >= count - END_SLACK and quiet < stall_seconds:
+        return 'end'
+    return 'stalled'
+
+
 class ProducerState(NamedTuple):
     pid: int | None
     alive: bool
@@ -138,10 +152,11 @@ class Producer:
     completed segment is never rewritten (FFmpeg writes .vtt files in place, not through temp_file).
     """
     def __init__(self, directory, layout, command, hold_seconds=HOLD_SECONDS, poll_seconds=.1,
-                 retries=RETRIES, backoff_seconds=BACKOFF_SECONDS):
+                 retries=RETRIES, backoff_seconds=BACKOFF_SECONDS, stall_seconds=STALL_SECONDS):
         self.directory, self.layout, self.command = directory, layout, command
         self.hold_seconds, self.poll_seconds = hold_seconds, poll_seconds
-        self.retries, self.backoff_seconds = retries, backoff_seconds
+        self.retries, self.backoff_seconds, self.stall_seconds = retries, backoff_seconds, stall_seconds
+        self.launched_at = time.time()  # wall clock, to compare with segment mtimes
         self.failures, self.retry_at, self.end, self.settled = 0, 0, layout.count, True
         self.lock = threading.Lock()
         self.process = None
@@ -168,6 +183,8 @@ class Producer:
         code = self.process.poll() if self.process else None
         while self.position < self.limit and self.complete(self.position):
             self.position += 1
+        if self.position > self.end:
+            self.end = self.layout.count
         if self.process and code is not None and not self.settled:
             self._settle()
         state = ('running' if self.process and code is None else 'exhausted' if self.failures >= self.retries
@@ -177,9 +194,16 @@ class Producer:
     def _settle(self):
         """Judge a run that exited by itself, once: complete, the source's end, or a failure to retry."""
         self.settled = True
-        if self.position == self.limit:
+        try:
+            since = (os.stat(self.directory / self.layout.segment_name(self.position - 2)).st_mtime
+                     if self.position - 2 >= self.start else self.launched_at)
+        except OSError:
+            since = self.launched_at
+        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, time.time() - since,
+                               self.stall_seconds)
+        if outcome == 'complete':
             self.failures = 0
-        elif self.limit == self.layout.count and self.position >= self.layout.count - END_SLACK:
+        elif outcome == 'end':
             self.end, self.failures = self.position, 0
         else:
             # A stall makes FFmpeg exit (even with 0) and finalize the segment it was writing, short.
@@ -202,6 +226,7 @@ class Producer:
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError, subprocess.SubprocessError):
             raise MediaError('No se pudo iniciar FFmpeg.', 500, 'producer_failed') from None
+        self.launched_at = time.time()
         self.start, self.limit, self.position, self.settled = index, limit, index, False
         self.suspended = False
         self.first_seen.clear()

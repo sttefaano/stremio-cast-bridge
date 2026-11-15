@@ -27,7 +27,7 @@ from urllib.request import urlopen
 from dataclasses import replace
 from addons import StremioAddon
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
-from vod import SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
+from vod import READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
@@ -158,7 +158,7 @@ def ffmpeg_command(source, session, plan, start_index=0, duration=None, readrate
     subtitle = plan.subtitle
     seek = ['-ss', str(start_index * SEGMENT_SECONDS)] if start_index else []
     command = [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin',
-               '-rw_timeout', '15000000', '-readrate', str(readrate), '-readrate_initial_burst', '30']
+               '-rw_timeout', str(READ_TIMEOUT_SECONDS * 10**6), '-readrate', str(readrate), '-readrate_initial_burst', '30']
     command += seek + ['-i', source]
     if subtitle and subtitle.path:
         command += seek + ['-i', str(subtitle.path)]
