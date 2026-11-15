@@ -199,19 +199,17 @@ class ProducerTest(unittest.TestCase):
         producer = self.producer(hold_seconds=5)
         results = {}
         def ask(label):
-            results[label] = producer.request(15), time.monotonic()
+            results[label] = producer.request(15)
         threads = [threading.Thread(target=ask, args=(label,)) for label in ('first', 'retry', 'again')]
         for thread in threads:
             thread.start()
             time.sleep(.05)
         threads[0].join(1)
-        self.assertEqual(results['first'][0], 'missing', 'the abandoned wait is released')
-        self.assertEqual(len(producer.holds), 2)
+        self.assertEqual(results, {'first': 'missing'}, 'the abandoned wait is released')
         self.write(15)
         for thread in threads:
             thread.join(1)
-        self.assertEqual({label: answer for label, (answer, _) in results.items()},
-                         {'first': 'missing', 'retry': 'serve', 'again': 'serve'})
+        self.assertEqual(results, {'first': 'missing', 'retry': 'serve', 'again': 'serve'})
         self.assertEqual(len(self.launched), 1)
 
     def test_held_request_keeps_the_producer_running(self):
