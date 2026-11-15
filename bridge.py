@@ -80,7 +80,7 @@ def subtitle_segment(root, producer, index, delay_ms):
     """Window index of the layout, built from every source segment whose cues can land in it after the delay."""
     layout = producer.layout
     window = layout.window(index)
-    # Cues of a negative delay come from later segments: wait for those while the producer is making them.
+    # A negative delay pulls cues from later segments, so wait for those while the producer is making them.
     last = max(index, layout.index_at((window[1] - 1 - delay_ms) / 1000))
     first = max(0, layout.index_at((window[0] - delay_ms) / 1000) - CUE_LOOKBACK)
     if not producer.request(index, extra=range(index + 1, last + 1)):

@@ -659,6 +659,28 @@ class GrowingHLSTest(unittest.TestCase):
 
 
 
+class RestartArgumentsTest(unittest.TestCase):
+    def plan(self):
+        from media import Analysis
+        upload = Subtitle('upload', 'upload', 'Subida', path=Path('/private/upload.vtt'))
+        return PlaybackPlan(Catalogue('c', dict(id='s', url='u'), Analysis(0, 1, 120, ())), upload, 0, True)
+
+    def test_a_run_from_zero_has_no_restart_arguments(self):
+        command = ffmpeg_command('http://source', Path('/session'), self.plan(), duration=120)
+        for flag in ('-ss', '-start_number', '-output_ts_offset'):
+            self.assertNotIn(flag, command)
+
+    def test_a_restart_at_k_seeks_both_inputs_and_keeps_absolute_numbers_and_times(self):
+        command = ffmpeg_command('http://source', Path('/session'), self.plan(), start_index=3, duration=30)
+        inputs = [i for i, value in enumerate(command) if value == '-i']
+        self.assertEqual([command[i + 1] for i in inputs], ['http://source', '/private/upload.vtt'])
+        self.assertEqual([command[i - 2:i] for i in inputs], [['-ss', '18'], ['-ss', '18']])
+        for flag, value in (('-output_ts_offset', '18'), ('-start_number', '3'), ('-t', '30'),
+                            ('-readrate', '1.1'), ('-readrate_initial_burst', '30')):
+            self.assertEqual(command[command.index(flag) + 1], value, flag)
+        self.assertLess(command.index('-output_ts_offset'), command.index('-f'))
+
+
 class RestartSeamTest(unittest.TestCase):
     """A run restarted at segment k must line up with a run from 0, so the TV can play both mixed."""
     TOLERANCE = .05

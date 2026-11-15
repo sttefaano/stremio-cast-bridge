@@ -204,6 +204,24 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT])
         self.assertEqual(producer.snapshot().suspended, False)
 
+    def test_cues_awaited_from_later_segments_never_restart_the_producer(self):
+        self.write(*range(0, 6))
+        producer = self.producer(hold_seconds=2)
+        producer.cover(0)
+        self.assertEqual(self.launched[0].command, ['ffmpeg', 6, 20])
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(5, extra=range(6, 12))))
+        holder.start()
+        time.sleep(.1)
+        self.assertEqual(result, [], 'waits while the running producer is making them')
+        self.write(*range(6, 12))
+        holder.join(2)
+        self.assertEqual(result, [True])
+        self.assertEqual(len(self.launched), 1)
+        self.launched[0].code = 0
+        self.assertTrue(producer.request(5, extra=range(18, 22)), 'cues the producer will not write are not awaited')
+        self.assertEqual(len(self.launched), 1)
+
     def test_hold_is_bounded_per_segment_across_receiver_retries(self):
         producer = self.producer(hold_seconds=.3)
         producer.cover(0)
