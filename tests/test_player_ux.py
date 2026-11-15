@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from bridge import Bridge, BridgeError, ControlHandler
+from bridge import Bridge, BridgeError, ControlHandler, PreparationCancelled
 from backend_fixtures import install_media, seed_plan, start_data, apply_data, demo_start, demo_apply, produce, running_producer
 
 
@@ -106,17 +106,11 @@ class PlayerControlsTest(unittest.TestCase):
             b.cast.media_controller.enable_subtitle.assert_not_called()
             self.assertEqual(b.status()['volume'], .2)
             self.assertTrue(b.status()['muted'])
-            with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
-                 patch('bridge.subprocess.Popen', return_value=b.producer.process), \
-                 patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
-                b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
+            produce(b.session, *range(15))
+            b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
             self.assertFalse(b.status()['subtitle_choice']['enabled'])
             self.assertTrue(b.paused)
-            b.cast.media_controller.enable_subtitle.assert_not_called()
-            produce(b.session, 10, 11, 12)
-            (b.session / 'master.m3u8').touch()
-            b.tick()
-            b.cast.media_controller.status.content_id = b.media_url
+            b.cast.media_controller.status.adjusted_current_time = 60
             b.tick()
             b.cast.media_controller.enable_subtitle.assert_not_called()
 
@@ -157,7 +151,6 @@ class CancellationTest(unittest.TestCase):
             b.cast = None
             b.jobs = queue.Queue()
             b.args.device_name, b.args.device_host = 'Fixture', None
-            b.devices = {}
             b.device_revision = 1
             boundary = next(i for i, line in enumerate(Path('bridge.py').read_text().splitlines(), 1)
                             if line.strip().startswith('self.connect('))
@@ -171,8 +164,8 @@ class CancellationTest(unittest.TestCase):
                  patch('bridge.subprocess.Popen') as launch:
                 sys.settrace(schedule)
                 try:
-                    with self.assertRaises(BridgeError):
-                        b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 30})
+                    with self.assertRaises(PreparationCancelled):
+                        b.mutate('start', start_data(b))
                 finally:
                     sys.settrace(None)
                 discovery.assert_not_called()
@@ -199,7 +192,7 @@ class CancellationTest(unittest.TestCase):
                 return SimpleNamespace(uuid='fixture-device', cast_type='cast')
             def prepare():
                 try:
-                    b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 30})
+                    b.mutate('start', start_data(b))
                 except BridgeError as error:
                     errors.append(error)
             def cancel():
@@ -299,7 +292,7 @@ class CancellationTest(unittest.TestCase):
                 original_stop()
             b.stop = cleanup
             with patch.object(b, 'stop_process', side_effect=blocked_preparation), patch('bridge.subprocess.Popen') as launch:
-                b.submit('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 30})
+                b.submit('start', start_data(b))
                 worker = threading.Thread(target=b._work)
                 worker.start()
                 try:
@@ -326,16 +319,17 @@ class CancellationTest(unittest.TestCase):
             b = RestartPolicyTest().fixture(Path(folder))
             b.loaded = False
             b.jobs = queue.Queue()
-            b.process = Mock()
-            b.process.poll.return_value = None
-            b.last_playing_segments = None
+            b.update(absolute_time=0)
+            running_producer(b)
             b.started_at = time.monotonic()
-            (b.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
-            (b.session / 'video_vtt.m3u8').write_text('#EXTM3U\n#EXTINF:6.0,\nvideo0.vtt\n')
+            produce(b.session, 0, 1, 2)
             (b.session / 'master.m3u8').touch()
             b.submit('stop', {'device_id':'fixture-device', 'device_revision':1, })
             b.tick()
             b.cast.media_controller.play_media.assert_not_called()
+            b.active_generation = b.cancel_generation
+            b.tick()
+            b.cast.media_controller.play_media.assert_called_once()
 
     def test_stop_during_probe_or_connection_fences_producer_and_load(self):
         import tempfile
@@ -368,8 +362,8 @@ class CancellationTest(unittest.TestCase):
                         b.connect.assert_not_called()
                         b.tick.assert_not_called()
                     else:
-                        with self.assertRaises(BridgeError):
-                            b.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 30})
+                        with self.assertRaises(PreparationCancelled):
+                            b.mutate('start', start_data(b))
                         if stage == 'preparation':
                             b.connect.assert_not_called()
                     launch.assert_not_called()

@@ -57,34 +57,34 @@ class RestartPolicyTest(unittest.TestCase):
             adjusted_current_time=65, current_subtitle_tracks=[], subtitle_tracks=[])
         return bridge
 
-    def test_buffered_seek_restarts_and_waits_for_matching_receiver(self):
+    def test_track_change_restarts_at_the_receiver_position_and_waits_for_matching_receiver(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             bridge = self.fixture(Path(folder))
+            bridge.state['playback_id'] = 'playback'
+            receiver = bridge.cast.media_controller.status
+            receiver.content_id, receiver.player_state, receiver.adjusted_current_time = bridge.media_url, 'PAUSED', 60
+            bridge.update(absolute_time=60)
             producer = Mock(pid=123)
             producer.poll.return_value = None
-            with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
-                 patch('bridge.subprocess.Popen', return_value=producer) as launch, \
+            with patch('bridge.subprocess.Popen', return_value=producer) as launch, \
                  patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
-                bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
-                bridge.cast.media_controller.stop.assert_not_called()
-                bridge.cast.media_controller.seek.assert_not_called()
+                bridge.mutate('subtitles', apply_data(bridge, enabled=False, subtitle_id=None, delay=0))
+                bridge.cast.media_controller.stop.assert_called_once()
                 command = launch.call_args.args[0]
                 self.assertLess(command.index('-ss'), command.index('-i'))
                 self.assertEqual(command[command.index('-ss') + 1], '60')
                 self.assertEqual(command[command.index('-start_number') + 1], '10')
                 self.assertEqual(command[command.index('-t') + 1], '30')
                 self.assertTrue(bridge.status()['pending'])
-                self.assertEqual(bridge.active_plan.delay_ms, 500)
                 produce(bridge.session, 10, 11, 12)
                 (bridge.session / 'master.m3u8').touch()
                 bridge.tick()
                 call = bridge.cast.media_controller.play_media.call_args
-                self.assertEqual(call.args[0], f'http://192.0.2.1:18766/{bridge.session.name}/d500/master.m3u8')
+                self.assertEqual(call.args[0], f'http://192.0.2.1:18766/{bridge.session.name}/d0/master.m3u8')
                 self.assertFalse(call.kwargs['autoplay'])
                 self.assertEqual(call.kwargs['current_time'], 60)
                 self.assertEqual(call.kwargs['media_info']['duration'], 90)
                 self.assertTrue(bridge.status()['pending'])
-                receiver = bridge.cast.media_controller.status
                 receiver.content_id = bridge.media_url
                 receiver.player_state = 'BUFFERING'
                 receiver.adjusted_current_time = 65
@@ -109,23 +109,6 @@ class RestartPolicyTest(unittest.TestCase):
                 bridge.stop()
                 self.assertEqual(cast.media_controller.stop.call_count, int(owned))
                 cast.disconnect.assert_called_once()
-
-    def test_restarts_clamp_to_absolute_end(self):
-        for limit, expected in ((90, 89.9), (None, 119.9), (200, 119.9)):
-            with self.subTest(limit=limit), tempfile.TemporaryDirectory(
-                    dir=Path(__file__).resolve().parents[1]) as folder:
-                bridge = self.fixture(Path(folder))
-                bridge.args.max_duration = limit
-                bridge.duration = min(120, limit or 120)
-                bridge.cast.media_controller.status.content_id = bridge.media_url
-                producer = Mock(pid=123)
-                producer.poll.return_value = None
-                with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
-                     patch('bridge.subprocess.Popen', return_value=producer), \
-                     patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
-                    bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 999})
-                    self.assertAlmostEqual(bridge.status()['absolute_time'], expected)
-                    bridge.cast.media_controller.stop.assert_called_once()
 
     def test_delay_change_reloads_the_running_session_at_the_receiver_position(self):
         for player_state in ('PLAYING', 'PAUSED'):
@@ -201,6 +184,96 @@ class RestartPolicyTest(unittest.TestCase):
                 bridge.mutate('subtitles', apply_data(bridge, enabled=False, subtitle_id=None, delay=0))
             self.assertEqual(begin.call_args.args[0], 65)
             bridge.cast.media_controller.play_media.assert_not_called()
+
+
+class ReceiverSeekTest(unittest.TestCase):
+    fixture = RestartPolicyTest.fixture
+
+    def playing(self, folder, player_state='PLAYING'):
+        bridge = self.fixture(Path(folder))
+        bridge.update(duration=90)
+        bridge.producer.command = lambda start, limit: ['ffmpeg', start, limit]
+        receiver = bridge.cast.media_controller.status
+        receiver.content_id, receiver.player_state, receiver.adjusted_current_time = bridge.media_url, player_state, 30
+        bridge.update(absolute_time=30)
+        running_producer(bridge)
+        return bridge
+
+    def seek(self, bridge, **target):
+        bridge.mutate('seek', {'device_id': 'fixture-device', 'device_revision': 1, **target})
+
+    def sent(self, bridge):
+        return [call.args for call in bridge.cast.media_controller._send_command.call_args_list]
+
+    def test_seek_is_a_receiver_seek_that_keeps_the_pause_state(self):
+        for player_state, resume in (('PLAYING', 'PLAYBACK_START'), ('PAUSED', 'PLAYBACK_PAUSE')):
+            with self.subTest(player_state=player_state), tempfile.TemporaryDirectory() as folder:
+                bridge = self.playing(folder, player_state)
+                produce(bridge.session, *range(15))
+                session, identity, url = bridge.session, bridge.state['playback_id'], bridge.media_url
+                with patch('vod.subprocess.Popen', side_effect=AssertionError('no restart')):
+                    self.seek(bridge, position=60)
+                    self.seek(bridge, delta=-45)
+                self.assertEqual(self.sent(bridge), [
+                    ({'type': 'SEEK', 'currentTime': 60, 'resumeState': resume}, None),
+                    ({'type': 'SEEK', 'currentTime': 15, 'resumeState': resume}, None)])
+                self.assertEqual(bridge.paused, player_state == 'PAUSED')
+                self.assertEqual((bridge.session, bridge.state['playback_id'], bridge.media_url), (session, identity, url))
+                controller = bridge.cast.media_controller
+                controller.play_media.assert_not_called()
+                controller.stop.assert_not_called()
+                controller.seek.assert_not_called()
+
+    def test_seek_clamps_to_the_movie(self):
+        for position, expected in ((999, 89.9), (-5, 0)):
+            with self.subTest(position=position), tempfile.TemporaryDirectory() as folder:
+                bridge = self.playing(folder)
+                produce(bridge.session, *range(15))
+                self.seek(bridge, position=position)
+                self.assertEqual(self.sent(bridge)[0][0]['currentTime'], expected)
+
+    def test_far_seek_warms_the_producer_at_the_target_and_a_near_one_does_not(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:
+            bridge = self.playing(folder)
+            produce(bridge.session, *range(0, 6))
+            previous = bridge.producer.process
+            self.seek(bridge, position=40)
+            launch.assert_not_called()
+            self.seek(bridge, position=70)
+            previous.kill.assert_called_once()
+            self.assertEqual(launch.call_args.args[0], ['ffmpeg', 11, 15])
+            self.assertEqual(self.sent(bridge)[-1][0]['currentTime'], 70)
+
+    def test_tick_follows_the_seek_target_until_the_receiver_reports_it(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:
+            bridge = self.playing(folder)
+            produce(bridge.session, *range(0, 6))
+            launch.return_value = Mock(pid=4321, **{'poll.return_value': None})
+            self.seek(bridge, position=70)
+            self.assertEqual(launch.call_count, 1)
+            bridge.tick()
+            self.assertEqual(launch.call_count, 1, 'a stale receiver time must not pull the producer back')
+            self.assertEqual(bridge.status()['absolute_time'], 70)
+            bridge.cast.media_controller.status.adjusted_current_time = 70.5
+            bridge.tick()
+            self.assertEqual(bridge.status()['absolute_time'], 70.5)
+            bridge.cast.media_controller.status.adjusted_current_time = 31
+            bridge.tick()
+            self.assertEqual(bridge.status()['absolute_time'], 31, 'once confirmed, the receiver is the playhead again')
+
+    def test_seek_needs_the_receiver_to_show_this_playback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bridge = self.playing(folder)
+            bridge.cast.media_controller.status.content_id = 'http://unrelated/movie'
+            with self.assertRaises(BridgeError) as refused:
+                self.seek(bridge, position=60)
+            self.assertEqual(refused.exception.code, 'receiver_not_ready')
+            bridge.cast.media_controller._send_command.assert_not_called()
+            for target in ({'position': float('nan')}, {'delta': float('inf')}, {'position': '60'}, {}):
+                with self.subTest(target=target), self.assertRaises(BridgeError):
+                    bridge.cast.media_controller.status.content_id = bridge.media_url
+                    self.seek(bridge, **target)
+            bridge.cast.media_controller._send_command.assert_not_called()
 
 
 class ReceiverOwnershipTest(unittest.TestCase):

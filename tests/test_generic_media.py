@@ -190,8 +190,12 @@ class CatalogueTest(unittest.TestCase):
                 self.assertTrue(bridge.paused)
                 bridge.catalogue.request(dict(bridge.active_plan.catalogue.source), refresh=True)
                 self.assertEqual(bridge.catalogue.snapshot()[source_id]['state'], 'loading')
+                bridge.loaded = True
+                bridge.media_url = bridge.cast.media_controller.status.content_id = 'http://tv/new-session'
                 bridge.mutate('seek', dict(device_id='fixture-device', device_revision=1, position=75))
-                self.assertEqual(bridge.load_time, 75)
+                self.assertEqual(bridge.cast.media_controller._send_command.call_args.args[0],
+                                 {'type': 'SEEK', 'currentTime': 75, 'resumeState': 'PLAYBACK_PAUSE'})
+                launch.assert_called_once()
                 self.assertTrue(bridge.paused)
                 self.assertTrue(path.exists())
                 self.assertEqual(bridge.state['playback_id'], identity)

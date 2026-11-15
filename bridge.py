@@ -38,6 +38,7 @@ MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': '
 
 DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
+SEEK_CONFIRM_SECONDS = 10
 # Cues that start this many segments before a window can still be on screen in it.
 CUE_LOOKBACK = 2
 DUPLICATE_MS = 100
@@ -356,6 +357,8 @@ def lookup_hint(hint):
 
 class Bridge:
     """A single mutation worker; status reads never wait for probe or discovery."""
+    seek_target = None
+
     def __init__(self, args, lan_ip=None):
         self.args, self.lan_ip = args, lan_ip
         self.sessions = ROOT / '.local' / 'sessions'
@@ -908,6 +911,7 @@ class Bridge:
             self.receiver_confirmed = False
             self.media_url = None
             self.session = None
+            self.seek_target = None
             if plan is not None:
                 previous = self.active_plan
                 if previous is None or previous.catalogue.id != plan.catalogue.id:
@@ -1051,14 +1055,22 @@ class Bridge:
             self.paused = action == 'pause'
             (self.cast.media_controller.pause if self.paused else self.cast.media_controller.play)()
         elif action == 'seek':
-            if not self.session:
-                raise BridgeError('Primero iniciá una fuente.')
-            status = self.status()
-            target = float(data['position']) if 'position' in data else status['absolute_time'] + float(data['delta'])
-            if not math.isfinite(target):
-                raise BridgeError('La posición debe ser finita.')
+            if not self._owns_playback():
+                raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
+            value = data.get('position', data.get('delta'))
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise BridgeError('La posición debe ser un número finito.')
+            target = value if 'position' in data else self.status()['absolute_time'] + value
             target = min(max(0, target), max(0, self.duration - 0.1))
-            self.begin(target)
+            paused = self.cast.media_controller.status.player_state == 'PAUSED'
+            self.producer.cover(self.producer.layout.index_at(target))
+            # pychromecast's seek() always resumes playback; a raw SEEK keeps a paused TV paused.
+            self.cast.media_controller._send_command(
+                {'type': 'SEEK', 'currentTime': target,
+                 'resumeState': 'PLAYBACK_PAUSE' if paused else 'PLAYBACK_START'}, None)
+            self.paused = paused
+            self.seek_target = target, time.monotonic() + SEEK_CONFIRM_SECONDS
+            self.update(absolute_time=target)
         else:
             raise BridgeError('Acción desconocida.')
 
@@ -1114,7 +1126,13 @@ class Bridge:
             status = self.cast.media_controller.status
             owns_status = connected and status.content_id == self.media_url
             if owns_status:
-                absolute = min(self.duration, max(0, float(status.adjusted_current_time or 0)))
+                reported = min(self.duration, max(0, float(status.adjusted_current_time or 0)))
+                pending = self.seek_target
+                # Until the TV reports the jump, its old time would pull the producer back.
+                if pending and abs(reported - pending[0]) > SEGMENT_SECONDS and time.monotonic() < pending[1]:
+                    absolute = pending[0]
+                else:
+                    self.seek_target, absolute = None, reported
             receiver = status.player_state if owns_status else 'PENDING'
             observed_tracks = status.current_subtitle_tracks if owns_status else None
             tracks = list(observed_tracks) if observed_tracks is not None else []
