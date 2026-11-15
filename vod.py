@@ -149,7 +149,7 @@ class Producer:
         self.suspended = self.closed = False
         self.holds = {}  # arrival number -> (index, cue), for every request held right now
         self.arrivals = 0
-        self.first_seen = {}
+        self.first_seen = {}  # (index, cue) -> when the receiver first asked, across its retries
 
     def complete(self, index):
         try:
@@ -254,9 +254,9 @@ class Producer:
             if self.closed:
                 return 'missing'
             now = time.monotonic()
-            seen = self.first_seen.get(index)
+            seen = self.first_seen.get((index, cue))
             if seen is None or now - seen > self.hold_seconds + RETRY_GAP_SECONDS:
-                seen = self.first_seen[index] = now
+                seen = self.first_seen[index, cue] = now
             deadline = seen + self.hold_seconds
             same = [other for other, held in self.holds.items() if held == (index, cue)]
             for abandoned in same[:len(same) + 1 - WAITS_PER_SEGMENT]:
@@ -286,7 +286,7 @@ class Producer:
         action = segment_action(index, self.complete(index), run, caller, newer)
         expired = time.monotonic() >= deadline
         if action == 'serve' and (expired or not self._coming(extra, run)):
-            self.first_seen.pop(index, None)
+            self.first_seen.pop((index, caller == 'cue'), None)
             return 'serve'
         if action in ('end', 'missing'):
             return action

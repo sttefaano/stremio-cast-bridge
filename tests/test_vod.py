@@ -288,6 +288,17 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.request(2), 'missing')
         self.assertLess(time.monotonic() - started, .6, 'a retry shares the first deadline')
 
+    def test_a_cue_request_never_shortens_the_hold_of_the_video_segment_it_shares_an_index_with(self):
+        producer = self.producer(hold_seconds=.4)
+        producer.cover(0)
+        cue = threading.Thread(target=producer.request, args=(2,), kwargs={'cue': True})
+        cue.start()
+        time.sleep(.3)
+        started = time.monotonic()
+        self.assertEqual(producer.request(2), 'missing')
+        self.assertGreater(time.monotonic() - started, .35, 'the video request holds for its own full window')
+        cue.join(1)
+
     def test_a_run_that_stops_within_the_last_two_listed_segments_marks_the_end(self):
         self.layout = VodLayout(60.021)
         producer = self.producer()
