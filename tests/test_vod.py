@@ -1,6 +1,12 @@
+import signal
+import tempfile
+import threading
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from vod import VodLayout
+from vod import Producer, Run, VodLayout, segment_action
 
 
 class VodLayoutTest(unittest.TestCase):
@@ -52,6 +58,183 @@ class VodLayoutTest(unittest.TestCase):
         self.assertEqual(layout.start(6), 36)
         self.assertEqual(layout.window(6), (36000, 42000))
         self.assertEqual(layout.window(10), (60000, 60334))
+
+
+
+class SegmentActionTest(unittest.TestCase):
+    def test_request_decision_table(self):
+        running = Run(start=10, limit=30, position=12, state='running')
+        cases = (
+            ('on disk', 4, True, running, 'serve'),
+            ('being written', 12, False, running, 'hold'),
+            ('within reach', 15, False, running, 'hold'),
+            ('just out of reach', 16, False, running, 'restart'),
+            ('behind the producer start', 9, False, running, 'restart'),
+            ('past the run bound', 30, False, Run(10, 30, 28, 'running'), 'restart'),
+            ('never started', 0, False, Run(0, 0, 0, 'idle'), 'restart'),
+            ('finished run never wrote it', 29, False, Run(10, 30, 29, 'finished'), 'missing'),
+            ('finished run elsewhere', 40, False, Run(10, 30, 30, 'finished'), 'restart'),
+            ('failed producer', 12, False, Run(10, 30, 12, 'failed'), 'missing'),
+        )
+        for label, index, complete, run, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(segment_action(index, complete, run), expected)
+
+
+class FakeProcess:
+    pids = iter(range(1000, 2000))
+
+    def __init__(self, command, **_):
+        self.command, self.pid, self.code, self.signals = command, next(self.pids), None, []
+
+    def poll(self):
+        return self.code
+
+    def send_signal(self, value):
+        self.signals.append(value)
+
+    def kill(self):
+        self.signals.append(signal.SIGKILL)
+        self.code = -9
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+class ProducerTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.directory = Path(folder.name)
+        self.layout = VodLayout(120)
+        self.launched = []
+        launch = patch('vod.subprocess.Popen', side_effect=self.launch)
+        launch.start()
+        self.addCleanup(launch.stop)
+
+    def launch(self, command, **kwargs):
+        process = FakeProcess(command, **kwargs)
+        self.launched.append(process)
+        return process
+
+    def producer(self, **kwargs):
+        return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
+                        poll_seconds=.01, **kwargs)
+
+    def write(self, *indices):
+        for index in indices:
+            (self.directory / self.layout.segment_name(index)).write_bytes(b'ts')
+
+    def test_cover_starts_at_the_first_gap_and_stops_before_segments_already_on_disk(self):
+        self.write(0, 1, 2, 8, 9)
+        producer = self.producer()
+        producer.cover(0)
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 3, 8]])
+        producer.cover(1)
+        self.assertEqual(len(self.launched), 1, 'the gap is already being produced')
+        self.write(3, 4, 5, 6, 7)
+        self.launched[0].code = 0
+        producer.cover(5)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 10, 20])
+        self.assertEqual(self.launched[0].signals, [])
+
+    def test_restart_kills_the_previous_run_and_removes_its_partial_files(self):
+        producer = self.producer()
+        producer.cover(0)
+        (self.directory / 'segment-0000.ts.tmp').write_bytes(b'partial')
+        producer.cover(15)
+        self.assertEqual(self.launched[0].signals, [signal.SIGKILL])
+        self.assertEqual(self.launched[1].command, ['ffmpeg', 15, 20])
+        self.assertFalse((self.directory / 'segment-0000.ts.tmp').exists())
+
+    def test_cover_within_a_horizon_leaves_far_gaps_alone(self):
+        self.write(*range(0, 12))
+        producer = self.producer()
+        producer.cover(0, horizon=60)
+        self.assertEqual(self.launched, [])
+        producer.cover(3, horizon=60)
+        self.assertEqual(self.launched[0].command, ['ffmpeg', 12, 20])
+
+    def test_concurrent_requests_for_a_far_segment_restart_once(self):
+        producer = self.producer(hold_seconds=2)
+        producer.cover(0)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(producer.request(15))) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        time.sleep(.1)
+        self.write(15)
+        for thread in threads:
+            thread.join(3)
+        self.assertEqual(results, [True] * 4)
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 15, 20]])
+
+    def test_held_request_keeps_the_producer_running(self):
+        self.write(*range(0, 12))
+        producer = self.producer(hold_seconds=2)
+        producer.cover(0, horizon=None)
+        process = self.launched[0]
+        producer.throttle(0)
+        self.assertEqual(process.signals, [signal.SIGSTOP])
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(13)))
+        holder.start()
+        time.sleep(.1)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT])
+        producer.throttle(0)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT], 'no SIGSTOP while a request is held')
+        self.write(12, 13)
+        holder.join(2)
+        self.assertEqual(result, [True])
+        producer.throttle(0)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT, signal.SIGSTOP])
+
+    def test_throttle_follows_the_producer_position(self):
+        producer = self.producer()
+        producer.cover(0)
+        process = self.launched[0]
+        self.write(*range(0, 11))
+        producer.throttle(6)
+        self.assertEqual(process.signals, [], '66 s produced, 60 s ahead')
+        producer.throttle(5)
+        self.assertEqual(process.signals, [signal.SIGSTOP])
+        producer.throttle(20)
+        self.assertEqual(process.signals, [signal.SIGSTOP], '46 s ahead stays suspended')
+        producer.throttle(22)
+        self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT])
+        self.assertEqual(producer.snapshot().suspended, False)
+
+    def test_hold_is_bounded_per_segment_across_receiver_retries(self):
+        producer = self.producer(hold_seconds=.3)
+        producer.cover(0)
+        started = time.monotonic()
+        self.assertFalse(producer.request(2))
+        self.assertFalse(producer.request(2))
+        self.assertLess(time.monotonic() - started, .6, 'a retry shares the first deadline')
+
+    def test_finished_run_answers_missing_segments_without_restarting(self):
+        self.layout = VodLayout(60.021)
+        producer = self.producer()
+        producer.cover(0)
+        self.launched[0].code = 0
+        self.write(*range(0, 9))
+        self.assertFalse(producer.request(9))
+        self.assertEqual(len(self.launched), 1)
+
+    def test_closed_producer_releases_holds_and_never_starts_again(self):
+        producer = self.producer(hold_seconds=2)
+        producer.cover(0)
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(2)))
+        holder.start()
+        time.sleep(.05)
+        producer.close()
+        holder.join(1)
+        self.assertEqual(result, [False])
+        self.assertEqual(self.launched[0].signals, [signal.SIGKILL])
+        producer.cover(5)
+        self.assertFalse(producer.request(5))
+        self.assertEqual(len(self.launched), 1)
 
 
 if __name__ == '__main__':
