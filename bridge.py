@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from pathlib import Path
+from typing import NamedTuple
 import queue
 import re
 import secrets
@@ -41,7 +42,6 @@ CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?
 
 
 def safe_media_path(root, request_path):
-    """Resolve /<session>/d<delay ms>/<file> to the session file and the delay of its served view."""
     try:
         parts = unquote(urlsplit(request_path).path).lstrip('/').split('/')
         if len(parts) != 3 or any(p in ('', '.', '..') or '\\' in p or '\x00' in p for p in parts):
@@ -85,20 +85,30 @@ def subtitle_view(root, path, delay_ms):
     return None if body is None else io.BytesIO(body.encode())
 
 
-@functools.lru_cache(maxsize=8192)
 def segment_cues(root, path):
-    """Session names are never reused and FFmpeg never rewrites a segment once it is listed."""
+    info = path.stat()
+    return file_cues(root, path, info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+@functools.lru_cache(maxsize=8192)
+def file_cues(root, path, *identity):
     with open_media(root, path) as stream:
         return tuple(parse_cues(stream.read().decode('utf-8', 'replace')))
 
 
+class SubtitleWindow(NamedTuple):
+    name: str
+    start: int
+    end: int
+    entry: str
+
+
 def subtitle_windows(playlist):
-    """(name, start ms, end ms, playlist entry) per listed WebVTT segment, from the cumulative #EXTINF."""
     windows, total = [], 0.0
     for entry in re.finditer(r'#EXTINF:([0-9.]+),[^\n]*\n([\w-]+\.vtt)\n?', playlist):
         start = round(total * 1000)
         total += float(entry[1])
-        windows.append((entry[2], start, round(total * 1000), entry[0]))
+        windows.append(SubtitleWindow(entry[2], start, round(total * 1000), entry[0]))
     return windows
 
 
@@ -106,21 +116,21 @@ def delayed_playlist(playlist, delay_ms):
     windows = subtitle_windows(playlist)
     if delay_ms >= 0 or '#EXT-X-ENDLIST' in playlist or not windows:
         return playlist
-    covered = windows[-1][2]
-    return playlist[:playlist.index(windows[0][3])] + ''.join(
-        entry for _, _, end, entry in windows if end - delay_ms <= covered)
+    covered = windows[-1].end
+    return playlist[:playlist.index(windows[0].entry)] + ''.join(
+        window.entry for window in windows if window.end - delay_ms <= covered)
 
 
 def delayed_segment(playlist, name, cues_of, delay_ms):
     windows = subtitle_windows(playlist)
-    window = next(((start, end) for listed, start, end, _ in windows if listed == name), None)
+    window = next((window for window in windows if window.name == name), None)
     if window is None:
         return None
     # FFmpeg can write a cue into a later segment than its start (seen two windows late), so use every listed one.
-    cues = {cue for listed, *_ in windows for cue in cues_of(listed)}
+    cues = {cue for listed in windows for cue in cues_of(listed.name)}
     shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text)
                    for start, end, settings, text in cues
-                   if end + delay_ms > window[0] and max(0, start + delay_ms) < window[1])
+                   if end + delay_ms > window.start and max(0, start + delay_ms) < window.end)
     return 'WEBVTT\n' + ''.join(f'\n{timestamp(start)} --> {timestamp(end)}{settings}\n{text}\n'
                                 for start, end, settings, text in shown)
 
@@ -147,8 +157,7 @@ def timestamp(ms):
     return f'{ms // 3600000:02}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}'
 
 
-# Drop expired seek preroll; clip crossing starts/durations while preserving ends.
-SUBTITLE_FILTER = ("noise=amount=0:drop='lte(pts+duration,0)',"
+CLIP_SEEK_PREROLL = ("noise=amount=0:drop='lte(pts+duration,0)',"
                    "setts=pts='max(PTS,0)':dts='max(DTS,0)':duration='max(0,DURATION+min(0,PTS))'")
 
 
@@ -174,7 +183,7 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
     mapping = 'v:0,a:0'
     if subtitle:
         language = subtitle.language or 'und'
-        captions = ['-c:s', 'webvtt', '-bsf:s', SUBTITLE_FILTER,
+        captions = ['-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL,
                     '-metadata:s:s:0', f'language={language}']
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
@@ -846,7 +855,7 @@ class Bridge:
             errors.append('No se pudo detener el productor.')
         if self.cast:
             try:
-                if self.media_url and self.cast.media_controller.status.content_id == self.media_url:
+                if self._tv_shows_session():
                     self.cast.media_controller.stop()
             except Exception:
                 if not shutdown:
@@ -901,8 +910,7 @@ class Bridge:
                 raise PreparationCancelled('Preparación cancelada.')
         check_cancelled()
         self.stop_process()
-        if (self.cast and self.media_url
-                and self.cast.media_controller.status.content_id == self.media_url):
+        if self.cast and self._tv_shows_session():
             self.cast.media_controller.stop()
         with self.state_lock:
             check_cancelled()
@@ -1064,6 +1072,13 @@ class Bridge:
             current_time=current_time, autoplay=not self.paused, stream_type='BUFFERED',
             media_info={'duration': self.duration - self.origin})
         self.loaded = True
+
+    def _tv_shows_session(self):
+        content = self.cast.media_controller.status.content_id
+        if not content or not self.media_url:
+            return False
+        return content == self.media_url or bool(self.session) and content.startswith(
+            f'http://{self.lan_ip}:{self.args.media_port}/{self.session.name}/')
 
     def _owns_playback(self):
         return (self.loaded and self.cast and self.media_url

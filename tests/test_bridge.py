@@ -16,7 +16,7 @@ from uuid import UUID
 from pychromecast import Chromecast
 from pychromecast.models import CastInfo
 
-from bridge import main, Bridge, safe_media_path, SUBTITLE_FILTER, FFMPEG, playback_position, public_status, ffmpeg_command, probe
+from bridge import main, Bridge, safe_media_path, CLIP_SEEK_PREROLL, FFMPEG, playback_position, public_status, ffmpeg_command, probe
 from media import Catalogue, PlaybackPlan
 from backend_fixtures import install_media, apply_data, media_server, served_cues
 
@@ -153,6 +153,24 @@ class RestartPolicyTest(unittest.TestCase):
                 self.assertEqual(bridge.status()['phase'], player_state.lower())
                 self.assertEqual(bridge.status()['absolute_time'], 65.5)
                 bridge.cast.media_controller.play_media.assert_called_once()
+
+    def test_stop_before_the_tv_confirms_a_delay_change_stops_the_tv(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            bridge.state['playback_id'] = 'playback'
+            bridge.receiver_confirmed = True
+            bridge.process = producer = Mock()
+            producer.poll.return_value = None
+            bridge.media_url = 'http://192.0.2.1:18766/old/d500/master.m3u8'
+            receiver = bridge.cast.media_controller.status
+            receiver.content_id = bridge.media_url
+            with patch.object(bridge, 'begin', side_effect=AssertionError('no rebuild')):
+                bridge.mutate('subtitles', apply_data(bridge, delay=-1500))
+            self.assertNotEqual(bridge.media_url, receiver.content_id)
+            controller = bridge.cast.media_controller
+            bridge.mutate('stop', {'device_id': 'fixture-device', 'device_revision': 1,
+                                   'playback_id': 'playback'})
+            controller.stop.assert_called_once()
 
     def test_track_change_still_rebuilds_from_the_current_position(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
@@ -343,7 +361,6 @@ class SubtitleTimingTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertNotIn('X-TIMESTAMP-MAP', ''.join(p.read_text() for p in session.glob('*.vtt')))
             # Literal times relative to seek=10; allow only the small AAC offset.
-            # The producer clips Crossing at the seek point before any delay is applied.
             cases = (
                 (500, {'Crossing': (0.5, 3.5), 'Early': (0.7, 0.9),
                        'Future': (1.5, 5.5), 'Later': (7.5, 11.5)}),
@@ -368,7 +385,7 @@ class SubtitleTimingTest(unittest.TestCase):
             source = Path(folder) / 'seek.srt'
             source.write_text('1\n00:01:02,355 --> 00:01:04,000\nHola\n')
             result = subprocess.run([FFMPEG, '-v', 'error', '-ss', '60', '-i', str(source),
-                '-c:s', 'webvtt', '-bsf:s', SUBTITLE_FILTER, '-f', 'webvtt', '-'],
+                '-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL, '-f', 'webvtt', '-'],
                 capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertIn(b'00:02.355 --> 00:04.000', result.stdout)

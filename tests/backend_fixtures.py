@@ -35,7 +35,6 @@ def seconds(stamp):
 
 
 def served_cues(fetch, session, delay_ms):
-    """label -> (start, end) seconds across the served view; a cue repeated in two segments must be identical."""
     def get(name):
         return fetch(f'/{session}/d{delay_ms}/{name}').read().decode()
     cues = {}
