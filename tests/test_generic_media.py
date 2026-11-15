@@ -73,6 +73,55 @@ class CatalogueTest(unittest.TestCase):
         self.assertEqual(scans.call_count, 2)
         self.assertEqual(waits, [30, 30])
 
+    def test_explicit_cli_startup_retries_on_a_later_scan_that_finds_the_device(self):
+        from test_device_selector import DeviceSelectorTest
+        from backend_fixtures import seed_plan
+        for first in ('empty', 'error'):
+            with self.subTest(first=first):
+                bridge = DeviceSelectorTest().fixture()
+                bridge.args = arguments(['--device-name', 'Sala', '--autostart'])
+                info = DeviceSelectorTest().info()
+                source = dict(id='source', url='synthetic', title='Synthetic')
+                bridge.sources = [source]
+                bridge.source_snapshot['source_discovery'] = 'ready'
+                seed_plan(bridge, source)
+                attempts, started = [], threading.Event()
+                original = bridge.submit
+                def submit(action, data, expected_generation=None):
+                    original(action, data, expected_generation)
+                    if action == 'configure_device':
+                        attempts.append(action)
+                        action, payload, _ = bridge.jobs.get_nowait()
+                        try:
+                            bridge.mutate(action, payload)
+                        except MediaError:
+                            pass
+                        bridge.update(command_pending=False)
+                    elif action == 'start':
+                        started.set()
+                if first == 'empty':
+                    with patch('bridge.discover_receivers', return_value=[]):
+                        bridge.scan_devices()
+                else:
+                    with patch('bridge.discover_receivers', side_effect=OSError('mDNS unavailable')), \
+                         self.assertRaises(MediaError):
+                        bridge.scan_devices()
+                with patch.object(bridge, 'submit', side_effect=submit):
+                    startup = threading.Thread(target=bridge._configured_startup, daemon=True)
+                    startup.start()
+                    time.sleep(.3)
+                    self.assertEqual(len(attempts), 1 if first == 'empty' else 0)
+                    with patch('bridge.discover_receivers', return_value=[info]):
+                        bridge.scan_devices()
+                    self.assertTrue(started.wait(5))
+                    startup.join(5)
+                self.assertFalse(startup.is_alive())
+                self.assertEqual(len(attempts), 2 if first == 'empty' else 1)
+                self.assertEqual(bridge.status()['selected_device']['id'], str(info.uuid))
+                action, payload, _ = bridge.jobs.get_nowait()
+                self.assertEqual(action, 'start')
+                self.assertEqual(payload['source_id'], 'source')
+
     def test_upload_plain_vtt_preserves_text_and_validates_cue_settings(self):
         from demo import DemoBridge
         bridge = DemoBridge()

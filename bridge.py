@@ -295,6 +295,7 @@ class Bridge:
         self.device_lock = threading.Lock()
         self.source_lock = threading.Lock()
         self.device_snapshot = dict(device_discovery='idle', device_error=None, devices=[])
+        self.device_scans = 0
         self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[])
         self.device_wake, self.source_wake = threading.Event(), threading.Event()
         self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local')
@@ -350,7 +351,7 @@ class Bridge:
         """The explicit CLI opt-in waits for metadata, never inside playback work."""
         deadline = time.monotonic() + 70
         generation = self.cancel_generation
-        selection_submitted = False
+        attempted_scan = None
         source = None
         while not self.quit.is_set() and time.monotonic() < deadline:
             with self.state_lock:
@@ -358,17 +359,15 @@ class Bridge:
                     return
                 selected = self.state.get('selected_device')
                 pending = self.state.get('command_pending', False)
-            if not selection_submitted:
+            if not selected and not pending:
                 with self.device_lock:
-                    discovery = self.device_snapshot['device_discovery']
-                if discovery == 'ready':
+                    discovery, scan = self.device_snapshot['device_discovery'], self.device_scans
+                if discovery == 'ready' and scan != attempted_scan:
+                    attempted_scan = scan
                     try:
                         self.submit('configure_device', {}, expected_generation=generation)
                     except MediaError:
                         return
-                    selection_submitted = True
-                elif discovery == 'error':
-                    return
             elif selected and not pending:
                 if not self.args.autostart:
                     return
@@ -471,6 +470,7 @@ class Bridge:
                 if not self.quit.is_set():
                     self.devices = devices
                     self.device_snapshot.update(devices=[receiver_metadata(i) for i in devices.values()], device_discovery='ready')
+                    self.device_scans += 1
         except Exception:
             with self.device_lock:
                 if not self.quit.is_set():
