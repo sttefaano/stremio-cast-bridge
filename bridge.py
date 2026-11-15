@@ -1056,14 +1056,18 @@ class Bridge:
             self.paused = action == 'pause'
             (self.cast.media_controller.pause if self.paused else self.cast.media_controller.play)()
         elif action == 'seek':
-            if not self._owns_playback() or self.cast.media_controller.status.media_session_id is None:
+            receiver = self.cast.media_controller.status if self.cast else None
+            # A tap while the TV still buffers the previous seek retargets it instead of being lost.
+            if (not (self._owns_playback() or self.loaded and self.media_url and receiver.player_state == 'BUFFERING'
+                     and receiver.content_id == self.media_url and self.cast.socket_client.is_connected is not False)
+                    or receiver.media_session_id is None):
                 raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
             value = data.get('position', data.get('delta'))
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise BridgeError('La posición debe ser un número finito.')
             target = value if 'position' in data else self.status()['absolute_time'] + value
             target = min(max(0, target), max(0, self.duration - 0.1))
-            paused = self.cast.media_controller.status.player_state == 'PAUSED'
+            paused = self.paused if receiver.player_state == 'BUFFERING' else receiver.player_state == 'PAUSED'
             self.producer.seek(self.producer.layout.index_at(target))
             # pychromecast's seek() always resumes playback; a raw SEEK keeps a paused TV paused.
             self.cast.media_controller._send_command(

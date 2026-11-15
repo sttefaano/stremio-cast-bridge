@@ -307,6 +307,21 @@ class ReceiverSeekTest(unittest.TestCase):
                 answer = fetch(f'/{bridge.session.name}/d0/segment-0014.ts')
                 self.assertEqual((answer.status, answer.headers['Content-Length'], answer.read()), (200, '0', b''))
 
+    def test_a_seek_while_the_receiver_buffers_the_previous_one_is_applied(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen'):
+            bridge = self.playing(folder)
+            self.seek(bridge, position=20)
+            bridge.cast.media_controller.status.player_state = 'BUFFERING'
+            self.seek(bridge, delta=30)
+            sent = bridge.cast.media_controller._send_command.call_args.args[0]
+            self.assertEqual((sent['currentTime'], sent['resumeState']), (50, 'PLAYBACK_START'),
+                             'a second tap during buffering builds on the pending target and keeps playing')
+            bridge.paused = True
+            self.seek(bridge, position=70)
+            sent = bridge.cast.media_controller._send_command.call_args.args[0]
+            self.assertEqual((sent['currentTime'], sent['resumeState']), (70, 'PLAYBACK_PAUSE'),
+                             'buffering after a paused seek keeps the TV paused')
+
     def test_seek_needs_the_receiver_to_show_this_playback(self):
         with tempfile.TemporaryDirectory() as folder:
             bridge = self.playing(folder)
