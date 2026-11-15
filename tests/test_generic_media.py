@@ -9,7 +9,8 @@ from pathlib import Path
 
 from bridge import FFMPEG, probe, ffmpeg_command
 from bridge import Bridge, arguments
-from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, normalize_subtitles
+from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, analyse, normalize_subtitles
+from vod import VodLayout
 from backend_fixtures import media_server, served_cues, finished_producer, produce, running_producer
 import re
 import os
@@ -652,6 +653,39 @@ class GenericProducerTest(unittest.TestCase):
                                 self.assertAlmostEqual(cues[label][1], end, delta=.1)
             finally:
                 store.close()
+
+    def test_the_movie_ends_with_its_video_when_audio_runs_longer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'long-audio.mkv'
+            fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=160x90:r=24:d=20.5',
+                '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo:d=25', '-map', '0:v', '-map', '1:a',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', str(source)], capture_output=True, timeout=15)
+            self.assertEqual(fixture.returncode, 0, fixture.stderr.decode())
+            analysis = probe(str(source))
+            self.assertAlmostEqual(analysis.duration, 20.5, delta=.1)
+            session = root / 'session'
+            session.mkdir()
+            plan = PlaybackPlan(Catalogue('c', dict(id='s', url=str(source)), analysis), None, 0, False)
+            result = subprocess.run(ffmpeg_command(str(source), session, plan, duration=analysis.duration, readrate=1000),
+                                    capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            written = sorted(p.name for p in session.glob('segment-*.ts'))
+            layout = VodLayout(analysis.duration)
+            self.assertEqual(written, [layout.segment_name(i) for i in range(layout.count)])
+
+    def test_analysis_reads_the_video_length_from_the_stream_or_its_tag(self):
+        def probed(video, format_duration='25.000000'):
+            return {'format': {'duration': format_duration},
+                    'streams': [dict(index=0, codec_type='video', **video), dict(index=1, codec_type='audio')]}
+        for label, video, expected in (('mp4 stream', {'duration': '20.500000'}, 20.5),
+                                       ('mkv tag', {'tags': {'DURATION': '00:00:20.500000000'}}, 20.5),
+                                       ('mkv language tag', {'tags': {'DURATION-eng': '00:00:20.500'}}, 20.5),
+                                       ('unknown', {}, 25), ('garbage tag', {'tags': {'DURATION': 'soon'}}, 25),
+                                       ('longer than the file', {'duration': '30'}, 25),
+                                       ('zero', {'duration': '0'}, 25)):
+            with self.subTest(label):
+                self.assertEqual(analyse(probed(video)).duration, expected)
 
     def test_all_four_plans_grow_before_producer_exit(self):
         with tempfile.TemporaryDirectory() as folder:

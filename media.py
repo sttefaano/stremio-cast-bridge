@@ -95,12 +95,14 @@ class PlaybackPlan:
 
 def analyse(data):
     streams = data['streams']
-    video = next(s['index'] for s in streams if s['codec_type'] == 'video'
+    video = next(s for s in streams if s['codec_type'] == 'video'
                  and not s.get('disposition', {}).get('attached_pic'))
     audio = next(s['index'] for s in streams if s['codec_type'] == 'audio')
     duration = float(data['format']['duration'])
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError('duration')
+    # FFmpeg writes no segment after the last video frame, so a longer audio track must not extend the list.
+    duration = min(duration, stream_seconds(video) or duration)
     entries = []
     for stream in streams:
         if stream['codec_type'] != 'subtitle':
@@ -112,7 +114,21 @@ def analyse(data):
         label = title[:180] if isinstance(title, str) and title.strip() else language or f'Subtítulo {len(entries) + 1}'
         entries.append(Subtitle(secrets.token_hex(12), 'embedded', label, language,
                                 stream.get('codec_name') in TEXT_CODECS, index=stream['index']))
-    return Analysis(video, audio, duration, tuple(entries))
+    return Analysis(video['index'], audio, duration, tuple(entries))
+
+
+def stream_seconds(stream):
+    """MP4 gives a stream its duration; Matroska keeps it in a DURATION tag as HH:MM:SS.fraction."""
+    tags = stream.get('tags') or {}
+    tag = next((v for k, v in tags.items() if isinstance(k, str) and k.upper().startswith('DURATION')), None)
+    for value in (stream.get('duration'), tag):
+        try:
+            seconds = sum(float(part) * 60 ** power for power, part in enumerate(reversed(str(value).split(':'))))
+        except ValueError:
+            continue
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    return None
 
 
 def validate_choice(subtitle_id, delay_ms, enabled):
