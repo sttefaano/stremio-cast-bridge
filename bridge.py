@@ -1,5 +1,6 @@
 """Local, explicitly controlled Stremio → HLS → Chromecast bridge."""
 import argparse
+import hashlib
 import ipaddress
 import json
 import logging
@@ -16,9 +17,12 @@ import stat
 import subprocess
 import threading
 import time
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
 from urllib.request import urlopen
+from dataclasses import replace
+from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
@@ -62,27 +66,46 @@ def open_media(root, path):
 
 def subtitle_filter(delay_ms):
     delay = int(delay_ms) / 1000
-    return f'setts=pts=PTS+({delay:.3f})/TB:dts=DTS+({delay:.3f})/TB'
+    # Drop expired seek preroll; clip crossing starts/durations while preserving ends.
+    return (f"noise=amount=0:drop='lte(pts+duration+({delay:.3f})/tb,0)',"
+            f"setts=pts='max(PTS+({delay:.3f})/TB,0)':"
+            f"dts='max(DTS+({delay:.3f})/TB,0)':"
+            f"duration='max(0,DURATION+min(0,PTS+({delay:.3f})/TB))'")
 
 
-def ffmpeg_command(source, session, streams, delay_ms=0, origin=0, duration=None, readrate=1.1):
+def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1):
+    analysis = plan.catalogue.analysis
+    subtitle = plan.subtitle
+    delay_ms = plan.delay_ms
     command = [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin',
                '-rw_timeout', '15000000', '-readrate', str(readrate)]
     if origin:
         command += ['-ss', str(origin)]
     command += ['-i', source]
+    if subtitle and subtitle.path:
+        if origin:
+            command += ['-itsoffset', str(-origin)]
+        command += ['-i', str(subtitle.path)]
     if duration is not None:
         command += ['-t', str(duration)]
-    for index in streams:
+    for index in (analysis.video, analysis.audio):
         command += ['-map', f'0:{index}']
+    if subtitle:
+        command += ['-map', '1:0' if subtitle.path else f'0:{subtitle.index}']
+    captions = []
+    mapping = 'v:0,a:0'
+    if subtitle:
+        language = subtitle.language or 'und'
+        captions = ['-c:s', 'webvtt', '-bsf:s', subtitle_filter(delay_ms),
+                    '-metadata:s:s:0', f'language={language}']
+        mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
         '-crf', '24', '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '3.1',
         '-g', '144', '-sc_threshold', '0', '-force_key_frames', 'expr:gte(t,n_forced*6)',
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-c:s', 'webvtt',
-        '-bsf:s', subtitle_filter(delay_ms), '-metadata:s:s:0', 'language=es',
+        '-c:a', 'aac', '-b:a', '128k', '-ac', '2'] + captions + [
         '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0',
         '-hls_flags', 'independent_segments+temp_file', '-hls_playlist_type', 'event',
-        '-master_pl_name', 'master.m3u8', '-var_stream_map', 'v:0,a:0,s:0,sgroup:subs,language:es',
+        '-master_pl_name', 'master.m3u8', '-var_stream_map', mapping,
         '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / 'video.m3u8')]
 
 
@@ -91,41 +114,145 @@ def playback_position(origin, relative, duration):
 
 
 STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'origin', 'absolute_time',
+               'source_discovery', 'source_error', 'catalogues', 'active_catalogue', 'subtitle_choice', 'playback_id',
+               'devices', 'selected_device', 'device_discovery', 'device_error', 'device_revision', 'can_change_device',
                'receiver_state', 'active_subtitle_track_ids', 'subtitle_delay_ms',
                'session', 'ffmpeg_pid', 'ffmpeg_alive', 'producer_suspended',
                'segment_count', 'playlist_duration', 'generated_while_playing',
-               'generation_complete', 'sources', 'pending', 'storage_bytes'}
+               'generation_complete', 'sources', 'pending', 'storage_bytes',
+               'volume', 'muted', 'subtitles_enabled', 'action_error', 'command_pending', 'demo',
+               'action_error_revision', 'source_id', 'buffer_ahead_seconds', 'buffered_start', 'buffered_end'}
 
 
 def public_status(state):
-    return {key: value for key, value in state.items() if key in STATUS_KEYS}
+    result = {key: value for key, value in state.items() if key in STATUS_KEYS}
+    result.update(buffer_ahead_seconds=None, buffered_start=None, buffered_end=None)
+    values = [state.get(k) for k in ('origin', 'playlist_duration', 'absolute_time', 'duration')]
+    if (state.get('phase') in ('buffering', 'loading', 'playing', 'paused')
+            and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in values)):
+        origin, generated, position, duration = values
+        if duration > 0 and origin <= duration:
+            end = min(duration, origin + generated)
+            result.update(buffered_start=origin, buffered_end=end,
+                          buffer_ahead_seconds=max(0, end - max(origin, position)))
+    return result
 
 
-class BridgeError(Exception):
+class BridgeError(MediaError):
     pass
 
 
-def probe(source):
+class PreparationCancelled(BridgeError):
+    pass
+
+
+def validate_stop_identity(state, data):
+    fields = {'device_id', 'device_revision'} if state.get('selected_device') else set()
+    if set(data) not in (fields, fields | {'playback_id'}):
+        raise BridgeError('Solicitud de detención inválida.')
+    if 'playback_id' in data:
+        identity = data['playback_id']
+        if not isinstance(identity, str) or not identity:
+            raise BridgeError('Identidad de reproducción inválida.')
+        if identity != state.get('playback_id'):
+            raise BridgeError('La reproducción cambió. Revisá la película activa.', 409, 'stale_playback')
+    elif state.get('phase') in ('playing', 'paused'):
+        raise BridgeError('Confirmá la reproducción que querés detener.', 409, 'stale_playback')
+
+
+def discover_receivers(known_host=None):
+    """One bounded mDNS snapshot; no Cast controller or host-polling thread."""
+    from pychromecast.const import CAST_TYPES
+    from pychromecast.dial import get_device_info
+    from pychromecast.models import CastInfo, HostServiceInfo
+    from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+    from uuid import UUID
+
+    if known_host:
+        # Explicit host opt-in can work without multicast. This is metadata HTTP only.
+        status = get_device_info(known_host, timeout=3)
+        if status and status.uuid:
+            return [CastInfo({HostServiceInfo(known_host, 8009)}, status.uuid,
+                                   status.model_name, status.friendly_name, known_host, 8009,
+                                   status.cast_type, status.manufacturer)]
+        return []
+
+    devices, lock = {}, threading.Lock()
+
+    class Listener(ServiceListener):
+        def add_service(self, zconf, service_type, name):
+            info = zconf.get_service_info(service_type, name, timeout=500)
+            if info is None:
+                return
+            try:
+                props = info.properties
+                model = props.get(b'md', b'').decode('utf-8')
+                friendly = props.get(b'fn', b'').decode('utf-8') or 'Google Cast'
+                identity = UUID(props[b'id'].decode('ascii'))
+                addresses = info.parsed_addresses()
+                host = next(address for address in addresses if ipaddress.ip_address(address).version == 4)
+                kind, maker = CAST_TYPES.get(model.lower(), (None, None))
+                if info.port != 8009:
+                    kind = 'group'
+                elif b'ca' in props:
+                    # Cast's advertised VIDEO_OUT bit; audio-only receivers have no bit.
+                    kind = 'cast' if int(props[b'ca']) & 1 else 'audio'
+                value = CastInfo({HostServiceInfo(host, info.port)}, identity, model,
+                                 friendly, host, info.port, kind, maker)
+            except (KeyError, ValueError, UnicodeError, StopIteration):
+                return
+            with lock:
+                devices[name] = value
+
+        def update_service(self, zconf, service_type, name):
+            self.add_service(zconf, service_type, name)
+
+        def remove_service(self, zconf, service_type, name):
+            with lock:
+                devices.pop(name, None)
+
+    zconf = Zeroconf()
+    browser = None
     try:
-        result = subprocess.run([FFPROBE, '-v', 'error', '-rw_timeout', '15000000',
+        browser = ServiceBrowser(zconf, '_googlecast._tcp.local.', Listener())
+        time.sleep(5)
+    finally:
+        try:
+            if browser:
+                browser.cancel()
+        finally:
+            zconf.close()
+    with lock:
+        result = list(devices.values())
+    return result
+
+
+def receiver_metadata(info):
+    return dict(id=str(info.uuid), name=info.friendly_name, host=info.host, model=info.model_name)
+
+
+def probe(source, cancelled=None):
+    try:
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen([FFPROBE, '-v', 'error', '-rw_timeout', '15000000',
             '-analyzeduration', '5000000', '-probesize', '5000000', '-show_streams',
-            '-show_format', '-of', 'json', source], capture_output=True, timeout=30)
-        data = json.loads(result.stdout)
-        streams = data['streams']
-        video = next(s['index'] for s in streams if s['codec_type'] == 'video'
-                     and not s.get('disposition', {}).get('attached_pic'))
-        audio = next(s['index'] for s in streams if s['codec_type'] == 'audio')
-        spanish = [s for s in streams if s['codec_type'] == 'subtitle'
-                   and s.get('tags', {}).get('language', '').lower() in ('spa', 'es', 'es-419', 'es-mx', 'es-es')]
-        spanish.sort(key=lambda s: not re.search(r'latin|latino|latam|mexic|es-419|es-mx',
-                          ' '.join(str(v).lower() for v in s.get('tags', {}).values())))
-        text = next((s for s in spanish if s['codec_name'] in ('subrip', 'ass', 'ssa', 'webvtt', 'mov_text', 'text')), None)
-        if text is None:
-            raise BridgeError('No hay subtítulos de texto en español. PGS/imagen no es compatible.')
-        duration = float(data['format']['duration'])
-        if not math.isfinite(duration) or duration <= 0:
-            raise ValueError()
-        return [video, audio, text['index']], duration
+            '-show_format', '-of', 'json', source], stdin=subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + 30
+            try:
+                while process.poll() is None:
+                    if (cancelled and cancelled.is_set() or time.monotonic() > deadline
+                            or os.fstat(output.fileno()).st_size > 2 * 1024**2):
+                        raise ValueError()
+                    time.sleep(.02)
+                if process.returncode or os.fstat(output.fileno()).st_size > 2 * 1024**2:
+                    raise ValueError()
+                output.seek(0)
+                return analyse(json.loads(output.read(2 * 1024**2 + 1)))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=2)
     except BridgeError:
         raise
     except Exception:
@@ -134,27 +261,54 @@ def probe(source):
 
 class Bridge:
     """A single mutation worker; status reads never wait for probe or discovery."""
-    def __init__(self, args, lan_ip):
+    def __init__(self, args, lan_ip=None):
         self.args, self.lan_ip = args, lan_ip
         self.sessions = ROOT / '.local' / 'sessions'
         self.sessions.mkdir(parents=True, exist_ok=True)
         self.state_lock = threading.Lock()
-        self.state = {'phase': 'idle', 'message': 'Elegí una fuente y presioná Iniciar.',
-                      'subtitle_delay_ms': args.subtitle_delay_ms, 'sources': [], 'pending': False}
+        self.state = {'phase': 'idle', 'message': 'Elegí una película y tocá Ver en la TV.',
+                      'subtitle_delay_ms': args.subtitle_delay_ms, 'sources': [], 'pending': False,
+                      'subtitles_enabled': None, 'volume': None, 'muted': None,
+                      'playback_id': None, 'subtitle_choice': None, 'active_catalogue': None}
         self.sources = []
+        self.devices = {}
+        self.selected_device_id = None
+        self.device_revision = 0
+        self.destination_locked = False
+        self.state.update(devices=[], selected_device=None, device_discovery='idle', device_error=None, device_revision=0)
         self.selected = None
-        self.source_delays = {}
-        self.initial_delay_applied = False
+        self.active_plan = None
         self.cast = self.browser = self.process = self.session = None
+        self.media_server = None
         self.media_url = None
         self.receiver_confirmed = False
         self.suspended = self.loaded = self.paused = False
         self.origin = self.duration = self.total_duration = 0
         self.last_playing_segments = None
         self.jobs = queue.Queue(maxsize=16)
+        self.cancel_generation = 0
+        self.active_generation = 0
+        self.connection_generation = None
+        self.cleanup_active = False
+        self.shutdown_error = None
         self.quit = threading.Event()
+        self.device_lock = threading.Lock()
+        self.source_lock = threading.Lock()
+        self.device_snapshot = dict(device_discovery='idle', device_error=None, devices=[])
+        self.device_scans = 0
+        self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[])
+        self.device_wake, self.source_wake = threading.Event(), threading.Event()
+        self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local')
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
+        self.metadata_workers = [threading.Thread(target=self._scan_loop, args=(self.scan_devices, self.device_wake), daemon=True),
+                                 threading.Thread(target=self._scan_loop, args=(self.discover, self.source_wake), daemon=True)]
+        for worker in self.metadata_workers:
+            worker.start()
+        if args.device_name or args.device_host:
+            bootstrap = threading.Thread(target=self._configured_startup, daemon=True)
+            self.metadata_workers.append(bootstrap)
+            bootstrap.start()
 
     def update(self, **values):
         with self.state_lock:
@@ -162,17 +316,273 @@ class Bridge:
 
     def status(self):
         with self.state_lock:
-            return public_status(dict(self.state))
+            result = public_status(dict(self.state))
+            result['can_change_device'] = not self._destination_busy()
+            plan = getattr(self, 'active_plan', None)
+        if hasattr(self, 'device_lock'):
+            with self.device_lock:
+                result.update(self.device_snapshot)
+                devices = dict(self.devices)
+            selected = result.get('selected_device')
+            if selected:
+                info = devices.get(selected['id'])
+                result['selected_device'] = {**(receiver_metadata(info) if info else selected),
+                                             'available': bool(info) and result['device_discovery'] != 'error'}
+        if hasattr(self, 'source_lock'):
+            with self.source_lock:
+                result.update(self.source_snapshot)
+        if hasattr(self, 'catalogue'):
+            result['catalogues'] = self.catalogue.snapshot()
+            if plan:
+                with self.catalogue.lock:
+                    result['active_catalogue'] = self.catalogue.records.get(plan.catalogue.id, plan.catalogue).public()
+        return result
 
-    def submit(self, action, data):
-        if action not in ('discover', 'start', 'pause', 'resume', 'seek', 'delay', 'stop'):
-            raise BridgeError('Acción desconocida.')
+    def _scan_loop(self, scan, wake):
+        while not self.quit.is_set():
+            wake.clear()
+            try:
+                scan()
+            except Exception:
+                pass
+            wake.wait(30)
+
+    def _configured_startup(self):
+        """The explicit CLI opt-in waits for metadata, never inside playback work."""
+        deadline = time.monotonic() + 70
+        generation = self.cancel_generation
+        attempted_scan = None
+        source = None
+        while not self.quit.is_set() and time.monotonic() < deadline:
+            with self.state_lock:
+                if generation != self.cancel_generation:
+                    return
+                selected = self.state.get('selected_device')
+                pending = self.state.get('command_pending', False)
+            if not selected and not pending:
+                with self.device_lock:
+                    discovery, scan = self.device_snapshot['device_discovery'], self.device_scans
+                if discovery == 'ready' and scan != attempted_scan:
+                    attempted_scan = scan
+                    try:
+                        self.submit('configure_device', {}, expected_generation=generation)
+                    except MediaError:
+                        return
+            elif selected and not pending:
+                if not self.args.autostart:
+                    return
+                if source is None:
+                    with self.source_lock:
+                        source = dict(self.sources[0]) if self.sources and self.source_snapshot['source_discovery'] == 'ready' else None
+                    if source:
+                        try:
+                            self.catalogue.request(source)
+                        except MediaError:
+                            return
+                if source:
+                    snapshot = self.catalogue.snapshot().get(source['id'], {})
+                    if snapshot.get('state') == 'error':
+                        return
+                    if snapshot.get('state') == 'ready':
+                        try:
+                            self.submit('start', dict(device_id=selected['id'], device_revision=self.device_revision,
+                                        source_id=source['id'], catalogue_id=snapshot['catalogue']['id'],
+                                        subtitle_id=None, delay_ms=0), expected_generation=generation)
+                        except MediaError:
+                            pass
+                        return
+            self.quit.wait(.05)
+
+    def request_catalogue(self, data):
+        if self.quit.is_set():
+            raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+        if set(data) != {'source_id', 'refresh'} or not isinstance(data['source_id'], str) or type(data['refresh']) is not bool:
+            raise BridgeError('Solicitud de catálogo inválida.')
+        with self.source_lock:
+            source = next((s for s in self.sources if s['id'] == data['source_id']), None)
+        if source is None:
+            raise BridgeError('Elegí una fuente disponible.', 404, 'unknown_source')
+        snapshot = self.catalogue.request(source, data['refresh'])
+        if snapshot['state'] == 'ready':
+            return 200, dict(catalogue=snapshot['catalogue'])
+        return 202, dict(accepted=True, source_id=source['id'], analysis_id=snapshot['analysis_id'])
+
+    def subtitle_upload(self, data):
+        if self.quit.is_set():
+            raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+        if set(data) != {'source_id', 'catalogue_id', 'filename', 'format', 'text'} or not all(isinstance(data[k], str) for k in data):
+            raise BridgeError('Solicitud de archivo inválida.')
+        with self.state_lock:
+            active = self.active_plan
+            retained = bool(active and active.catalogue.id == data['catalogue_id'])
+        return self.catalogue.upload(**data, allow_retained=retained)
+
+    def _validate_plan_fields(self, action, data):
+        fields = {'device_id', 'device_revision', 'catalogue_id', 'subtitle_id', 'delay_ms'}
+        fields |= {'source_id'} if action == 'start' else {'playback_id', 'enabled'}
+        if set(data) != fields:
+            raise BridgeError('Faltan campos de la elección de subtítulos.')
+        identifiers = ('device_id', 'catalogue_id', 'source_id' if action == 'start' else 'playback_id')
+        if (not all(isinstance(data[k], str) and data[k] for k in identifiers)
+                or type(data['device_revision']) is not int):
+            raise BridgeError('Identidad de reproducción inválida.')
+        validate_choice(data['subtitle_id'], data['delay_ms'], data['subtitle_id'] is not None if action == 'start' else data['enabled'])
+
+    def _resolve_plan(self, action, data, retain=False):
+        self._validate_plan_fields(action, data)
+        if action == 'start':
+            with self.source_lock:
+                source = next((s for s in self.sources if s['id'] == data['source_id']), None)
+                confirmed = self.source_snapshot['source_discovery'] != 'error'
+            if source is None:
+                raise BridgeError('Elegí una fuente disponible.', 404, 'unknown_source')
+            if not confirmed:
+                raise BridgeError('Volvé a buscar películas antes de iniciar.', 409, 'unconfirmed_source')
+            source_id = source['id']
+            enabled = data['subtitle_id'] is not None
+        else:
+            if (not isinstance(data['playback_id'], str) or data['playback_id'] != self.state.get('playback_id')
+                    or not self.active_plan or data['catalogue_id'] != self.active_plan.catalogue.id):
+                raise BridgeError('La reproducción cambió. Revisá los subtítulos activos.', 409, 'stale_playback')
+            source_id = self.active_plan.catalogue.source['id']
+            enabled = data['enabled']
+        return self.catalogue.resolve(source_id, data['catalogue_id'], data['subtitle_id'],
+                                      data['delay_ms'], enabled, current=action == 'start', retain=retain)
+
+    def _destination_busy(self):
+        return (getattr(self, 'destination_locked', False) or getattr(self, 'cleanup_active', False)
+                or self.state.get('command_pending', False) or self.state.get('pending', False)
+                or bool(getattr(self, 'cast', None) or getattr(self, 'process', None)
+                        or getattr(self, 'session', None) or getattr(self, 'media_url', None)
+                        or getattr(self, 'connection_generation', None) is not None))
+
+    def scan_devices(self):
+        with self.device_lock:
+            if self.quit.is_set():
+                return
+            self.device_snapshot.update(device_discovery='loading', device_error=None)
         try:
-            self.jobs.put_nowait((action, data))
-        except queue.Full:
-            raise BridgeError('Hay demasiadas acciones pendientes.') from None
+            infos = discover_receivers(self.args.device_host)
+            devices = {str(i.uuid): i for i in infos if i.uuid and i.cast_type == 'cast'
+                       and (not self.args.device_name or i.friendly_name == self.args.device_name)
+                       and (not self.args.device_host or i.host == self.args.device_host)}
+            with self.device_lock:
+                if not self.quit.is_set():
+                    self.devices = devices
+                    self.device_snapshot.update(devices=[receiver_metadata(i) for i in devices.values()], device_discovery='ready')
+                    self.device_scans += 1
+        except Exception:
+            with self.device_lock:
+                if not self.quit.is_set():
+                    self.device_snapshot.update(device_discovery='error',
+                                               device_error='No se pudieron buscar dispositivos. Revisá la red y reintentá.')
+            raise BridgeError('No se pudieron buscar dispositivos. Revisá la red y reintentá.') from None
+
+    def validate_device_revision(self, expected_revision):
+        if type(expected_revision) is not int:
+            raise BridgeError('Revisión del destino inválida.')
+        if expected_revision != self.state['device_revision']:
+            raise BridgeError('El destino cambió. Revisá el dispositivo y volvé a intentar.', 409, 'stale_destination')
+
+    def select_device(self, device_id, expected_revision, executing=False):
+        with self.state_lock:
+            self.validate_device_revision(expected_revision)
+            with self.device_lock:
+                info = self.devices.get(device_id)
+            if device_id == self.selected_device_id and info:
+                return
+            # The worker's own pending bit is not an owned playback resource.
+            pending = self.state.get('command_pending')
+            if executing:
+                self.state['command_pending'] = False
+            try:
+                if self._destination_busy():
+                    raise BridgeError('Primero detené la sesión antes de cambiar de dispositivo.')
+            finally:
+                if executing:
+                    self.state['command_pending'] = pending
+            if info is None:
+                raise BridgeError('Elegí un dispositivo disponible. Volvé a buscar.')
+            self.selected_device_id = device_id
+            self.device_revision += 1
+            self.state.update(selected_device={**receiver_metadata(info), 'available': True},
+                              device_revision=self.device_revision)
+
+    def validate_destination(self, data, require_available=False):
+        selected = self.state.get('selected_device')
+        if (not selected or data.get('device_id') != selected['id']
+                or type(data.get('device_revision')) is not int
+                or data.get('device_revision') != self.state.get('device_revision')):
+            raise BridgeError('El destino cambió o no está elegido. Revisá el dispositivo y volvé a intentar.', 409, 'stale_destination')
+        available = selected.get('available') if selected else False
+        if hasattr(self, 'device_lock'):
+            with self.device_lock:
+                available = selected and selected['id'] in self.devices and self.device_snapshot['device_discovery'] != 'error'
+        if require_available and not available:
+            raise BridgeError('El dispositivo elegido no está disponible. Volvé a buscar.', 409, 'unavailable_destination')
+
+    def validate_stop(self, data):
+        validate_stop_identity(self.state, data)
+        if self.state.get('selected_device'):
+            self.validate_destination(data)
+
+    def submit(self, action, data, expected_generation=None):
+        if getattr(self, 'quit', threading.Event()).is_set():
+            raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+        if action in ('discover_devices', 'discover'):
+            wake = self.device_wake if action == 'discover_devices' else self.source_wake
+            lock = self.device_lock if action == 'discover_devices' else self.source_lock
+            with self.state_lock:
+                if self.quit.is_set():
+                    raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+                with lock:
+                    snapshot = self.device_snapshot if action == 'discover_devices' else self.source_snapshot
+                    key = 'device_discovery' if action == 'discover_devices' else 'source_discovery'
+                    if snapshot[key] != 'loading':
+                        wake.set()
+            return
+        if action not in ('select_device', 'configure_device', 'start', 'pause', 'resume', 'seek', 'stop', 'volume', 'mute', 'subtitles'):
+            raise BridgeError('Acción desconocida.')
+        with self.state_lock:
+            if getattr(self, 'quit', threading.Event()).is_set():
+                raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+            if expected_generation is not None and expected_generation != self.cancel_generation:
+                raise PreparationCancelled('Preparación cancelada.')
+            if action == 'select_device':
+                if set(data) != {'device_id', 'device_revision'} or not isinstance(data.get('device_id'), str):
+                    raise BridgeError('Selección del destino inválida.')
+                self.validate_device_revision(data.get('device_revision'))
+                if data.get('device_id') != getattr(self, 'selected_device_id', None) and self._destination_busy():
+                    raise BridgeError('Primero detené la sesión antes de cambiar de dispositivo.')
+                if data.get('device_id') not in self.devices:
+                    raise BridgeError('Elegí un dispositivo disponible. Volvé a buscar.')
+            if action in ('start', 'subtitles'):
+                self._validate_plan_fields(action, data)
+            if action in ('start', 'pause', 'resume', 'seek', 'volume', 'mute', 'subtitles'):
+                self.validate_destination(data, require_available=action == 'start')
+            if action == 'stop':
+                self.validate_stop(data)
+            if getattr(self, 'cleanup_active', False) and action != 'stop':
+                raise BridgeError('Esperá a que termine la acción anterior.', 409, 'busy')
+            if (self.state.get('command_pending') or self.state.get('pending') or not self.jobs.empty()) and action != 'stop':
+                raise BridgeError('Esperá a que termine la acción anterior.', 409, 'busy')
+            plan = self._resolve_plan(action, data, retain=True) if action in ('start', 'subtitles') else None
+            try:
+                revision = getattr(self, 'cancel_generation', 0) + (action == 'stop')
+                payload = {**data, '_plan': plan} if plan else dict(data)
+                self.jobs.put_nowait((action, payload, revision))
+                self.cancel_generation = revision
+                self.state.update(command_pending=True, action_error=None)
+            except queue.Full:
+                if plan:
+                    self.catalogue.unpin(plan.catalogue.id)
+                raise BridgeError('Hay demasiadas acciones pendientes.') from None
 
     def discover(self):
+        with self.source_lock:
+            if self.quit.is_set():
+                return
+            self.source_snapshot.update(source_discovery='loading', source_error=None)
         sources = []
         if self.args.source_file:
             try:
@@ -180,13 +590,24 @@ class Bridge:
                 source = saved['source']
                 if not isinstance(source, str) or not source.startswith('http://'):
                     raise ValueError()
-                sources.append({'url': source, 'title': 'Fuente guardada', 'length': None, 'index': None})
+                name = saved.get('name')
+                name = Path(name).name if isinstance(name, str) else ''
+                sources.append({'url': source, 'title': name or 'Película guardada anteriormente (sin nombre)',
+                                'filename': name, 'saved': True, 'length': None, 'index': None})
             except Exception:
+                with self.source_lock:
+                    if not self.quit.is_set():
+                        self.source_snapshot.update(source_discovery='error', source_error='No se pudo leer el JSON explícito de fuente.')
                 raise BridgeError('No se pudo leer el JSON explícito de fuente.') from None
         # Only the streaming engine. Never query Stremio casting/player routes.
         try:
             with urlopen('http://127.0.0.1:11470/stats.json', timeout=3) as response:
-                stats = json.load(response)
+                body = response.read(1024**2 + 1)
+                if len(body) > 1024**2:
+                    raise ValueError()
+                stats = json.loads(body)
+            if not isinstance(stats, dict):
+                raise ValueError()
             if isinstance(stats, dict):
                 single_hash = stats.get('infoHash') or stats.get('infohash')
                 torrents = {single_hash: stats} if single_hash else stats
@@ -204,33 +625,80 @@ class Bridge:
                         if Path(name).suffix.lower() not in ('.mkv', '.mp4', '.avi', '.webm', '.m4v'):
                             continue
                         sources.append({'url': f'http://127.0.0.1:11470/{infohash}/{index}',
-                                        'title': Path(name).name[:180], 'length': file.get('length'),
+                                        'title': Path(name).stem.replace('.', ' ').replace('_', ' ')[:180],
+                                        'filename': Path(name).name, 'length': file.get('length'),
                                         'index': int(index)})
         except Exception:
-            pass
-        self.sources = sources
-        self.update(sources=[{'id': str(i), **{k: v for k, v in s.items() if k != 'url'}}
-                             for i, s in enumerate(sources)], message='Fuentes actualizadas.')
+            if not sources:
+                with self.source_lock:
+                    if not self.quit.is_set():
+                        self.source_snapshot.update(source_discovery='error', source_error='No se pudieron buscar películas. Abrí Stremio y reintentá.')
+                return
+        unique = {}
+        for source in sources:
+            source['id'] = hashlib.sha256(source['url'].encode()).hexdigest()[:24]
+            existing = unique.setdefault(source['url'], source)
+            if not existing.get('filename') and source.get('filename'):
+                existing.update(title=source['title'], filename=source['filename'])
+        with self.source_lock:
+            if not self.quit.is_set():
+                self.sources = list(unique.values())
+                self.source_snapshot.update(sources=[{k: v for k, v in s.items() if k != 'url'} for s in self.sources],
+                                            source_discovery='ready', source_error=None)
 
-    def connect(self):
-        if self.cast:
-            return
+    def connect(self, revision=None):
+        # This is the connection's commitment point, serialized with Stop acceptance.
+        # The library call may finish after cancellation; it never holds state_lock.
+        with self.state_lock:
+            if revision is None:
+                revision = getattr(self, 'active_generation', 0)
+            if self.quit.is_set() or revision != getattr(self, 'cancel_generation', 0):
+                raise PreparationCancelled('Preparación cancelada.')
+            if self.cast:
+                return
+            self.connection_generation = revision
+        try:
+            self._connect_receiver()
+        finally:
+            with self.state_lock:
+                self.connection_generation = None
+
+    def _connect_receiver(self):
         import pychromecast
-        casts, self.browser = pychromecast.get_listed_chromecasts(
-            friendly_names=[self.args.device_name],
-            known_hosts=[self.args.device_host] if self.args.device_host else None,
-            discovery_timeout=8)
-        matches = [c for c in casts if c.cast_info.friendly_name == self.args.device_name
-                   and (not self.args.device_host or c.cast_info.host == self.args.device_host)]
-        for cast in casts:
-            if cast not in matches:
-                cast.disconnect()
-        if len(matches) != 1:
-            for cast in matches:
-                cast.disconnect()
-            raise BridgeError('Se requiere exactamente el Chromecast indicado por nombre y host.')
-        self.cast = matches[0]
+        from pychromecast.dial import get_device_info
+        from pychromecast.models import HostServiceInfo
+        target = self.selected_device_id
+        with self.device_lock:
+            info = self.devices.get(target) if self.device_snapshot['device_discovery'] != 'error' else None
+        if info is None:
+            raise BridgeError('El dispositivo elegido no está disponible. Volvé a buscar.')
+        # Validate the endpoint itself, not merely the UUID copied into CastInfo.
+        actual = get_device_info(info.host, timeout=5)
+        if actual is None or actual.uuid != info.uuid or actual.cast_type != 'cast':
+            raise BridgeError('La identidad del dispositivo cambió. Volvé a buscar y revisá el destino.')
+        if self.quit.is_set() or getattr(self, 'active_generation', 0) != getattr(self, 'cancel_generation', 0):
+            raise PreparationCancelled('Preparación cancelada.')
+        self.ensure_media_server(info.host)
+        direct = replace(info, services={HostServiceInfo(info.host, info.port)})
+        self.cast = pychromecast.get_chromecast_from_cast_info(direct, None, tries=1, timeout=5)
         self.cast.wait(timeout=10)
+
+    def ensure_media_server(self, host):
+        address = lan_address(host)
+        if self.media_server and self.lan_ip == address:
+            return
+        if self.media_server:
+            self.media_server.shutdown()
+            self.media_server.server_close()
+            self.media_server = None
+        server = ThreadingHTTPServer((address, self.args.media_port), MediaHandler)
+        server.bridge = self
+        try:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        except Exception:
+            server.server_close()
+            raise
+        self.media_server, self.lan_ip = server, address
 
     def stop_process(self):
         if self.process and self.process.poll() is None:
@@ -256,65 +724,115 @@ class Bridge:
             except OSError:
                 pass
 
-    def stop(self):
-        self.stop_process()
+    def stop(self, release_destination=True, shutdown=False):
+        errors = []
+        try:
+            self.stop_process()
+        except Exception:
+            if not shutdown:
+                raise
+            errors.append('No se pudo detener el productor.')
         if self.cast:
             try:
                 if self.media_url and self.cast.media_controller.status.content_id == self.media_url:
                     self.cast.media_controller.stop()
             except Exception:
-                pass
-            finally:
-                try:
+                if not shutdown:
+                    raise BridgeError('No se pudo detener la TV. Conservamos el destino; reintentá Detener.') from None
+                errors.append('No se pudo confirmar que la TV se detuvo.')
+            try:
+                if shutdown:
+                    self.cast.disconnect(timeout=10)
+                else:
                     self.cast.disconnect()
-                except Exception:
-                    pass
+            except Exception:
+                if not shutdown:
+                    raise BridgeError('No se pudo cerrar el control de la TV. Reintentá Detener.') from None
+                errors.append('No se pudo cerrar el control de la TV.')
+            else:
                 self.cast = None
         if self.browser:
             try:
                 self.browser.stop_discovery()
             except Exception:
-                pass
-            self.browser = None
+                if shutdown:
+                    errors.append('No se pudo cerrar la búsqueda de dispositivos.')
+                else:
+                    self.browser = None
+            else:
+                self.browser = None
+        if errors:
+            raise BridgeError(' '.join(errors))
         self.loaded = False
         self.media_url = None
         self.update(phase='stopped', message='Detenido.', pending=False, ffmpeg_alive=False,
-                    producer_suspended=False, receiver_state='IDLE', active_subtitle_track_ids=[])
+                    producer_suspended=False, receiver_state='IDLE', active_subtitle_track_ids=[], volume=None, muted=None)
         self.record_session()
         self.session = None
+        self.process = None
+        with self.state_lock:
+            if self.active_plan:
+                self.catalogue.unpin(self.active_plan.catalogue.id)
+            self.active_plan = None
+            self.state.update(playback_id=None, active_catalogue=None, subtitle_choice=None, subtitles_enabled=None)
+        if release_destination:
+            self.destination_locked = False
 
     def storage(self):
         return sum(p.stat().st_size for p in self.sessions.glob('*/*')
                    if p.is_file() and not p.is_symlink())
 
-    def begin(self, origin=0):
+    def begin(self, origin=0, plan=None, new_playback=False):
+        revision = getattr(self, 'active_generation', getattr(self, 'cancel_generation', 0))
+        def check_cancelled():
+            if self.quit.is_set() or revision != getattr(self, 'cancel_generation', 0):
+                raise PreparationCancelled('Preparación cancelada.')
+        check_cancelled()
         self.stop_process()
         if (self.cast and self.media_url
                 and self.cast.media_controller.status.content_id == self.media_url):
             self.cast.media_controller.stop()
-        self.loaded = False
-        self.receiver_confirmed = False
-        self.media_url = None
-        self.session = None
-        self.update(phase='preparing', pending=True, message='Analizando fuente / esperando descarga…')
-        self.streams, self.total_duration = probe(self.selected['url'])
-        if self.quit.is_set():
-            raise BridgeError('Servicio detenido.')
+        with self.state_lock:
+            check_cancelled()
+            self.loaded = False
+            self.receiver_confirmed = False
+            self.media_url = None
+            self.session = None
+            if plan is not None:
+                previous = self.active_plan
+                if previous is None or previous.catalogue.id != plan.catalogue.id:
+                    self.catalogue.pin(plan.catalogue.id)
+                    if previous:
+                        self.catalogue.unpin(previous.catalogue.id)
+                self.active_plan = plan
+                self.selected = plan.catalogue.source
+                self.state.update(subtitle_delay_ms=plan.delay_ms, subtitle_choice=plan.choice(),
+                                  active_catalogue=plan.catalogue.public())
+                if new_playback:
+                    self.state['playback_id'] = secrets.token_hex(16)
+                    self.paused = False
+            self.state.update(phase='preparing', pending=True, source_id=self.selected.get('id'),
+                              title=self.selected['title'], duration=None, origin=None, absolute_time=0,
+                              playlist_duration=0, buffer_ahead_seconds=None, buffered_start=None, buffered_end=None,
+                              subtitles_enabled=None, message='Preparando la película para la TV…')
+        self.total_duration = self.active_plan.catalogue.analysis.duration
+        check_cancelled()
         self.duration = min(self.total_duration, self.args.max_duration or self.total_duration)
         self.origin = min(max(0, float(origin)), max(0, self.duration - 0.1))
         if shutil.disk_usage(self.sessions).free < 1024**3 or self.storage() >= 6 * 1024**3:
             raise BridgeError('Espacio insuficiente: requiere 1 GB libre y menos de 6 GB de sesiones.')
-        self.connect()
-        if self.quit.is_set():
-            raise BridgeError('Servicio detenido.')
+        check_cancelled()
+        self.connect(revision)
+        check_cancelled()
         self.session = self.sessions / ('session-' + secrets.token_hex(8))
         self.session.mkdir()
-        delay = self.status()['subtitle_delay_ms']
-        command = ffmpeg_command(self.selected['url'], self.session, self.streams, delay,
-                                 self.origin, self.duration - self.origin, self.args.readrate)
+        command = ffmpeg_command(self.selected['url'], self.session, self.active_plan,
+                                 origin=self.origin, duration=self.duration - self.origin, readrate=self.args.readrate)
         # Never persist raw arguments or producer stderr (both may contain private URLs).
-        self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with self.state_lock:
+            check_cancelled()
+            self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.last_playing_segments = None
         self.started_at = time.monotonic()
         self.update(title=self.selected['title'], duration=self.duration, origin=self.origin,
@@ -323,24 +841,83 @@ class Bridge:
                     playlist_duration=0, generated_while_playing=False, generation_complete=False)
 
     def mutate(self, action, data):
-        if action == 'discover':
+        if action in ('start', 'pause', 'resume', 'seek', 'volume', 'mute', 'subtitles'):
+            with self.state_lock:
+                self.validate_destination(data, require_available=action == 'start')
+        if action == 'stop':
+            with self.state_lock:
+                self.validate_stop(data)
+        if action == 'discover_devices':
+            self.scan_devices()
+        elif action == 'select_device':
+            self.select_device(data.get('device_id'), data.get('device_revision'), executing=True)
+        elif action == 'configure_device':
+            if self.quit.is_set() or self.active_generation != self.cancel_generation:
+                raise PreparationCancelled('Preparación cancelada.')
+            with self.device_lock:
+                devices = dict(self.devices)
+                confirmed = self.device_snapshot['device_discovery'] != 'error'
+            if len(devices) != 1 or not confirmed:
+                raise BridgeError('Se requiere un único dispositivo de video con el nombre/host indicado.')
+            self.select_device(next(iter(devices)), self.device_revision, executing=True)
+        elif action == 'discover':
             self.discover()
         elif action == 'start':
-            if not self.sources:
-                self.discover()
-            index = int(data.get('source_id', 0))
-            if not 0 <= index < len(self.sources):
-                raise BridgeError('Elegí una fuente disponible.')
-            self.selected = self.sources[index]
-            source = self.selected['url']
-            if source not in self.source_delays:
-                self.source_delays[source] = self.args.subtitle_delay_ms if not self.initial_delay_applied else 0
-                self.initial_delay_applied = True
-            self.update(subtitle_delay_ms=self.source_delays[source])
-            self.paused = False
-            self.begin()
+            plan = data.get('_plan') or self._resolve_plan(action, data)
+            with self.state_lock:
+                self.validate_destination(data, require_available=True)
+                self.destination_locked = True
+            if (getattr(self, 'active_plan', None) and self.active_plan.key() == plan.key()
+                    and self.status().get('phase') in ('playing', 'paused')
+                    and self.loaded and self.cast and self.media_url
+                    and self.cast.socket_client.is_connected is not False
+                    and self.cast.media_controller.status.content_id == self.media_url
+                    and self.cast.media_controller.status.player_state in ('PLAYING', 'PAUSED')):
+                return
+            self.begin(plan=plan, new_playback=True)
         elif action == 'stop':
             self.stop()
+        elif action == 'subtitles':
+            if data.get('playback_id') != self.state.get('playback_id') or not self.state.get('playback_id'):
+                raise BridgeError('La reproducción cambió. Revisá los subtítulos activos.', 409, 'stale_playback')
+            plan = data.get('_plan') or self._resolve_plan(action, data)
+            if not self._owns_playback():
+                raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
+            previous = self.active_plan
+            rebuild = (previous.catalogue.id, previous.subtitle, previous.delay_ms) != (plan.catalogue.id, plan.subtitle, plan.delay_ms)
+            if not rebuild:
+                if plan.enabled:
+                    track = next((t.get('trackId') for t in (self.cast.media_controller.status.subtitle_tracks or [])
+                                  if isinstance(t, dict) and t.get('type') == 'TEXT' and t.get('trackId') is not None), None)
+                    if track is None:
+                        raise BridgeError('Esperá a que estén disponibles los subtítulos.', 409, 'receiver_not_ready')
+                    self.cast.media_controller.enable_subtitle(track)
+                else:
+                    self.cast.media_controller.disable_subtitle()
+            target = self.status().get('absolute_time', self.origin)
+            self.paused = self.cast.media_controller.status.player_state == 'PAUSED'
+            if rebuild:
+                self.begin(target, plan=plan)
+            else:
+                with self.state_lock:
+                    self.active_plan = plan
+                    self.state.update(subtitle_choice=plan.choice(), subtitle_delay_ms=plan.delay_ms)
+        elif action in ('volume', 'mute'):
+            if (not self.loaded or not self.cast or not self.media_url
+                    or self.cast.socket_client.is_connected is False
+                    or self.cast.media_controller.status.content_id != self.media_url
+                    or self.cast.media_controller.status.player_state not in ('PLAYING', 'PAUSED')):
+                raise BridgeError('Esperá a que el receptor confirme esta película.')
+            if action == 'volume':
+                level = data.get('level')
+                if type(level) not in (int, float) or not math.isfinite(level) or not 0 <= level <= 1:
+                    raise BridgeError('El volumen debe ser un número entre 0 y 1.')
+                self.cast.set_volume(level)
+            elif action == 'mute':
+                muted = data.get('muted')
+                if type(muted) is not bool:
+                    raise BridgeError('Silencio requiere verdadero o falso.')
+                self.cast.set_volume_muted(muted)
         elif action in ('pause', 'resume'):
             if not self.loaded:
                 raise BridgeError('Esperá a que empiece la reproducción.')
@@ -348,23 +925,23 @@ class Bridge:
                 raise BridgeError('El receptor todavía no confirmó esta sesión.')
             self.paused = action == 'pause'
             (self.cast.media_controller.pause if self.paused else self.cast.media_controller.play)()
-        elif action in ('seek', 'delay'):
+        elif action == 'seek':
             if not self.session:
                 raise BridgeError('Primero iniciá una fuente.')
             status = self.status()
-            if action == 'delay':
-                delay = int(data['delay_ms'])
-                if abs(delay) > 30000:
-                    raise BridgeError('El retraso debe estar entre -30000 y 30000 ms.')
-                self.update(subtitle_delay_ms=delay)
-                self.source_delays[self.selected['url']] = delay
-                target = status['absolute_time']
-            else:
-                target = float(data['position']) if 'position' in data else status['absolute_time'] + float(data['delta'])
-                if not math.isfinite(target):
-                    raise BridgeError('La posición debe ser finita.')
-                target = min(max(0, target), max(0, self.duration - 0.1))
+            target = float(data['position']) if 'position' in data else status['absolute_time'] + float(data['delta'])
+            if not math.isfinite(target):
+                raise BridgeError('La posición debe ser finita.')
+            target = min(max(0, target), max(0, self.duration - 0.1))
             self.begin(target)
+        else:
+            raise BridgeError('Acción desconocida.')
+
+    def _owns_playback(self):
+        return (self.loaded and self.cast and self.media_url
+                and self.cast.socket_client.is_connected is not False
+                and self.cast.media_controller.status.content_id == self.media_url
+                and self.cast.media_controller.status.player_state in ('PLAYING', 'PAUSED'))
 
     def tick(self):
         if not self.session:
@@ -379,43 +956,62 @@ class Bridge:
         if storage >= 6 * 1024**3 or shutil.disk_usage(self.sessions).free < 512 * 1024**2:
             raise BridgeError('Límite de almacenamiento alcanzado. Detenido para proteger el disco.')
         subtitle_manifest = self.session / 'video_vtt.m3u8'
-        ready = count >= 3 and subtitle_manifest.exists() and (self.session / 'master.m3u8').exists()
+        text_ready = not self.active_plan.subtitle or subtitle_manifest.exists()
+        ready = count >= 3 and text_ready and (self.session / 'master.m3u8').exists()
         if not alive and self.process.returncode != 0:
             raise BridgeError(f'FFmpeg terminó con código {self.process.returncode}. Fuente o códec no disponible.')
-        if not self.loaded and (ready or complete and count > 0 and subtitle_manifest.exists()):
+        if not self.loaded and (ready or complete and count > 0 and text_ready and (self.session / 'master.m3u8').exists()):
             url = f'http://{self.lan_ip}:{self.args.media_port}/{self.session.name}/master.m3u8'
-            self.media_url = url
-            self.cast.media_controller.play_media(url, 'application/x-mpegURL', title=self.selected['title'],
-                current_time=0, autoplay=not self.paused, stream_type='BUFFERED',
-                media_info={'duration': self.duration - self.origin})
-            self.loaded = True
-            self.update(phase='loading', message='HLS listo; esperando al Chromecast…')
+            with self.state_lock:
+                if (self.quit.is_set() or getattr(self, 'active_generation', 0)
+                        != getattr(self, 'cancel_generation', 0)):
+                    return
+                self.media_url = url
+                self.cast.media_controller.play_media(url, 'application/x-mpegURL', title=self.selected['title'],
+                    current_time=0, autoplay=not self.paused, stream_type='BUFFERED',
+                    media_info={'duration': self.duration - self.origin})
+                self.loaded = True
+            self.update(phase='loading', message='Película preparada. Esperando la confirmación de la TV…')
         absolute = self.status().get('absolute_time', self.origin)
         relative, receiver = max(0, absolute - self.origin), 'PENDING'
         tracks = []
         if self.loaded:
-            self.cast.media_controller.update_status()
+            connected = self.cast.socket_client.is_connected is not False
+            if connected:
+                self.cast.media_controller.update_status()
             status = self.cast.media_controller.status
-            owns_status = status.content_id == self.media_url
+            owns_status = connected and status.content_id == self.media_url
             if owns_status:
                 relative = max(0, float(status.adjusted_current_time or 0))
             receiver = status.player_state if owns_status else 'PENDING'
-            tracks = list(status.current_subtitle_tracks or []) if owns_status else []
-            for track in (status.subtitle_tracks or []) if owns_status else []:
+            observed_tracks = status.current_subtitle_tracks if owns_status else None
+            tracks = list(observed_tracks) if observed_tracks is not None else []
+            requested = self.active_plan.enabled
+            for track in (status.subtitle_tracks or []) if owns_status and requested else []:
                 if not isinstance(track, dict) or track.get('type') != 'TEXT':
                     continue
                 track_id = track.get('trackId')
                 if track_id is not None and track_id not in tracks:
                     self.cast.media_controller.enable_subtitle(track_id)
                     break
-            if receiver in ('PLAYING', 'PAUSED'):
+            if owns_status and tracks and not requested:
+                self.cast.media_controller.disable_subtitle()
+            self.update(subtitles_enabled=bool(tracks) if observed_tracks is not None else None)
+            cast_status = self.cast.status
+            level = getattr(cast_status, 'volume_level', None)
+            muted = getattr(cast_status, 'volume_muted', None)
+            self.update(volume=level if owns_status and type(level) in (int, float) and math.isfinite(level) and 0 <= level <= 1 else None,
+                        muted=muted if owns_status and type(muted) is bool else None)
+            if not connected:
+                self.update(phase='disconnected', pending=True, message='Se perdió la conexión con la TV. Detené la sesión y volvé a intentarlo.')
+            elif receiver in ('PLAYING', 'PAUSED'):
                 self.receiver_confirmed = True
                 self.update(phase=receiver.lower(), pending=False, message='Reproduciendo.' if receiver == 'PLAYING' else 'En pausa.')
             elif not owns_status:
                 if self.receiver_confirmed:
-                    self.update(phase='receiver_changed', pending=True, message='El receptor cambió de contenido; esperando esta sesión…')
+                    self.update(phase='receiver_changed', pending=True, message='La TV reproduce otro contenido. Cancelá este control y volvé a elegir una película.')
                 else:
-                    self.update(phase='loading', pending=True, message='HLS listo; esperando al Chromecast…')
+                    self.update(phase='loading', pending=True, message='Película preparada. Esperando la confirmación de la TV…')
             elif receiver == 'BUFFERING':
                 self.update(phase='buffering', pending=True, message='Esperando al receptor o a la descarga…')
             elif receiver == 'IDLE' and status.idle_reason == 'FINISHED':
@@ -445,26 +1041,49 @@ class Bridge:
     def _work(self):
         while not self.quit.is_set():
             try:
-                action, data = self.jobs.get(timeout=0.5)
+                job = self.jobs.get(timeout=0.5)
+                action, data = job[:2]
+                self.active_generation = job[2] if len(job) == 3 else 0
             except queue.Empty:
                 action = None
             if action:
                 try:
-                    self.mutate(action, data)
+                    if action == 'stop' or self.active_generation == getattr(self, 'cancel_generation', 0):
+                        self.mutate(action, data)
+                except PreparationCancelled:
+                    pass
                 except Exception as error:
-                    message = str(error) if isinstance(error, BridgeError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
-                    self.update(message=message, pending=False)
+                    message = str(error) if isinstance(error, MediaError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
+                    with self.state_lock:
+                        self.state.update(message=message, action_error=message, pending=False,
+                                          action_error_revision=self.state.get('action_error_revision', 0) + 1)
                     if self.session is None:
                         self.update(phase='error', ffmpeg_alive=False)
+                finally:
+                    with self.state_lock:
+                        if data.get('_plan'):
+                            self.catalogue.unpin(data['_plan'].catalogue.id)
+                        self.state['command_pending'] = not self.jobs.empty()
             try:
-                self.tick()
+                with self.state_lock:
+                    can_tick = (self.jobs.empty() and getattr(self, 'active_generation', 0)
+                                == getattr(self, 'cancel_generation', 0))
+                if can_tick and not self.quit.is_set():
+                    self.tick()
             except Exception as error:
                 message = str(error) if isinstance(error, BridgeError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
+                with self.state_lock:
+                    self.cleanup_active = True
+                    self.state['command_pending'] = True
                 try:
-                    self.stop()
+                    self.stop(release_destination=False)
                 except Exception:
                     pass
-                self.update(phase='error', message=message, pending=False)
+                with self.state_lock:
+                    self.cleanup_active = False
+                    self.state.update(phase='error', message=message, pending=False, action_error=message,
+                                      command_pending=not self.jobs.empty(),
+                                      action_error_revision=self.state.get('action_error_revision', 0) + 1)
             if self.args.state_file:
                 target = Path(self.args.state_file)
                 try:
@@ -473,47 +1092,60 @@ class Bridge:
                     temp.replace(target)
                 except OSError:
                     pass
-        self.stop()
+        try:
+            self.stop(shutdown=True)
+        except Exception as error:
+            self.shutdown_error = str(error) if isinstance(error, BridgeError) else 'No se pudo completar la limpieza.'
+            self.update(phase='error', message=self.shutdown_error, action_error=self.shutdown_error,
+                        pending=False, command_pending=False,
+                        action_error_revision=self.state.get('action_error_revision', 0) + 1)
 
     def close(self):
-        self.quit.set()
+        with self.state_lock:
+            if hasattr(self, 'catalogue'):
+                self.catalogue.cancel()
+            self.quit.set()
+            self.cancel_generation = getattr(self, 'cancel_generation', 0) + 1
+        for wake in (getattr(self, 'device_wake', None), getattr(self, 'source_wake', None)):
+            if wake:
+                wake.set()
         self.worker.join(timeout=50)
+        errors = []
+        if self.worker.is_alive():
+            errors.append('La limpieza del worker todavía no terminó.')
+        if getattr(self, 'shutdown_error', None):
+            errors.append(self.shutdown_error)
+        for worker in getattr(self, 'metadata_workers', []):
+            worker.join(timeout=10)
+            if worker.is_alive():
+                errors.append('La búsqueda todavía no terminó.')
+        if hasattr(self, 'catalogue'):
+            try:
+                self.catalogue.close(cleanup=not errors)
+            except MediaError as error:
+                errors.append(str(error))
+        if self.media_server:
+            stopped = True
+            try:
+                self.media_server.shutdown()
+            except Exception:
+                stopped = False
+                errors.append('No se pudo detener el servidor de medios.')
+            try:
+                self.media_server.server_close()
+            except Exception:
+                errors.append('No se pudo cerrar el servidor de medios.')
+            else:
+                if stopped:
+                    self.media_server = None
+        if errors:
+            self.cleanup_active = True
+            message = ' '.join(errors)
+            self.update(phase='error', message=message, action_error=message)
+            raise BridgeError(message)
 
 
-PANEL = '''<!doctype html><html lang="es"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Stremio → Chromecast</title><style>
-body{font:17px system-ui;background:#13151a;color:#eee;max-width:760px;margin:32px auto;padding:0 18px}
-button,input,select{font:inherit;padding:10px;margin:5px 4px 5px 0;border-radius:6px;border:1px solid #666}
-button{cursor:pointer}input{width:130px}select{max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#bed9ed}
-label{display:inline-block}#message{min-height:2em}small{color:#bbb}
-</style><h1>Stremio → Chromecast</h1>
-<p>Abrí una película en Stremio. Elegí la fuente para enviarla a <strong>__DEVICE__</strong>.</p>
-<button id="discover">Actualizar fuentes</button><select id="source" aria-label="Fuente"></select>
-<button id="start">Iniciar</button><p id="message" role="status" aria-live="polite">Conectando…</p>
-<div><button id="pause">Pausa</button><button id="resume">Continuar</button>
-<button id="back">−30 s</button><button id="forward">+30 s</button><button id="stop">Detener</button></div>
-<p><label>Posición absoluta (segundos) <input id="position" type="number" min="0" value="0"></label>
-<button id="seek">Ir</button></p>
-<p><label>Retraso de subtítulos (ms) <input id="delay" type="number" min="-30000" max="30000" step="100" value="__DELAY__"></label>
-<button id="apply">Aplicar retraso</button><br><small>Un valor positivo muestra el texto más tarde. Aplicar reinicia desde la posición actual.</small></p>
-<pre id="status"></pre><small>Cada salto reinicia desde la posición absoluta con una sesión HLS nueva y conserva la pausa. Esperá la confirmación del receptor; puede depender de la descarga del torrent.</small>
-<script>
-const token='__TOKEN__';
-async function command(action,data={}){try{const r=await fetch('/api/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-Bridge-Token':token},body:JSON.stringify(data)});if(!r.ok)throw Error('No se pudo enviar la acción');document.querySelector('#message').textContent='Acción solicitada…';}catch(e){document.querySelector('#message').textContent=e.message}}
-for(const action of ['discover','pause','resume','stop'])document.getElementById(action).onclick=()=>command(action);
-document.querySelector('#start').onclick=()=>command('start',{source_id:document.querySelector('#source').value});
-document.querySelector('#back').onclick=()=>command('seek',{delta:-30});
-document.querySelector('#forward').onclick=()=>command('seek',{delta:30});
-document.querySelector('#seek').onclick=()=>command('seek',{position:Number(document.querySelector('#position').value)});
-document.querySelector('#apply').onclick=()=>command('delay',{delay_ms:Number(document.querySelector('#delay').value)});
-let sourceSignature='',lastDelay=null;
-async function poll(){try{const r=await fetch('/api/status');const s=await r.json();document.querySelector('#message').textContent=s.message;
-const signature=JSON.stringify(s.sources);if(signature!==sourceSignature){sourceSignature=signature;const select=document.querySelector('#source');select.replaceChildren();for(const source of s.sources||[]){const option=document.createElement('option');option.value=source.id;option.textContent=source.title;select.append(option)}}
-if(lastDelay!==s.subtitle_delay_ms){lastDelay=s.subtitle_delay_ms;if(document.activeElement!==document.querySelector('#delay'))document.querySelector('#delay').value=lastDelay}
-document.querySelector('#status').textContent=JSON.stringify(s,null,2);
-}catch(e){document.querySelector('#message').textContent='Servicio desconectado.'}setTimeout(poll,1500)}poll();
-</script></html>'''
+PANEL = (ROOT / "player.html").read_text().replace("__SCRIPT__", (ROOT / "player.js").read_text())
 
 
 class MediaHandler(BaseHTTPRequestHandler):
@@ -596,7 +1228,9 @@ class ControlHandler(BaseHTTPRequestHandler):
             self.reply(403, {})
         elif self.path == '/':
             import html
-            panel = PANEL.replace('__TOKEN__', self.server.token).replace('__DEVICE__', html.escape(self.server.bridge.args.device_name)).replace('__DELAY__', str(self.server.bridge.args.subtitle_delay_ms))
+            panel = PANEL.replace('__TOKEN__', self.server.token).replace('__DEVICE__', html.escape(self.server.bridge.args.device_name or 'Sin dispositivo')).replace('__DELAY__', str(self.server.bridge.args.subtitle_delay_ms))
+            if self.server.bridge.status().get('demo'):
+                panel = panel.replace('id="demo-banner" hidden', 'id="demo-banner"')
             self.reply(200, panel, 'text/html')
         elif self.path == '/api/status':
             self.reply(200, self.server.bridge.status())
@@ -605,22 +1239,38 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         origin = f'http://127.0.0.1:{self.server.server_port}'
-        if (not self.trusted_host() or self.headers.get('Origin') not in (None, origin)
+        if (not self.trusted_host() or self.headers.get('Origin') != origin
                 or not secrets.compare_digest(self.headers.get('X-Bridge-Token', ''), self.server.token)
                 or self.headers.get_content_type() != 'application/json'):
-            self.reply(403, {'message': 'Solicitud no autorizada.'})
+            self.reply(403, {'code': 'unauthorized', 'message': 'Solicitud no autorizada.'})
             return
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= 4096:
+            limit = UPLOAD_BODY_LIMIT if self.path == '/api/subtitle_upload' else 4096
+            if length > limit:
+                raise BridgeError('La solicitud supera el límite permitido.', 413, 'body_limit')
+            if length <= 0:
                 raise ValueError()
+            if hasattr(self, 'connection'):
+                self.connection.settimeout(5)
             data = json.loads(self.rfile.read(length))
-            if not isinstance(data, dict) or not self.path.startswith('/api/'):
+            if (not isinstance(data, dict) or 'autostart' in data or not self.path.startswith('/api/')
+                    or self.path == '/api/configure_device'):
                 raise ValueError()
-            self.server.bridge.submit(self.path[5:], data)
-            self.reply(202, {'accepted': True})
-        except (ValueError, BridgeError):
-            self.reply(400, {'message': 'Solicitud inválida o cola ocupada.'})
+            if self.path == '/api/catalogue':
+                code, body = self.server.bridge.request_catalogue(data)
+                self.reply(code, body)
+            elif self.path == '/api/subtitle_upload':
+                self.reply(201, self.server.bridge.subtitle_upload(data))
+            else:
+                self.server.bridge.submit(self.path[5:], data)
+                self.reply(202, {'accepted': True})
+        except MediaError as error:
+            self.reply(error.status, {'code': error.code, 'message': str(error)})
+        except (ValueError, UnicodeError, TimeoutError):
+            self.reply(400, {'code': 'invalid_request', 'message': 'Solicitud inválida o cola ocupada.'})
+        except Exception:
+            self.reply(503, {'code': 'unavailable', 'message': 'No se pudo completar la solicitud. Reintentá.'})
 
     def log_message(self, *_):
         pass
@@ -629,7 +1279,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-file', help='JSON explícito con source y device_id; no se publica')
-    parser.add_argument('--device-name', default='Stefano')
+    parser.add_argument('--device-name', help='Nombre exacto opcional del destino')
     parser.add_argument('--device-host', help='IP exacta del Chromecast autorizado')
     parser.add_argument('--subtitle-delay-ms', type=int, default=0)
     parser.add_argument('--max-duration', type=float)
@@ -640,6 +1290,8 @@ def arguments(argv=None):
     parser.add_argument('--no-open', action='store_true', help='Aceptado; nunca se abre un navegador automáticamente')
     parser.add_argument('--state-file', nargs='?', const=str(ROOT / '.local' / 'state.json'))
     args = parser.parse_args(argv)
+    if args.autostart and not (args.device_name or args.device_host):
+        parser.error('--autostart requiere --device-name o --device-host explícito')
     if not math.isfinite(args.readrate) or not 0 < args.readrate <= 10:
         parser.error('--readrate debe estar entre 0 y 10')
     if args.max_duration is not None and (not math.isfinite(args.max_duration) or args.max_duration <= 0):
@@ -671,34 +1323,12 @@ def main(argv=None):
     bridge = media = control = None
     serving = []
     try:
-        # With no fixed host, discover the exact name to determine the LAN route first.
-        host = args.device_host
-        if not host:
-            import pychromecast
-            casts, browser = pychromecast.get_listed_chromecasts(friendly_names=[args.device_name], discovery_timeout=8)
-            try:
-                matches = [c for c in casts if c.cast_info.friendly_name == args.device_name]
-                if len(matches) != 1:
-                    raise BridgeError('No se encontró un único Chromecast con el nombre indicado.')
-                host = matches[0].cast_info.host
-                args.device_host = host
-            finally:
-                for cast in casts:
-                    cast.disconnect()
-                browser.stop_discovery()
-        bridge = Bridge(args, lan_address(host))
-        media = ThreadingHTTPServer((bridge.lan_ip, args.media_port), MediaHandler)
-        media.bridge = bridge
+        bridge = Bridge(args)
         control = ThreadingHTTPServer(('127.0.0.1', args.control_port), ControlHandler)
         control.bridge, control.token = bridge, secrets.token_urlsafe(32)
-        for server in (media, control):
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            serving.append(server)
-        bridge.submit('discover', {})
-        if args.autostart:
-            bridge.submit('start', {})
-        print(json.dumps({'ready': True, 'control_url': f'http://127.0.0.1:{args.control_port}',
-                          'media_lan_ip': bridge.lan_ip, 'device_name': args.device_name}), flush=True)
+        threading.Thread(target=control.serve_forever, daemon=True).start()
+        serving.append(control)
+        print(json.dumps({'ready': True, 'control_url': f'http://127.0.0.1:{args.control_port}'}), flush=True)
         signal.signal(signal.SIGTERM, lambda *_: bridge.quit.set())
         while not bridge.quit.wait(0.5):
             pass
