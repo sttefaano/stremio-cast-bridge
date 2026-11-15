@@ -67,25 +67,27 @@ class VodLayoutTest(unittest.TestCase):
 
 class SegmentActionTest(unittest.TestCase):
     def test_request_decision_table(self):
-        running = Run(start=10, limit=30, position=12, state='running')
+        running = Run(start=10, limit=30, position=12, state='running', end=40)
         cases = (
             ('on disk', 4, True, running, 'serve'),
             ('being written', 12, False, running, 'hold'),
             ('within reach', 15, False, running, 'hold'),
             ('just out of reach', 16, False, running, 'restart'),
             ('behind the producer start', 9, False, running, 'restart'),
-            ('past the run bound', 30, False, Run(10, 30, 28, 'running'), 'restart'),
-            ('never started', 0, False, Run(0, 0, 0, 'idle'), 'restart'),
-            ('finished run never wrote it', 29, False, Run(10, 30, 29, 'finished'), 'missing'),
-            ('finished run elsewhere', 40, False, Run(10, 30, 30, 'finished'), 'restart'),
-            ('failed producer', 12, False, Run(10, 30, 12, 'failed'), 'missing'),
+            ('past the run bound', 30, False, Run(10, 30, 28, 'running', 40), 'restart'),
+            ('never started', 0, False, Run(0, 0, 0, 'stopped', 40), 'restart'),
+            ('a stopped run never wrote it', 29, False, Run(10, 30, 29, 'stopped', 40), 'restart'),
+            ('backing off after a failure', 12, False, Run(10, 30, 12, 'backoff', 40), 'wait'),
+            ('retry budget spent', 12, False, Run(10, 30, 12, 'exhausted', 40), 'missing'),
+            ('past the end of the source', 40, False, running, 'end'),
+            ('past the end, budget spent', 41, False, Run(10, 30, 12, 'exhausted', 40), 'end'),
         )
         for label, index, complete, run, expected in cases:
             with self.subTest(label):
                 self.assertEqual(segment_action(index, complete, run), expected)
 
     def test_who_may_restart(self):
-        running, stopped = Run(10, 30, 12, 'running'), Run(10, 30, 30, 'finished')
+        running, stopped = Run(10, 30, 12, 'running', 50), Run(10, 30, 30, 'stopped', 50)
         cases = (
             # A new request or an explicit seek is the newest demand and always wins.
             ('arrival', running, True, 'restart'),
@@ -190,7 +192,7 @@ class ProducerTest(unittest.TestCase):
         self.write(15)
         for thread in threads:
             thread.join(3)
-        self.assertEqual(results, [True] * 4)
+        self.assertEqual(results, ['serve'] * 4)
         self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 15, 20]])
 
     def test_held_request_keeps_the_producer_running(self):
@@ -209,7 +211,7 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT], 'no SIGSTOP while a request is held')
         self.write(12, 13)
         holder.join(2)
-        self.assertEqual(result, [True])
+        self.assertEqual(result, ['serve'])
         producer.throttle(0)
         self.assertEqual(process.signals, [signal.SIGSTOP, signal.SIGCONT, signal.SIGSTOP])
 
@@ -240,10 +242,10 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(result, [], 'waits while the running producer is making them')
         self.write(*range(6, 12))
         holder.join(2)
-        self.assertEqual(result, [True])
+        self.assertEqual(result, ['serve'])
         self.assertEqual(len(self.launched), 1)
         self.launched[0].code = 0
-        self.assertTrue(producer.request(5, extra=range(18, 22)), 'cues the producer will not write are not awaited')
+        self.assertEqual(producer.request(5, extra=range(18, 22)), 'serve', 'cues the producer will not write are not awaited')
         self.assertEqual(len(self.launched), 1)
 
     def test_a_held_cue_never_pins_the_producer(self):
@@ -256,27 +258,86 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(result, [], 'held while the running producer reaches it')
         producer.cover(15)
         holder.join(1)
-        self.assertEqual(result, [False], 'answered as soon as the producer moved away')
+        self.assertEqual(result, ['missing'], 'answered as soon as the producer moved away')
         self.assertEqual([p.command[1] for p in self.launched], [0, 15])
-        self.assertFalse(producer.request(3, cue=True))
+        self.assertEqual(producer.request(3, cue=True), 'missing')
         self.assertEqual(len(self.launched), 2)
 
     def test_hold_is_bounded_per_segment_across_receiver_retries(self):
         producer = self.producer(hold_seconds=.3)
         producer.cover(0)
         started = time.monotonic()
-        self.assertFalse(producer.request(2))
-        self.assertFalse(producer.request(2))
+        self.assertEqual(producer.request(2), 'missing')
+        self.assertEqual(producer.request(2), 'missing')
         self.assertLess(time.monotonic() - started, .6, 'a retry shares the first deadline')
 
-    def test_finished_run_answers_missing_segments_without_restarting(self):
+    def test_a_run_that_stops_within_the_last_two_listed_segments_marks_the_end(self):
         self.layout = VodLayout(60.021)
         producer = self.producer()
         producer.cover(0)
+        self.write(*range(0, 8))
         self.launched[0].code = 0
-        self.write(*range(0, 9))
-        self.assertFalse(producer.request(9))
+        self.assertEqual(producer.request(8), 'end')
+        self.assertEqual(producer.request(9), 'end')
+        self.assertEqual(producer.request(7), 'serve')
+        self.assertEqual(producer.snapshot().end, 8)
         self.assertEqual(len(self.launched), 1)
+
+    def test_a_held_request_restarts_its_run_when_it_dies(self):
+        producer = self.producer(hold_seconds=1, backoff_seconds=0)
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(4)))
+        holder.start()
+        time.sleep(.05)
+        self.launched[0].code = 1
+        time.sleep(.1)
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 4, 20], ['ffmpeg', 4, 20]])
+        self.write(4)
+        holder.join(1)
+        self.assertEqual(result, ['serve'])
+
+    def test_a_truncated_run_resumes_from_its_last_segment(self):
+        # A stalled source makes FFmpeg exit 0 and finalize the segment it was writing, short.
+        producer = self.producer(backoff_seconds=0)
+        producer.cover(0)
+        self.write(*range(0, 5))
+        self.launched[0].code = 0
+        producer.cover(0)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 4, 20])
+        self.assertFalse((self.directory / self.layout.segment_name(4)).exists())
+        self.assertTrue((self.directory / self.layout.segment_name(3)).exists())
+
+    def test_failures_without_a_new_segment_spend_a_bounded_retry_budget(self):
+        producer = self.producer(backoff_seconds=0)
+        producer.cover(0)
+        self.write(0, 1)
+        self.launched[-1].code = 1
+        producer.cover(0)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 1, 20], 'a failed run is retried from its partial segment')
+        for _ in range(3):
+            self.launched[-1].code = 1
+            producer.cover(0)
+        self.assertEqual(len(self.launched), 4, 'three runs in a row that wrote nothing spend the budget')
+        self.assertTrue(producer.snapshot().failed)
+        self.assertEqual(producer.request(1), 'missing')
+        self.assertEqual(producer.request(0), 'serve')
+        self.assertEqual(len(self.launched), 4)
+
+    def test_a_retry_waits_out_a_short_backoff(self):
+        producer = self.producer(backoff_seconds=.2)
+        producer.cover(0)
+        self.launched[0].code = 1
+        producer.cover(0)
+        self.assertEqual(len(self.launched), 1)
+        self.assertFalse(producer.snapshot().failed)
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(0)))
+        holder.start()
+        time.sleep(.3)
+        self.assertEqual(len(self.launched), 2, 'the held request retries once the backoff passes')
+        self.write(0)
+        holder.join(1)
+        self.assertEqual(result, ['serve'])
 
     def test_a_killed_run_that_will_not_exit_never_leaks_its_arguments(self):
         producer = self.producer()
@@ -297,9 +358,9 @@ class ProducerTest(unittest.TestCase):
             with self.assertRaises(MediaError) as failed:
                 producer.cover(15)
             self.assertNotIn('private', str(failed.exception))
-            self.assertFalse(producer.request(16))
+            self.assertEqual(producer.request(16), 'missing')
         self.assertEqual(self.launched[0].signals, [signal.SIGKILL])
-        self.assertEqual(producer.snapshot(), (None, False, False, None))
+        self.assertEqual(producer.snapshot()[:4], (None, False, False, None))
         producer.cover(15)
         self.assertEqual(self.launched[-1].command, ['ffmpeg', 15, 20])
 
@@ -319,11 +380,11 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual([p.command[1] for p in self.launched], [100, 105])
         self.write(105)
         second.join(1)
-        self.assertEqual(result, {105: True})
+        self.assertEqual(result, {105: 'serve'})
         time.sleep(.1)
         self.assertEqual(len(self.launched), 2, 'the displaced hold does not take the run back')
         first.join(2)
-        self.assertEqual(result[100], False)
+        self.assertEqual(result[100], 'missing')
         self.assertGreater(time.monotonic() - started, .4, 'answered at its deadline, not when the run changed')
         retry = threading.Thread(target=ask, args=(100,))
         retry.start()
@@ -353,10 +414,10 @@ class ProducerTest(unittest.TestCase):
         time.sleep(.05)
         producer.close()
         holder.join(1)
-        self.assertEqual(result, [False])
+        self.assertEqual(result, ['missing'])
         self.assertEqual(self.launched[0].signals, [signal.SIGKILL])
         producer.cover(5)
-        self.assertFalse(producer.request(5))
+        self.assertEqual(producer.request(5), 'missing')
         self.assertEqual(len(self.launched), 1)
 
 

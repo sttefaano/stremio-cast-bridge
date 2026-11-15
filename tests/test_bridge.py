@@ -282,6 +282,31 @@ class ReceiverSeekTest(unittest.TestCase):
             self.assertIsNone(bridge.seek_target)
             self.assertEqual(bridge.status()['absolute_time'], 30)
 
+    def test_a_dead_producer_is_retried_and_only_a_spent_budget_ends_the_session(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:
+            bridge = self.playing(folder)
+            bridge.producer.backoff_seconds = 0
+            bridge.producer.process.poll.return_value = 1
+            launch.return_value = Mock(pid=4321, **{'poll.return_value': 1})
+            bridge.tick()
+            bridge.tick()
+            self.assertEqual(launch.call_args.args[0], ['ffmpeg', 5, 15])
+            with self.assertRaises(BridgeError) as ended:
+                bridge.tick()
+            self.assertIn('FFmpeg terminó con código 1', str(ended.exception))
+            self.assertEqual(launch.call_count, 2)
+
+    def test_a_run_that_meets_the_source_end_completes_the_generation_and_answers_the_rest_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bridge = self.playing(folder)
+            produce(bridge.session, *range(14))
+            bridge.producer.process.poll.return_value = 0
+            bridge.tick()
+            self.assertTrue(bridge.status()['generation_complete'])
+            with media_server(Path(folder), bridge.producer) as fetch:
+                answer = fetch(f'/{bridge.session.name}/d0/segment-0014.ts')
+                self.assertEqual((answer.status, answer.headers['Content-Length'], answer.read()), (200, '0', b''))
+
     def test_seek_needs_the_receiver_to_show_this_playback(self):
         with tempfile.TemporaryDirectory() as folder:
             bridge = self.playing(folder)
@@ -333,16 +358,15 @@ class ReceiverOwnershipTest(unittest.TestCase):
                 self.assertEqual(bridge.cast.media_controller.play_media.called, produced == (10, 11, 12), produced)
             self.assertEqual(bridge.cast.media_controller.play_media.call_args.kwargs['current_time'], 61)
 
-    def test_producer_failure_stops_the_session_but_a_finished_run_does_not(self):
+    def test_a_finished_run_does_not_stop_the_session(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             bridge = self.fixture(Path(folder))
             process = running_producer(bridge)
             produce(bridge.session, *range(15))
             process.poll.return_value = 0
             bridge.tick()
-            process.poll.return_value = 1
-            with self.assertRaises(BridgeError):
-                bridge.tick()
+            bridge.tick()
+            self.assertTrue(bridge.status()['generation_complete'])
 
     def test_ownership_loss_preserves_position_and_stop_leaves_foreign_media(self):
         for player_state in ('PLAYING', 'PAUSED'):

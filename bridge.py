@@ -1104,12 +1104,13 @@ class Bridge:
         storage = self.storage()
         if storage >= 6 * 1024**3 or shutil.disk_usage(self.sessions).free < 512 * 1024**2:
             raise BridgeError('Límite de almacenamiento alcanzado. Detenido para proteger el disco.')
-        returncode = producer.snapshot().returncode
-        if returncode not in (None, 0):
-            raise BridgeError(f'FFmpeg terminó con código {returncode}. Fuente o códec no disponible.')
+        produced = producer.snapshot()
+        if produced.failed:
+            raise BridgeError(f'FFmpeg terminó con código {produced.returncode}. Fuente o códec no disponible.'
+                              if produced.returncode else 'La fuente dejó de entregar datos. Reintentá cuando descargue.')
         completed = producer.completed()
         first = layout.index_at(self.load_time)
-        ready = (set(range(first, min(layout.count, first + 3))) <= completed
+        ready = (set(range(first, min(produced.end, first + 3))) <= completed
                  and (self.session / 'master.m3u8').exists())
         if not self.loaded and ready:
             with self.state_lock:
@@ -1177,7 +1178,7 @@ class Bridge:
         buffered_start, buffered_end = buffered_run(layout, completed, playing)
         self.update(absolute_time=absolute, receiver_state=receiver, active_subtitle_track_ids=tracks,
                     ffmpeg_pid=produced.pid, ffmpeg_alive=produced.alive, producer_suspended=produced.suspended,
-                    segment_count=len(completed), generation_complete=len(completed) >= layout.count,
+                    segment_count=len(completed), generation_complete=set(range(produced.end)) <= completed,
                     buffered_start=buffered_start, buffered_end=buffered_end, storage_bytes=storage)
         self.record_session()
         if not self.loaded and time.monotonic() - self.started_at > 180:
@@ -1366,7 +1367,10 @@ class MediaHandler(BaseHTTPRequestHandler):
             return io.BytesIO(layout.subtitle_playlist().encode())
         kind, index = layout.parse(name) or (None, None)
         if kind == 'segment':
-            return open_media(root, producer.directory / name) if producer.request(index) else None
+            outcome = producer.request(index)
+            # Past the source's real end: an empty segment, so the TV runs out of media instead of failing.
+            return open_media(root, producer.directory / name) if outcome == 'serve' else (
+                io.BytesIO() if outcome == 'end' else None)
         if kind == 'cue':
             return subtitle_segment(root, producer, index, delay_ms)
         return None

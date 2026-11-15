@@ -16,11 +16,11 @@ from vod import Producer, VodLayout
 
 
 def finished_producer(directory, duration, subtitles=True, hold_seconds=1):
-    """A session whose producer already ran to the end: whatever is not on disk never will be."""
+    """A session whose producer gave up: whatever is not on disk never will be."""
     layout = VodLayout(duration, subtitles=subtitles)
     def command(*_):
         raise AssertionError('a finished fixture never starts FFmpeg')
-    producer = Producer(directory, layout, command, hold_seconds=hold_seconds, poll_seconds=.01)
+    producer = Producer(directory, layout, command, hold_seconds=hold_seconds, poll_seconds=.01, retries=0)
     producer.process = Mock(pid=None, **{'poll.return_value': 0})
     producer.limit = layout.count
     return producer
@@ -32,6 +32,7 @@ def running_producer(bridge, pid=123):
     producer.process = Mock(pid=pid, **{'poll.return_value': None})
     producer.start = producer.position = producer.layout.index_at(bridge.state.get('absolute_time') or 0)
     producer.limit = producer.layout.count
+    producer.settled = False
     return producer.process
 
 

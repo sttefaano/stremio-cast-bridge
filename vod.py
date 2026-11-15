@@ -25,6 +25,10 @@ HOLD_SECONDS = 40
 # The receiver retries every ~10.5 s; a request after this long a pause starts a fresh hold.
 RETRY_GAP_SECONDS = 15
 SUSPEND_AHEAD, RESUME_AHEAD = 60, 45
+# Runs in a row that may stop without a new segment before the session gives up, and the pause before each retry.
+RETRIES, BACKOFF_SECONDS = 3, 2
+# A run that stops this close to the listed end met the source's real end; the probed duration can run long.
+END_SLACK = 2
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,8 @@ class Run(NamedTuple):
     start: int
     limit: int
     position: int
-    state: str
+    state: str  # running, stopped (no FFmpeg; asking again is fine), backoff, or exhausted (retries spent)
+    end: int  # the first index the source has no media for
 
 
 # Who may replace the run when a segment needs a restart, given whether it is running and whether
@@ -100,16 +105,19 @@ MAY_RESTART = {
 
 
 def segment_action(index, complete, run, caller='arrival', yields=False, reach=REACH):
-    """serve, hold (the running producer reaches it soon), restart there, wait (not this caller's
-    call), or missing (it never will)."""
+    """serve, end (past the source), missing (retries spent), hold (the running producer reaches it
+    soon), restart there, or wait (backing off, or not this caller's call)."""
     if complete:
         return 'serve'
-    covered = run.start <= index < run.limit
-    if run.state == 'failed' or covered and run.state == 'finished':
+    if index >= run.end:
+        return 'end'
+    if run.state == 'exhausted':
         return 'missing'
-    if covered and run.state == 'running' and index <= run.position + reach:
+    if run.state == 'running' and run.start <= index < run.limit and index <= run.position + reach:
         return 'hold'
-    return 'restart' if MAY_RESTART[caller](run.state == 'running', yields) else 'wait'
+    if run.state == 'backoff' or not MAY_RESTART[caller](run.state == 'running', yields):
+        return 'wait'
+    return 'restart'
 
 
 class ProducerState(NamedTuple):
@@ -117,6 +125,8 @@ class ProducerState(NamedTuple):
     alive: bool
     suspended: bool
     returncode: int | None
+    failed: bool
+    end: int
 
 
 class Producer:
@@ -125,9 +135,12 @@ class Producer:
     A run starts at the first missing segment and stops before the next one already on disk, so a
     completed segment is never rewritten (FFmpeg writes .vtt files in place, not through temp_file).
     """
-    def __init__(self, directory, layout, command, hold_seconds=HOLD_SECONDS, poll_seconds=.1):
+    def __init__(self, directory, layout, command, hold_seconds=HOLD_SECONDS, poll_seconds=.1,
+                 retries=RETRIES, backoff_seconds=BACKOFF_SECONDS):
         self.directory, self.layout, self.command = directory, layout, command
         self.hold_seconds, self.poll_seconds = hold_seconds, poll_seconds
+        self.retries, self.backoff_seconds = retries, backoff_seconds
+        self.failures, self.retry_at, self.end, self.settled = 0, 0, layout.count, True
         self.lock = threading.Lock()
         self.process = None
         self.start = self.limit = self.position = 0
@@ -151,10 +164,28 @@ class Producer:
 
     def _run(self):
         code = self.process.poll() if self.process else None
-        state = 'idle' if not self.process else 'running' if code is None else 'finished' if code == 0 else 'failed'
         while self.position < self.limit and self.complete(self.position):
             self.position += 1
-        return Run(self.start, self.limit, self.position, state)
+        if self.process and code is not None and not self.settled:
+            self._settle()
+        state = ('running' if self.process and code is None else 'exhausted' if self.failures >= self.retries
+                 else 'backoff' if time.monotonic() < self.retry_at else 'stopped')
+        return Run(self.start, self.limit, self.position, state, self.end)
+
+    def _settle(self):
+        """Judge a run that exited by itself, once: complete, the source's end, or a failure to retry."""
+        self.settled = True
+        if self.position == self.limit:
+            self.failures = 0
+        elif self.limit == self.layout.count and self.position >= self.layout.count - END_SLACK:
+            self.end, self.failures = self.position, 0
+        else:
+            # A stall makes FFmpeg exit (even with 0) and finalize the segment it was writing, short.
+            if self.position > self.start:
+                self.position -= 1
+                (self.directory / self.layout.segment_name(self.position)).unlink(missing_ok=True)
+            self.failures = 0 if self.position > self.start else self.failures + 1
+            self.retry_at = time.monotonic() + self.backoff_seconds
 
     def _first_missing(self, index, until):
         return next((i for i in range(index, until) if not self.complete(i)), None)
@@ -169,7 +200,7 @@ class Producer:
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError, subprocess.SubprocessError):
             raise MediaError('No se pudo iniciar FFmpeg.', 500, 'producer_failed') from None
-        self.start, self.limit, self.position = index, limit, index
+        self.start, self.limit, self.position, self.settled = index, limit, index, False
         self.suspended = False
         self.first_seen.clear()
 
@@ -196,36 +227,30 @@ class Producer:
                 return
             until = self.layout.count if horizon is None else min(
                 self.layout.count, self.layout.index_at(self.layout.start(index) + horizon) + 1)
+            run = self._run()
             need = self._first_missing(index, until)
             waiting = any(not cue for _, cue in self.holds.values())
-            if need is not None and segment_action(need, False, self._run(), 'cover', waiting) == 'restart':
+            if need is not None and segment_action(need, False, run, 'cover', waiting) == 'restart':
                 self._restart(need)
 
     def seek(self, index):
         """An explicit jump: produce from index now unless it is on disk or coming soon."""
         with self.lock:
-            if not self.closed and segment_action(index, self.complete(index), self._run()) == 'restart':
+            if self.closed:
+                return
+            run = self._run()
+            if segment_action(index, self.complete(index), run) == 'restart':
                 self._restart(index)
 
     def request(self, index, extra=(), cue=False):
         """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming.
 
-        A cue request only waits for what the running producer reaches; it never restarts it."""
+        Answers serve, end (the source has no media there) or missing. A cue request only waits for what
+        the running producer reaches; it never restarts it."""
         caller, again = ('cue', 'cue') if cue else ('arrival', 'held')
         with self.lock:
             if self.closed:
-                return False
-            run = self._run()
-            action = segment_action(index, self.complete(index), run, caller)
-            if action in ('missing', 'wait'):
-                return False
-            if action == 'serve' and not self._coming(extra, run):
-                return True
-            if action == 'restart':
-                try:
-                    self._restart(index)
-                except MediaError:
-                    return False
+                return 'missing'
             now = time.monotonic()
             seen = self.first_seen.get(index)
             if seen is None or now - seen > self.hold_seconds + RETRY_GAP_SECONDS:
@@ -234,31 +259,40 @@ class Producer:
             self.arrivals += 1
             ticket = self.arrivals
             self.holds[ticket] = index, cue
-            self._resume()
         try:
             while True:
                 with self.lock:
-                    if self.closed:
-                        return False
-                    run = self._run()
-                    newer = any(other > ticket and not held_cue for other, (_, held_cue) in self.holds.items())
-                    action = segment_action(index, self.complete(index), run, again, newer)
-                    expired = time.monotonic() >= deadline
-                    if action == 'serve':
-                        if not self._coming(extra, run) or expired:
-                            self.first_seen.pop(index, None)
-                            return True
-                    elif action in ('missing', 'wait') and again == 'cue' or action == 'missing' or expired:
-                        return False
-                    elif action == 'restart':
-                        try:
-                            self._restart(index)
-                        except MediaError:
-                            return False
+                    outcome = self._answer(index, extra, ticket, caller, deadline)
+                    if outcome is None:
+                        self._resume()
+                if outcome:
+                    return outcome
+                caller = again
                 time.sleep(self.poll_seconds)
         finally:
             with self.lock:
                 self.holds.pop(ticket, None)
+
+    def _answer(self, index, extra, ticket, caller, deadline):
+        if self.closed:
+            return 'missing'
+        run = self._run()
+        newer = any(other > ticket and not cue for other, (_, cue) in self.holds.items())
+        action = segment_action(index, self.complete(index), run, caller, newer)
+        expired = time.monotonic() >= deadline
+        if action == 'serve' and (expired or not self._coming(extra, run)):
+            self.first_seen.pop(index, None)
+            return 'serve'
+        if action in ('end', 'missing'):
+            return action
+        if expired or caller == 'cue' and action == 'wait':
+            return 'missing'
+        if action == 'restart':
+            try:
+                self._restart(index)
+            except MediaError:
+                return 'missing'
+        return None
 
     def _coming(self, indices, run):
         return [j for j in indices if not self.complete(j) and run.state == 'running' and run.start <= j < run.limit]
@@ -279,7 +313,8 @@ class Producer:
         with self.lock:
             run = self._run()
             return ProducerState(self.process.pid if self.process else None, run.state == 'running',
-                                 self.suspended, self.process.poll() if self.process else None)
+                                 self.suspended, self.process.poll() if self.process else None,
+                                 run.state == 'exhausted', run.end)
 
     def close(self):
         with self.lock:
