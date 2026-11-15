@@ -324,6 +324,23 @@ class ProducerTest(unittest.TestCase):
         self.assertFalse((self.directory / self.layout.segment_name(4)).exists())
         self.assertTrue((self.directory / self.layout.segment_name(3)).exists())
 
+    def test_a_held_request_is_not_served_the_short_segment_a_stalled_run_left(self):
+        producer = self.producer(hold_seconds=2, backoff_seconds=0)
+        producer.cover(0)
+        result = []
+        holder = threading.Thread(target=lambda: result.append(producer.request(2)))
+        holder.start()
+        time.sleep(.05)
+        with producer.lock:
+            self.write(0, 1, 2)
+            self.launched[0].code = 0
+        time.sleep(.1)
+        self.assertEqual(result, [])
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 2, 20]])
+        self.write(2)
+        holder.join(1)
+        self.assertEqual(result, ['serve'])
+
     def test_failures_without_a_new_segment_spend_a_bounded_retry_budget(self):
         producer = self.producer(backoff_seconds=0)
         producer.cover(0)
