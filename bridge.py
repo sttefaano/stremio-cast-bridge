@@ -1316,6 +1316,9 @@ class MediaHandler(BaseHTTPRequestHandler):
                 stream = subtitle_view(root, path, delay_ms)
             else:
                 stream = open_media(root, path)
+        except OSError:
+            stream = None
+        try:
             if stream is None:
                 self.send_error(404)
                 return

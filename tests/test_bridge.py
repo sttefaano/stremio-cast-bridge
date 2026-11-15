@@ -496,6 +496,10 @@ class DelayedSubtitleViewTest(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(HTTPError) as refused:
                     fetch(path)
                 self.assertEqual(refused.exception.code, 404)
+            (session / 'video_vtt.m3u8').unlink()
+            with self.assertRaises(HTTPError) as refused:
+                fetch('/session-view/d0/video0.vtt')
+            self.assertEqual(refused.exception.code, 404)
 
 
 class StatusTest(unittest.TestCase):
