@@ -1023,16 +1023,25 @@ class Bridge:
             self.paused = receiver.player_state == 'PAUSED'
             if rebuild:
                 self.begin(target, plan=plan)
+            elif reload:
+                if not subtitle_windows(delayed_playlist((self.session / SUBTITLE_PLAYLIST).read_text(), plan.delay_ms)):
+                    raise BridgeError('Todavía no hay subtítulos convertidos para ese ajuste. Probá en unos segundos.',
+                                      409, 'subtitle_not_ready')
+                with self.state_lock:
+                    current, url = receiver.adjusted_current_time, self.media_url
+                    self.active_plan = plan
+                    try:
+                        self.load_media(max(0, float(current) if current is not None else target - self.origin))
+                    except Exception:
+                        self.active_plan, self.media_url = previous, url
+                        raise BridgeError('No se pudo cambiar la sincronización en la TV. Reintentá.') from None
+                    self.receiver_confirmed = False
+                    self.state.update(subtitle_choice=plan.choice(), subtitle_delay_ms=plan.delay_ms, phase='loading',
+                                      pending=True, message='Película preparada. Esperando la confirmación de la TV…')
             else:
                 with self.state_lock:
                     self.active_plan = plan
                     self.state.update(subtitle_choice=plan.choice(), subtitle_delay_ms=plan.delay_ms)
-                    if reload:
-                        current = receiver.adjusted_current_time
-                        self.receiver_confirmed = False
-                        self.load_media(max(0, float(current) if current is not None else target - self.origin))
-                        self.state.update(phase='loading', pending=True,
-                                          message='Película preparada. Esperando la confirmación de la TV…')
         elif action in ('volume', 'mute'):
             if (not self.loaded or not self.cast or not self.media_url
                     or self.cast.socket_client.is_connected is False

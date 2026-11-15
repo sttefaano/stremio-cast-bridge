@@ -17,12 +17,16 @@ from pychromecast import Chromecast
 from pychromecast.models import CastInfo
 
 from bridge import (main, Bridge, safe_media_path, CLIP_SEEK_PREROLL, FFMPEG, playback_position, public_status,
-                    ffmpeg_command, probe, parse_cues, subtitle_windows)
+                    ffmpeg_command, probe, parse_cues, subtitle_windows, BridgeError)
 from media import Catalogue, PlaybackPlan
 from backend_fixtures import install_media, apply_data, media_server, served_cues
 
 
 class RestartPolicyTest(unittest.TestCase):
+    def subtitle_playlist(self, bridge, segments=15, ended=True):
+        (bridge.session / 'video_vtt.m3u8').write_text('#EXTM3U\n' + ''.join(
+            f'#EXTINF:6.000000,\nvideo{index}.vtt\n' for index in range(segments)) + ('#EXT-X-ENDLIST\n' if ended else ''))
+
     def fixture(self, root):
         bridge = Bridge.__new__(Bridge)  # No worker, sockets or discovery.
         bridge.args = SimpleNamespace(max_duration=90, readrate=1.1, media_port=18766)
@@ -122,6 +126,7 @@ class RestartPolicyTest(unittest.TestCase):
             with self.subTest(player_state=player_state), tempfile.TemporaryDirectory(
                     dir=Path(__file__).resolve().parents[1]) as folder:
                 bridge = self.fixture(Path(folder))
+                self.subtitle_playlist(bridge)
                 bridge.origin = 40
                 bridge.state['playback_id'] = 'playback'
                 bridge.receiver_confirmed = True
@@ -158,6 +163,7 @@ class RestartPolicyTest(unittest.TestCase):
     def test_stop_before_the_tv_confirms_a_delay_change_stops_the_tv(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             bridge = self.fixture(Path(folder))
+            self.subtitle_playlist(bridge)
             bridge.state['playback_id'] = 'playback'
             bridge.receiver_confirmed = True
             bridge.process = producer = Mock()
@@ -172,6 +178,34 @@ class RestartPolicyTest(unittest.TestCase):
             bridge.mutate('stop', {'device_id': 'fixture-device', 'device_revision': 1,
                                    'playback_id': 'playback'})
             controller.stop.assert_called_once()
+
+    def test_delay_change_without_served_subtitle_windows_is_refused_before_touching_the_tv(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            bridge.state['playback_id'] = 'playback'
+            bridge.receiver_confirmed = True
+            bridge.cast.media_controller.status.content_id = bridge.media_url
+            self.subtitle_playlist(bridge, segments=3, ended=False)
+            before = bridge.active_plan
+            with self.assertRaises(BridgeError) as refused:
+                bridge.mutate('subtitles', apply_data(bridge, delay=-30000))
+            self.assertEqual(refused.exception.code, 'subtitle_not_ready')
+            self.assertIs(bridge.active_plan, before)
+            bridge.cast.media_controller.play_media.assert_not_called()
+
+    def test_failed_delay_reload_keeps_the_previous_plan_and_url(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            self.subtitle_playlist(bridge)
+            bridge.state['playback_id'] = 'playback'
+            bridge.receiver_confirmed = True
+            bridge.cast.media_controller.status.content_id = url = bridge.media_url
+            bridge.cast.media_controller.play_media.side_effect = OSError('receiver gone')
+            before = bridge.active_plan
+            with self.assertRaises(BridgeError):
+                bridge.mutate('subtitles', apply_data(bridge, delay=-1500))
+            self.assertEqual((bridge.active_plan, bridge.media_url, bridge.receiver_confirmed), (before, url, True))
+            self.assertTrue(bridge._owns_playback())
 
     def test_track_change_still_rebuilds_from_the_current_position(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:

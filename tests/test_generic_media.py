@@ -398,6 +398,7 @@ class CatalogueTest(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as folder:
             bridge = RestartPolicyTest().fixture(Path(folder))
+            RestartPolicyTest().subtitle_playlist(bridge)
             bridge.cast.media_controller.status.content_id = bridge.media_url
             bridge.cast.media_controller.status.player_state = 'PAUSED'
             bridge.cast.media_controller.status.subtitle_tracks = [dict(type='TEXT', trackId=7)]
