@@ -1,6 +1,8 @@
 """Local, explicitly controlled Stremio → HLS → Chromecast bridge."""
 import argparse
+import functools
 import hashlib
+import io
 import ipaddress
 import json
 import logging
@@ -33,19 +35,25 @@ PRIVATE_SOURCE_KEYS = ('url', 'release')
 MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
+DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
+SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
+CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)')
+
+
 def safe_media_path(root, request_path):
+    """Resolve /<session>/d<delay ms>/<file> to the session file and the delay of its served view."""
     try:
         parts = unquote(urlsplit(request_path).path).lstrip('/').split('/')
-        if len(parts) != 2 or any(p in ('', '.', '..') or '\\' in p or '\x00' in p for p in parts):
+        if len(parts) != 3 or any(p in ('', '.', '..') or '\\' in p or '\x00' in p for p in parts):
             return None
-        path = Path(root)
-        for part in parts:
-            path = path / part
-            if path.is_symlink():
-                return None
-        if path.suffix not in MIME or not path.is_file():
+        delay = DELAY_PART.fullmatch(parts[1])
+        if not delay or abs(int(delay[1])) > 30000:
             return None
-        return path
+        session = Path(root) / parts[0]
+        path = session / parts[2]
+        if session.is_symlink() or path.is_symlink() or path.suffix not in MIME or not path.is_file():
+            return None
+        return path, int(delay[1])
     except (ValueError, OSError):
         return None
 
@@ -67,21 +75,88 @@ def open_media(root, path):
     return os.fdopen(media_fd, 'rb')
 
 
-def subtitle_filter(delay_ms):
-    delay = int(delay_ms) / 1000
-    # Drop expired seek preroll; clip crossing starts/durations while preserving ends.
-    return (f"noise=amount=0:drop='lte(pts+duration+({delay:.3f})/tb,0)',"
-            f"setts=pts='max(PTS+({delay:.3f})/TB,0)':"
-            f"dts='max(DTS+({delay:.3f})/TB,0)':"
-            f"duration='max(0,DURATION+min(0,PTS+({delay:.3f})/TB))'")
+def subtitle_view(root, path, delay_ms):
+    with open_media(root, path.parent / SUBTITLE_PLAYLIST) as stream:
+        playlist = stream.read().decode('utf-8', 'replace')
+    if path.name == SUBTITLE_PLAYLIST:
+        body = delayed_playlist(playlist, delay_ms)
+    else:
+        body = delayed_segment(playlist, path.name, lambda name: segment_cues(root, path.parent / name), delay_ms)
+    return None if body is None else io.BytesIO(body.encode())
+
+
+@functools.lru_cache(maxsize=8192)
+def segment_cues(root, path):
+    """Session names are never reused and FFmpeg never rewrites a segment once it is listed."""
+    with open_media(root, path) as stream:
+        return tuple(parse_cues(stream.read().decode('utf-8', 'replace')))
+
+
+def subtitle_windows(playlist):
+    """(name, start ms, end ms, playlist entry) per listed WebVTT segment, from the cumulative #EXTINF."""
+    windows, total = [], 0.0
+    for entry in re.finditer(r'#EXTINF:([0-9.]+),[^\n]*\n([\w-]+\.vtt)\n?', playlist):
+        start = round(total * 1000)
+        total += float(entry[1])
+        windows.append((entry[2], start, round(total * 1000), entry[0]))
+    return windows
+
+
+def delayed_playlist(playlist, delay_ms):
+    windows = subtitle_windows(playlist)
+    if delay_ms >= 0 or '#EXT-X-ENDLIST' in playlist or not windows:
+        return playlist
+    covered = windows[-1][2]
+    return playlist[:playlist.index(windows[0][3])] + ''.join(
+        entry for _, _, end, entry in windows if end - delay_ms <= covered)
+
+
+def delayed_segment(playlist, name, cues_of, delay_ms):
+    windows = subtitle_windows(playlist)
+    window = next(((start, end) for listed, start, end, _ in windows if listed == name), None)
+    if window is None:
+        return None
+    # FFmpeg can write a cue into a later segment than its start (seen two windows late), so use every listed one.
+    cues = {cue for listed, *_ in windows for cue in cues_of(listed)}
+    shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text)
+                   for start, end, settings, text in cues
+                   if end + delay_ms > window[0] and max(0, start + delay_ms) < window[1])
+    return 'WEBVTT\n' + ''.join(f'\n{timestamp(start)} --> {timestamp(end)}{settings}\n{text}\n'
+                                for start, end, settings, text in shown)
+
+
+def parse_cues(text):
+    cues = []
+    for block in re.split(r'\n[ \t]*\n', text.replace('\r\n', '\n')):
+        lines = block.strip('\n').split('\n')
+        for index, line in enumerate(lines):
+            timing = CUE_TIMING.match(line)
+            if timing:
+                cues.append((milliseconds(timing[1]), milliseconds(timing[2]), timing[3].rstrip(),
+                             '\n'.join(lines[index + 1:])))
+                break
+    return cues
+
+
+def milliseconds(stamp):
+    *hours, minutes, seconds = stamp.split(':')
+    return round((int(hours[0] if hours else 0) * 3600 + int(minutes) * 60 + float(seconds)) * 1000)
+
+
+def timestamp(ms):
+    return f'{ms // 3600000:02}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}'
+
+
+# Drop expired seek preroll; clip crossing starts/durations while preserving ends.
+SUBTITLE_FILTER = ("noise=amount=0:drop='lte(pts+duration,0)',"
+                   "setts=pts='max(PTS,0)':dts='max(DTS,0)':duration='max(0,DURATION+min(0,PTS))'")
 
 
 def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1):
     analysis = plan.catalogue.analysis
     subtitle = plan.subtitle
-    delay_ms = plan.delay_ms
     command = [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin',
-               '-rw_timeout', '15000000', '-readrate', str(readrate)]
+               '-rw_timeout', '15000000', '-readrate', str(readrate), '-readrate_initial_burst', '30']
     if origin:
         command += ['-ss', str(origin)]
     command += ['-i', source]
@@ -99,7 +174,7 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
     mapping = 'v:0,a:0'
     if subtitle:
         language = subtitle.language or 'und'
-        captions = ['-c:s', 'webvtt', '-bsf:s', subtitle_filter(delay_ms),
+        captions = ['-c:s', 'webvtt', '-bsf:s', SUBTITLE_FILTER,
                     '-metadata:s:s:0', f'language={language}']
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
@@ -921,8 +996,9 @@ class Bridge:
             if not self._owns_playback():
                 raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
             previous = self.active_plan
-            rebuild = (previous.catalogue.id, previous.subtitle, previous.delay_ms) != (plan.catalogue.id, plan.subtitle, plan.delay_ms)
-            if not rebuild:
+            rebuild = (previous.catalogue.id, previous.subtitle) != (plan.catalogue.id, plan.subtitle)
+            reload = not rebuild and previous.delay_ms != plan.delay_ms
+            if not rebuild and not reload:
                 if plan.enabled:
                     track = next((t.get('trackId') for t in (self.cast.media_controller.status.subtitle_tracks or [])
                                   if isinstance(t, dict) and t.get('type') == 'TEXT' and t.get('trackId') is not None), None)
@@ -932,13 +1008,20 @@ class Bridge:
                 else:
                     self.cast.media_controller.disable_subtitle()
             target = self.status().get('absolute_time', self.origin)
-            self.paused = self.cast.media_controller.status.player_state == 'PAUSED'
+            receiver = self.cast.media_controller.status
+            self.paused = receiver.player_state == 'PAUSED'
             if rebuild:
                 self.begin(target, plan=plan)
             else:
                 with self.state_lock:
                     self.active_plan = plan
                     self.state.update(subtitle_choice=plan.choice(), subtitle_delay_ms=plan.delay_ms)
+                    if reload:
+                        current = receiver.adjusted_current_time
+                        self.receiver_confirmed = False
+                        self.load_media(max(0, float(current) if current is not None else target - self.origin))
+                        self.state.update(phase='loading', pending=True,
+                                          message='Película preparada. Esperando la confirmación de la TV…')
         elif action in ('volume', 'mute'):
             if (not self.loaded or not self.cast or not self.media_url
                     or self.cast.socket_client.is_connected is False
@@ -974,6 +1057,14 @@ class Bridge:
         else:
             raise BridgeError('Acción desconocida.')
 
+    def load_media(self, current_time):
+        self.media_url = (f'http://{self.lan_ip}:{self.args.media_port}/{self.session.name}'
+                          f'/d{self.active_plan.delay_ms}/master.m3u8')
+        self.cast.media_controller.play_media(self.media_url, 'application/x-mpegURL', title=self.selected['title'],
+            current_time=current_time, autoplay=not self.paused, stream_type='BUFFERED',
+            media_info={'duration': self.duration - self.origin})
+        self.loaded = True
+
     def _owns_playback(self):
         return (self.loaded and self.cast and self.media_url
                 and self.cast.socket_client.is_connected is not False
@@ -992,22 +1083,18 @@ class Bridge:
         storage = self.storage()
         if storage >= 6 * 1024**3 or shutil.disk_usage(self.sessions).free < 512 * 1024**2:
             raise BridgeError('Límite de almacenamiento alcanzado. Detenido para proteger el disco.')
-        subtitle_manifest = self.session / 'video_vtt.m3u8'
-        text_ready = not self.active_plan.subtitle or subtitle_manifest.exists()
+        subtitle_manifest = self.session / SUBTITLE_PLAYLIST
+        text_ready = not self.active_plan.subtitle or subtitle_manifest.exists() and bool(subtitle_windows(
+            delayed_playlist(subtitle_manifest.read_text(), self.active_plan.delay_ms)))
         ready = count >= 3 and text_ready and (self.session / 'master.m3u8').exists()
         if not alive and self.process.returncode != 0:
             raise BridgeError(f'FFmpeg terminó con código {self.process.returncode}. Fuente o códec no disponible.')
         if not self.loaded and (ready or complete and count > 0 and text_ready and (self.session / 'master.m3u8').exists()):
-            url = f'http://{self.lan_ip}:{self.args.media_port}/{self.session.name}/master.m3u8'
             with self.state_lock:
                 if (self.quit.is_set() or getattr(self, 'active_generation', 0)
                         != getattr(self, 'cancel_generation', 0)):
                     return
-                self.media_url = url
-                self.cast.media_controller.play_media(url, 'application/x-mpegURL', title=self.selected['title'],
-                    current_time=0, autoplay=not self.paused, stream_type='BUFFERED',
-                    media_info={'duration': self.duration - self.origin})
-                self.loaded = True
+                self.load_media(0)
             self.update(phase='loading', message='Película preparada. Esperando la confirmación de la TV…')
         absolute = self.status().get('absolute_time', self.origin)
         relative, receiver = max(0, absolute - self.origin), 'PENDING'
@@ -1200,13 +1287,22 @@ class MediaHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def serve_media(self, head):
-        path = safe_media_path(self.server.bridge.sessions, self.path)
-        if path is None:
+        root = self.server.bridge.sessions
+        resolved = safe_media_path(root, self.path)
+        if resolved is None:
             self.send_error(404)
             return
+        path, delay_ms = resolved
         try:
-            with open_media(self.server.bridge.sessions, path) as stream:
-                size = os.fstat(stream.fileno()).st_size
+            if path.name == SUBTITLE_PLAYLIST or path.suffix == '.vtt':
+                stream = subtitle_view(root, path, delay_ms)
+            else:
+                stream = open_media(root, path)
+            if stream is None:
+                self.send_error(404)
+                return
+            with stream:
+                size = stream.seek(0, os.SEEK_END)
                 start, end = 0, size - 1
                 value = self.headers.get('Range')
                 if value:

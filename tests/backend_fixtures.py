@@ -1,11 +1,50 @@
 """Synthetic plans for the existing worker and receiver test seams."""
+from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
 import queue
+import re
 import threading
 from pathlib import Path
+from urllib.request import ProxyHandler, Request, build_opener
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
+from bridge import MediaHandler
 from media import Analysis, Catalogue, PlaybackPlan, SetupCatalogue, Subtitle
+
+
+@contextmanager
+def media_server(sessions):
+    server = ThreadingHTTPServer(('127.0.0.1', 0), MediaHandler)
+    server.bridge = SimpleNamespace(sessions=sessions)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    opener = build_opener(ProxyHandler({}))
+    try:
+        yield lambda path, **headers: opener.open(
+            Request(f'http://127.0.0.1:{server.server_port}{path}', headers=headers))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def seconds(stamp):
+    value = 0
+    for part in stamp.split(':'):
+        value = value * 60 + float(part)
+    return value
+
+
+def served_cues(fetch, session, delay_ms):
+    """label -> (start, end) seconds across the served view; a cue repeated in two segments must be identical."""
+    def get(name):
+        return fetch(f'/{session}/d{delay_ms}/{name}').read().decode()
+    cues = {}
+    for name in re.findall(r'^([\w-]+\.vtt)$', get('video_vtt.m3u8'), re.M):
+        for start, end, label in re.findall(r'(\d+(?::\d+){1,2}\.\d+) --> (\d+(?::\d+){1,2}\.\d+)[^\n]*\n([^\n]+)', get(name)):
+            times = seconds(start), seconds(end)
+            assert times[1] > times[0], (label, times)
+            assert cues.setdefault(label, times) == times, (label, cues[label], times)
+    return cues
 
 
 def install_media(bridge, source=None, duration=120, delay=500):

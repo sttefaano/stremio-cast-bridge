@@ -116,7 +116,7 @@ class PlayerControlsTest(unittest.TestCase):
             self.assertTrue(b.paused)
             b.cast.media_controller.enable_subtitle.assert_not_called()
             (b.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
-            (b.session / 'video_vtt.m3u8').touch()
+            (b.session / 'video_vtt.m3u8').write_text('#EXTM3U\n#EXTINF:6.0,\nvideo0.vtt\n')
             (b.session / 'master.m3u8').touch()
             b.tick()
             b.cast.media_controller.status.content_id = b.media_url
@@ -334,7 +334,7 @@ class CancellationTest(unittest.TestCase):
             b.last_playing_segments = None
             b.started_at = time.monotonic()
             (b.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
-            (b.session / 'video_vtt.m3u8').touch()
+            (b.session / 'video_vtt.m3u8').write_text('#EXTM3U\n#EXTINF:6.0,\nvideo0.vtt\n')
             (b.session / 'master.m3u8').touch()
             b.submit('stop', {'device_id':'fixture-device', 'device_revision':1, })
             b.tick()
