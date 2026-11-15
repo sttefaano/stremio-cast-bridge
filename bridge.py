@@ -1175,8 +1175,8 @@ class Bridge:
             elif receiver == 'IDLE' and status.idle_reason == 'ERROR':
                 raise BridgeError('El receptor informó un error al reproducir esta sesión HLS.')
         playing = layout.index_at(absolute)
-        if self.loaded:
-            producer.cover(playing, horizon=SUSPEND_AHEAD)
+        # Before the TV loads, no request is held, so this is what retries a stalled first run.
+        producer.cover(playing if self.loaded else first, horizon=SUSPEND_AHEAD)
         producer.throttle(absolute)
         produced = producer.snapshot()
         buffered_start, buffered_end = buffered_run(layout, completed, playing)

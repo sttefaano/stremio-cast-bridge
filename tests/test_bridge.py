@@ -296,6 +296,17 @@ class ReceiverSeekTest(unittest.TestCase):
             self.assertIn('FFmpeg terminó con código 1', str(ended.exception))
             self.assertEqual(launch.call_count, 2)
 
+    def test_a_run_that_stalls_before_the_tv_loads_is_retried_from_the_start_position(self):
+        with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen') as launch:
+            bridge = self.playing(folder)
+            bridge.loaded, bridge.load_time, bridge.started_at = False, 30, time.monotonic()
+            bridge.producer.backoff_seconds = 0
+            bridge.producer.process.poll.return_value = 0
+            launch.return_value = Mock(pid=4321, **{'poll.return_value': None})
+            bridge.tick()
+            self.assertEqual(launch.call_args.args[0], ['ffmpeg', 5, 15])
+            bridge.cast.media_controller.play_media.assert_not_called()
+
     def test_a_run_that_meets_the_source_end_completes_the_generation_and_answers_the_rest_empty(self):
         with tempfile.TemporaryDirectory() as folder:
             bridge = self.playing(folder)
