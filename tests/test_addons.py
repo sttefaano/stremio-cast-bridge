@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import threading
 import unittest
 from itertools import count
 from pathlib import Path
@@ -435,13 +436,37 @@ class HttpGetTest(unittest.TestCase):
             self.get(CINEMETA_SEARCH, Endless([]), cap=10 ** 9, deadline=5)
         self.assertEqual(error.exception.code, 'timeout')
 
-    def test_cancellation_stops_the_download(self):
+    def test_a_cancelled_request_is_never_opened(self):
         class Flag:
             def is_set(self):
                 return True
         with self.assertRaises(AddonError) as error:
             self.get(CINEMETA_SEARCH, FakeResponse([b'x']), cancelled=Flag())
+        self.assertEqual((error.exception.code, error.exception.opener.requests), ('cancelled', []))
+
+    def test_cancellation_stops_a_download_between_chunks(self):
+        cancelled = threading.Event()
+        class CancelAfterFirstChunk(FakeResponse):
+            def read1(self, size):
+                cancelled.set()
+                return b'x'
+        with self.assertRaises(AddonError) as error:
+            self.get(CINEMETA_SEARCH, CancelAfterFirstChunk([]), cancelled=cancelled)
         self.assertEqual(error.exception.code, 'cancelled')
+
+    def test_a_lookup_cancelled_during_the_search_never_opens_the_subtitle_request(self):
+        cancelled = threading.Event()
+        class SearchThenCancel(FakeResponse):
+            def read1(self, size):
+                chunk = super().read1(size)
+                if not chunk:
+                    cancelled.set()
+                return chunk
+        opener = FakeOpener(SearchThenCancel([json.dumps(METAS).encode()]))
+        with patch('addons.OPENER', opener), self.assertRaises(AddonError) as error:
+            StremioAddon().list(SOURCE, None, cancelled)
+        self.assertEqual(error.exception.code, 'cancelled')
+        self.assertEqual([request.full_url for request in opener.requests], [CINEMETA_SEARCH])
 
     def test_failures_map_to_a_closed_set_of_codes_and_carry_no_url_or_upstream_text(self):
         secret = 'PRIVATE-UPSTREAM-TEXT'
