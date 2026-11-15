@@ -133,10 +133,13 @@ def segment_action(index, complete, run, caller='arrival', yields=False, reach=R
 
 def exit_outcome(start, limit, position, count, quiet, stall_seconds=STALL_SECONDS):
     """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
-    quiet is how long it ran after its previous segment (or its launch) until it exited."""
+    quiet is how long it ran after its previous segment (or its launch) until it exited; a stall also
+    finalizes the segment it was writing, so even a run that reached its bound may have left it short."""
+    if quiet >= stall_seconds:
+        return 'stalled'
     if position == limit:
         return 'complete'
-    if limit == count and position >= count - END_SLACK and quiet < stall_seconds:
+    if limit == count and position >= count - END_SLACK:
         return 'end'
     return 'stalled'
 

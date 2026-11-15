@@ -113,7 +113,7 @@ class ExitOutcomeTest(unittest.TestCase):
         # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15).
         cases = (
             ('reached its bound', 10, 20, 20, 0, 'complete'),
-            ('reached its bound after a long silence', 10, 20, 20, 60, 'complete'),
+            ('reached its bound by stalling in its last segment', 10, 20, 20, 60, 'stalled'),
             ('stopped promptly in the last two listed segments', 10, 50, 48, 1, 'end'),
             ('stopped promptly having written nothing near the end', 49, 50, 49, 1, 'end'),
             ('stopped in the last two after a silence', 10, 50, 48, 45, 'stalled'),
@@ -353,6 +353,25 @@ class ProducerTest(unittest.TestCase):
         holder.join(1)
         self.assertEqual(result, ['serve'])
         self.assertEqual(producer.snapshot().end, 20)
+
+    def test_a_stall_in_the_last_segment_of_a_gap_fill_is_redone_not_kept(self):
+        for stalled in (True, False):
+            with self.subTest(stalled=stalled):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                self.launched.clear()
+                self.write(7)
+                producer = self.producer(backoff_seconds=0, stall_seconds=5)
+                producer.cover(5)
+                self.write(5, 6)
+                if stalled:
+                    written = time.time() - 10
+                    os.utime(self.directory / self.layout.segment_name(5), (written, written))
+                self.launched[0].code = 0
+                producer.cover(5)
+                self.assertEqual([p.command for p in self.launched],
+                                 [['ffmpeg', 5, 7], ['ffmpeg', 6, 7]] if stalled else [['ffmpeg', 5, 7], ['ffmpeg', 8, 20]])
+                self.assertEqual((self.directory / self.layout.segment_name(6)).exists(), not stalled)
 
     def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
         self.layout = VodLayout(60.021)
