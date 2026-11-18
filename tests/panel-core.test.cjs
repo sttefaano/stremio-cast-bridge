@@ -1197,6 +1197,18 @@ test('offline keeps the board, marks it unconfirmed and disables every unsafe ac
   assert.equal(p.view.mando.toggle.enabled, true, 'back online, back in control');
 });
 
+test('the board glyph follows the phase, not the copy: play, pause, spinner while waiting, none otherwise or when unconfirmed', () => {
+  const glyph = status => panel(status).view.mando.board.glyph;
+  assert.equal(glyph(playing), 'play');
+  assert.equal(glyph({...playing, phase: 'paused'}), 'pause');
+  for (const phase of ['preparing', 'buffering', 'loading']) assert.equal(glyph({...playing, phase, pending: true}), 'spinner', phase);
+  for (const phase of ['receiver_changed', 'disconnected']) assert.equal(glyph({...playing, phase}), null, phase);
+  assert.equal(glyph({...playing, phase: 'error', can_change_device: false}), null);
+  const p = panel(playing);
+  offline(p);
+  assert.equal(p.view.mando.board.glyph, null, 'a state we cannot confirm shows no glyph');
+});
+
 test('waiting has shape: a spinner in the key, the TV by name and Cancelar, which is stop', () => {
   for (const phase of ['preparing', 'buffering', 'loading']) {
     const p = panel({...playing, phase, pending: true, message: null});
@@ -1688,6 +1700,7 @@ test('the view is plain JSON data and every action it names is a known message',
     assert.deepEqual(JSON.parse(JSON.stringify(v)), v, `${name}: nothing is lost in JSON, so nothing is a function or undefined`);
     assert.equal(v.wake, v.mode === 'mando', name);
     assert.equal(v.mando === null, v.mode === 'preparar', name);
+    if (v.mando) assert.deepEqual(Object.keys(v.mando.board).sort(), ['clock', 'glyph', 'room', 'state', 'title'], name);
     if (v.problem?.action) assert.ok(Object.hasOwn(states.mando.Panel.ACTS, v.problem.action.act), name);
   }
   assert.equal(states.subs.view.sheet.kind, 'subs');

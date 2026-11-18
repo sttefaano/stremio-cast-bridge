@@ -328,6 +328,18 @@ test('the volume fill is a custom property on the range, so the stylesheet can r
   assert.equal(s.$('volume').styleProps.get('--p'), '75%');
 });
 
+test('the board glyph is painted from the view, so rewording the state text cannot break it', async () => {
+  const s = await shell(playing);
+  assert.equal(s.$('board-state').getAttribute('data-glyph'), 'play');
+  await s.poll({...playing, phase: 'paused'});
+  assert.equal(s.$('board-state').getAttribute('data-glyph'), 'pause');
+  await s.poll({...playing, phase: 'loading', pending: true});
+  assert.equal(s.$('board-state').getAttribute('data-glyph'), 'spinner');
+  assert.ok(HTML.includes('[data-glyph=spinner]'), 'the stylesheet names the glyph the view sends');
+  await s.poll({...playing, phase: 'receiver_changed', pending: true});
+  assert.equal(s.$('board-state').getAttribute('data-glyph'), '');
+});
+
 test('the plan, the problem block and the Stremio block move to where the view puts them', async () => {
   const s = await shell({...playing, catalogues: {...base.catalogues, a: {state: 'ready', catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1})}},
     active_catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1}), action_error: 'Falló algo', action_error_revision: 1});

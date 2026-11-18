@@ -1137,6 +1137,7 @@ const Panel = (() => {
 
   const BOARD_STATE = {playing: 'REPRODUCIENDO', paused: 'EN PAUSA', preparing: 'PREPARANDO', buffering: 'CARGANDO', loading: 'CARGANDO',
     disconnected: 'SIN SEÑAL', receiver_changed: 'OTRO CONTENIDO', error: 'CON ERROR'};
+  const BOARD_GLYPH = {playing: 'play', paused: 'pause', preparing: 'spinner', buffering: 'spinner', loading: 'spinner'};
   const WAITING_COPY = {preparing: 'Preparando la película para la TV…', buffering: 'Preparando más contenido para la TV…', loading: 'Cargando la película en la TV…'};
 
   /** Where the flap clock reads: the last status plus the time since, capped so a stalled poll never invents a position. */
@@ -1157,7 +1158,7 @@ const Panel = (() => {
 
   /**
    * @typedef {object} MandoView  The departures board and the remote. Null in Preparar.
-   * @property {{title:string,clock:string,state:string,room:string}} board  clock is display-only (interpolated while playing)
+   * @property {{title:string,clock:string,state:string,glyph:'play'|'pause'|'spinner'|null,room:string}} board  clock is display-only (interpolated while playing); glyph follows the phase, null when unconfirmed or not playing/waiting
    * @property {{enabled:boolean,max:number,value:number,elapsed:string,total:string,preview:string|null,previewAt:number|null,target:string|null,buffered:{start:number,end:number}|null}} track
    *           value and elapsed are the real position; preview ('→ h:mm:ss') exists only while dragging, target while a sent seek has not settled
    * @property {Ctl} back @property {Ctl} forward @property {string|null} badge  accumulated skip, '+60 s'
@@ -1177,6 +1178,7 @@ const Panel = (() => {
       board: {
         title: s.title || 'Tu película en la TV', clock: formatTime(pos), room: deviceLabel(sel) || 'Sin TV',
         state: !c.online ? 'SIN CONFIRMAR' : BOARD_STATE[s.phase] ?? 'SIN CONFIRMAR',
+        glyph: c.online ? BOARD_GLYPH[s.phase] ?? null : null,
       },
       track: {
         enabled: c.transport && !!d, max: d ?? 0, value: pos ?? 0, elapsed: formatTime(pos), total: formatTime(d),
@@ -1406,7 +1408,6 @@ function paintFlaps(doc, host, text) {
   });
 }
 
-const GLYPH = {'REPRODUCIENDO': 'play', 'EN PAUSA': 'pause', 'PREPARANDO': 'spin', 'CARGANDO': 'spin'};
 const SHEETS = [['subs', 'sheet-subs'], ['more', 'sheet-more'], ['change', 'sheet-change']];
 
 function paintProblem(doc, v) {
@@ -1527,7 +1528,7 @@ function paintMando(doc, v) {
   paintFlaps(doc, byId(doc, 'board-clock'), m.board.clock);
   put(byId(doc, 'board-clock-sr'), 'textContent', m.board.clock);
   put(byId(doc, 'board-state-text'), 'textContent', m.board.state);
-  attr(byId(doc, 'board-state'), 'data-glyph', GLYPH[m.board.state] ?? '');
+  attr(byId(doc, 'board-state'), 'data-glyph', m.board.glyph ?? '');
   put(byId(doc, 'board-room'), 'textContent', m.board.room);
   paintTrack(doc, m.track);
   ctl(byId(doc, 'back'), m.back); ctl(byId(doc, 'forward'), m.forward);
