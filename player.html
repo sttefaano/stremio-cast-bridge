@@ -1,51 +1,547 @@
 <!doctype html>
-<html lang="es-AR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Ahora en tu TV · Stremio</title>
+<html lang="es-AR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Cast · Stremio</title>
 <style>
-:root{color-scheme:dark;--base:#15131c;--surface:#211e2b;--inset:#100f16;--line:#40394d;--text:#f4f0e9;--muted:#bcb3c9;--accent:#b7a0dc;--warning:#e7c49c;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:var(--base)}*{box-sizing:border-box}body{margin:0;min-width:320px}button,input,select{font:inherit}button,select,input[type=text]{min-height:44px;min-width:44px;border:0;border-radius:10px;color:var(--text);background:var(--surface);padding:10px 16px}button{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:9px;font-weight:560}button:hover:enabled{background:#322b40}button:active:enabled{transform:translateY(1px)}button:disabled,input:disabled{opacity:.42;cursor:default}.primary{background:var(--accent);color:#21172f}.primary:hover:enabled{background:#cab7e7}.quiet{background:transparent;color:var(--muted)}.danger{color:var(--warning)}:focus-visible{outline:3px solid var(--accent);outline-offset:4px}::selection{color:var(--base);background:var(--accent)}input{accent-color:var(--accent);caret-color:var(--accent)}input[type=range]{width:100%;min-width:0;min-height:44px;margin:0;cursor:pointer;background:transparent}input[type=text],select{border:1px solid var(--line)}svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}p{line-height:1.55;margin:0 0 18px}h1,h2,h3{margin:0;line-height:1.1;letter-spacing:-.03em}h2{font-size:28px}h3{font-size:20px}small,.muted{color:var(--muted)}[hidden]{display:none!important}label{display:block;color:var(--muted);font-size:14px}output,.tabular{font-variant-numeric:tabular-nums}button,summary,select,input{touch-action:manipulation}summary{cursor:pointer;min-height:44px;padding:12px 0}body,dialog,.sheet-body{scrollbar-color:var(--line) var(--base);scrollbar-width:thin}
-.shell{width:min(960px,100%);margin:auto;padding:36px 40px 20px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:24px;padding-bottom:24px;border-bottom:1px solid var(--line)}.destination{display:flex;align-items:center;gap:12px}.destination{min-width:0}.destination>div{min-width:0}.destination span{overflow-wrap:anywhere}.destination .change{white-space:normal;text-align:left}.destination strong{display:block;font-size:15px;font-weight:600}.destination span{display:block;font-size:13px;color:var(--muted);margin-top:2px}.preview{font-size:12px;color:var(--muted);text-align:right;line-height:1.5;max-width:170px}.remote{padding-top:48px}.identity{display:flex;align-items:center;gap:28px}.title-plate{width:90px;height:120px;flex-shrink:0;border:1px solid var(--line);border-radius:4px;padding:12px 10px;display:flex;flex-direction:column;justify-content:space-between;color:var(--muted)}.title-plate b{font-size:20px;line-height:1.05;font-weight:500;letter-spacing:-.04em}.title-plate small{font-size:10px}.identity-copy{min-width:0;flex:1}h1{font-size:clamp(36px,5vw,62px);font-weight:580;max-width:650px;text-wrap:balance;overflow-wrap:anywhere}.metadata{font-size:14px;color:var(--muted);margin:12px 0 8px}.change{padding-left:0;justify-content:flex-start;background:transparent;font-size:14px;color:var(--accent)}.change:hover:enabled{background:transparent;color:var(--text)}.session-line{display:flex;align-items:center;justify-content:center;min-height:32px;margin-top:28px;font-size:14px;color:var(--muted)}.transport{display:flex;align-items:center;justify-content:center;gap:40px;margin:14px 0 32px}.jump{flex-direction:column;gap:2px;width:66px;height:66px;padding:6px;background:transparent;color:var(--muted);font-size:12px}.jump svg{width:28px;height:28px}.play{width:100px;height:100px;border-radius:50%;padding:0}.play svg{width:38px;height:38px}.rail{background:var(--inset);border-radius:14px;padding:18px 24px 12px}.timeline{position:relative;min-height:44px}.timeline-track{position:absolute;left:2px;right:2px;height:4px;top:20px;background:var(--line);border-radius:4px;pointer-events:none;overflow:hidden}.prepared{position:absolute;top:0;height:4px;background:#82748f}.progress{position:absolute;left:0;top:0;height:4px;background:var(--accent)}#timeline{position:relative;display:block;appearance:none;-webkit-appearance:none}#timeline::-webkit-slider-runnable-track{height:4px;background:transparent}#timeline::-moz-range-track{height:4px;background:transparent}#timeline::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;width:16px;height:16px;background:var(--text);border:0;border-radius:50%;margin-top:-6px}#timeline::-moz-range-thumb{width:16px;height:16px;background:var(--text);border:0;border-radius:50%}.times{display:flex;justify-content:space-between;color:var(--muted);font-size:13px}.times strong{font-weight:550;color:var(--text)}.rail-tools{display:flex;align-items:center;gap:18px;padding-top:16px;margin-top:16px;border-top:1px solid #302a3b}.volume{display:flex;align-items:center;gap:8px;flex:1;max-width:260px}.icon-button{width:44px;height:44px;padding:10px;background:transparent}.volume input{max-width:145px}.volume output{font-size:12px;color:var(--muted);min-width:30px}.rail-tools>.quiet{font-size:13px;padding:10px 12px}.seek-review{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:14px}.seek-review strong{margin-right:auto;font-size:14px}.seek-review button{font-size:13px}.operation{display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--muted);margin-top:16px}.operation button{font-size:13px}.problem{margin:26px 0 12px;padding:22px 0;border-top:1px solid var(--line)}.problem h2{font-size:22px;margin-bottom:10px}.problem p{color:var(--muted);max-width:52ch}.empty-view{padding:58px 0 70px;max-width:550px}.empty-view h1{font-size:clamp(36px,5vw,54px);margin-bottom:20px}.empty-view p{color:var(--muted);max-width:44ch}.empty-view button{margin-top:10px}.demo{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:36px;padding-top:20px;color:var(--muted);font-size:12px}.demo label{font-size:12px}.demo select{font-size:12px;background:transparent;max-width:180px}.demo-tools{display:flex;align-items:center;gap:10px}.demo-note{max-width:250px;line-height:1.5}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
-dialog{color:var(--text);background:var(--surface);border:0;padding:0;width:min(460px,calc(100% - 32px));max-height:calc(100dvh - 48px);margin:24px 24px 24px auto;border-radius:16px;box-shadow:0 24px 80px #0006;overflow:hidden}dialog::backdrop{background:#08060dc9}.sheet-layout{display:flex;flex-direction:column;max-height:calc(100dvh - 48px)}.sheet-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:24px 24px 14px;flex-shrink:0}.sheet-header h2{font-size:25px}.sheet-body{overflow-y:auto;overscroll-behavior:contain;padding:8px 24px 24px;min-height:0}.sheet-body p{font-size:14px;color:var(--muted)}.sheet-body h3{margin:20px 0 10px}.sheet-footer{flex-shrink:0;background:#18151f;padding:14px 24px max(14px,env(safe-area-inset-bottom));display:flex;align-items:center;gap:12px;border-top:1px solid var(--line)}.mini-copy{min-width:0;flex:1}.mini-copy strong{display:block;font-size:13px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.mini-copy span{font-size:12px;color:var(--muted)}.mini-toggle{width:48px;height:48px;padding:0;border-radius:50%}.cancel-mini{font-size:12px;padding:8px}.opening{animation:sheet-in .23s cubic-bezier(.16,1,.3,1)}@keyframes sheet-in{from{transform:translateX(28px)}to{transform:translateX(0)}}.sheet-intro{margin-top:6px}.full{width:100%}.source-list{margin:16px 0;padding:0;border:0}.source-option{display:flex;align-items:center;gap:12px;min-height:78px;padding:12px 0;border-bottom:1px solid var(--line);cursor:pointer;color:var(--text)}.source-option input{width:20px;height:20px;flex-shrink:0;margin:12px}.source-option strong{display:block;font-size:16px;font-weight:550}.source-option small{display:block;font-size:12px;margin-top:5px}.source-note{font-size:12px!important;margin-top:14px}.sheet-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px;flex-wrap:wrap}.sheet-actions .primary{flex:1}.switch-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.switch-row label{font-size:16px;color:var(--text);display:flex;align-items:center;gap:20px;min-height:44px;width:100%;justify-content:space-between}.switch-row input{width:24px;height:24px;margin:10px}.delay-value{display:flex;align-items:center;justify-content:space-between;background:var(--inset);padding:18px;border-radius:10px;margin:16px 0}.delay-value output{font-size:32px;letter-spacing:-.03em}.delay-value small{font-size:12px}.delay-buttons{display:flex;gap:10px}.delay-buttons button{flex:1;font-size:13px;border:1px solid var(--line)}.reset{margin:10px 0 14px;padding-left:0}.exact-form{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 24px}.exact-form label{width:100%}.exact-form input{flex:1;width:140px;min-width:0;background:var(--inset)}.exact-form button{flex-shrink:0}.field-error{color:var(--warning)!important}.details-content{padding:6px 0 12px}.details-content p{margin-bottom:12px}.shortcut-list{display:grid;grid-template-columns:auto 1fr;gap:10px;font-size:13px;margin:10px 0 24px;color:var(--muted)}kbd{font:inherit;color:var(--text);background:var(--inset);padding:3px 6px;border-radius:4px}.separator{border:0;border-top:1px solid var(--line);margin:20px 0}
-.sheet-heading{min-width:0}.sheet-heading small{display:block;margin-top:8px;font-size:12px;line-height:1.5}.sheet-header>.icon-button{flex-shrink:0}
-.title-plate b{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;overflow-wrap:anywhere}.title-plate small{flex-shrink:0}
-@media(max-width:600px){.shell{padding:20px 20px max(18px,env(safe-area-inset-bottom))}.topbar{gap:16px;padding-bottom:18px}.destination{gap:9px}.destination{min-width:0}.destination>div{min-width:0}.destination span{overflow-wrap:anywhere}.destination .change{white-space:normal;text-align:left}.destination strong{font-size:14px}.preview{font-size:11px;max-width:130px}.remote{padding-top:30px}.identity{gap:16px;align-items:flex-start}.title-plate{width:60px;height:86px;padding:9px 7px}.title-plate b{font-size:13px}.title-plate small{font-size:8px}h1{font-size:36px;line-height:1.07}.metadata{font-size:12px;margin-top:10px}.change{font-size:13px}.session-line{margin-top:18px;font-size:13px}.transport{gap:30px;margin:12px 0 26px}.play{width:92px;height:92px}.rail{padding:12px 14px 8px}.rail-tools{gap:2px;flex-wrap:wrap;padding-top:10px;margin-top:12px}.volume{max-width:none;width:100%;flex-basis:100%;gap:12px}.volume input{max-width:none}.rail-tools>.quiet{flex:1;justify-content:center;font-size:12px}.demo{margin-top:24px;align-items:flex-start;gap:12px}.demo-note{max-width:140px;font-size:11px}.demo-tools{display:block}.demo select{margin-top:2px;padding:6px 8px;max-width:150px}.empty-view{padding-top:42px;padding-bottom:40px}dialog{width:100%;max-width:100%;max-height:94dvh;margin:auto 0 0;border-radius:18px 18px 0 0}.sheet-layout{max-height:94dvh}.sheet-header{padding:18px 20px 10px}.sheet-header h2{font-size:24px}.sheet-body{padding:8px 20px 22px}.sheet-footer{padding-left:20px;padding-right:20px}.opening{animation-name:sheet-up}@keyframes sheet-up{from{transform:translateY(28px)}to{transform:translateY(0)}}}
-@media(max-width:350px){.shell{padding-left:16px;padding-right:16px}.title-plate{display:none}h1{font-size:37px}.preview{max-width:118px}.transport{gap:26px}.rail-tools>.quiet{padding:8px 6px}.sheet-footer{gap:8px;padding-left:16px;padding-right:16px}.delay-buttons{gap:6px}.delay-buttons button{padding:10px 8px}.mini-copy strong{max-width:130px}}
-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@font-face{font-family:Archivo;src:url(/fonts/archivo.woff2) format("woff2");font-weight:100 900;font-stretch:62% 125%;font-display:swap}
+@font-face{font-family:"JetBrains Mono";src:url(/fonts/jetbrains-mono.woff2) format("woff2");font-weight:100 800;font-display:swap}
+:root{color-scheme:dark;--bg:#101214;--pass:#171a1d;--cell:#1f2327;--cell-hi:#262b30;--line:#2b3036;--perf:#3a4047;--ink:#f2f2ee;--ink-2:#c4c6c0;--mute:#8a929c;--yel:#ffcc00;--yel-ink:#15130a;--sans:Archivo,"Arial Narrow",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace;--ease:cubic-bezier(.2,.8,.2,1)}
+*{box-sizing:border-box}
+html{background:var(--bg);-webkit-text-size-adjust:100%;scrollbar-color:var(--cell-hi) transparent}
+html:has(dialog[open]){overflow:hidden}
+body{margin:0;min-width:320px;background:var(--bg);color:var(--ink);font:500 15px/1.4 var(--sans);-webkit-font-smoothing:antialiased;caret-color:var(--ink)}
+::selection{background:var(--ink);color:var(--bg)}
+[hidden]{display:none!important}
+h1,h2,h3,p,dl,dd,dt{margin:0}
+button,input,select{font:inherit;color:inherit}
+button{background:none;border:0;padding:0;margin:0;cursor:pointer;touch-action:manipulation;text-align:left}
+button:disabled{cursor:default}
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+input[type=text]{accent-color:var(--ink)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.lbl{font:500 11px/1.2 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.linkbtn{min-height:44px;min-width:44px;padding:0 4px;font:600 14px/1 var(--sans);color:var(--ink-2);text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:4px;display:inline-flex;align-items:center}
+.linkbtn:hover:enabled{color:var(--ink);text-decoration-color:var(--ink)}
+.linkbtn:disabled{opacity:.45}
+.quiet{min-height:44px;min-width:44px;padding:0 14px;font:600 12px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);border:1px solid var(--line);border-radius:6px;display:inline-flex;align-items:center;justify-content:center;text-align:center}
+.quiet:hover:enabled{color:var(--ink);border-color:var(--mute)}
+.quiet:disabled{opacity:.45}
+.btn-y{min-height:48px;padding:0 18px;border-radius:8px;background:var(--yel);color:var(--yel-ink);font:800 16px/1.1 var(--sans);font-stretch:85%;display:inline-flex;align-items:center;justify-content:center;gap:10px;text-align:center}
+.btn-y:hover:enabled{filter:brightness(1.07)}
+.btn-y:disabled,.btn-n:disabled{background:var(--cell);color:var(--mute)}
+.btn-n{min-height:48px;padding:0 18px;border-radius:8px;background:var(--cell-hi);font:700 15px/1.1 var(--sans);font-stretch:90%;display:flex;align-items:center;justify-content:center;width:100%;text-align:center;margin-top:10px}
+.btn-n:hover:enabled{background:#30363c}
+.ico{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.spin{width:22px;height:22px;border:3px solid var(--line);border-top-color:var(--ink);border-radius:50%;animation:turn 1s linear infinite;flex:none;display:block}
+@keyframes turn{to{transform:rotate(360deg)}}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 6px;font:600 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);color:var(--ink-2);border-radius:3px;white-space:nowrap}
+.tag:empty{display:none}
+.st{margin-top:6px;font:500 12px/1.45 var(--mono);color:var(--mute);letter-spacing:.02em;overflow-wrap:anywhere}
+.st:empty{display:none}
 
-.source-option{display:block}.source-choice{display:flex;align-items:center;gap:12px;min-height:44px;color:var(--text);cursor:pointer}.source-option span{min-width:0;overflow-wrap:anywhere}.source-option strong{overflow-wrap:anywhere}.source-option details{font-size:12px;color:var(--muted)}.source-option summary{font-size:12px}#seek-warning{margin:12px 0 0;text-align:center}#sheet-error p{color:var(--warning)}#error{display:flex;align-items:center;justify-content:space-between;gap:12px;overflow-wrap:anywhere}#operation{flex-wrap:wrap}.source-list:disabled{opacity:.5}
-.setup{padding:28px 0;border-top:1px solid var(--line)}.setup-heading{display:flex;align-items:start;justify-content:space-between;gap:16px;margin-bottom:20px}.setup-heading h2{font-size:clamp(28px,4vw,38px)}.setup-heading p{margin:8px 0 0;color:var(--muted);font-size:14px;max-width:65ch}.setup-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px}.setup-grid section{min-width:0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.section-heading h2{font-size:22px}.section-heading button{font-size:13px}.setup p{font-size:13px;color:var(--muted)}.setup .source-list{margin:4px 0 8px;max-height:320px;overflow-y:auto;padding:4px}.setup-subtitles{margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}.setup-subtitles h2{font-size:22px;margin-bottom:12px;overflow-wrap:anywhere}.subtitle-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.subtitle-fields select,.active-subtitles select{width:100%;min-width:0;margin-top:8px}.upload-picker{position:relative;display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:8px;padding:10px 12px;border-radius:10px;background:var(--surface);font-size:14px;text-align:center}.upload-picker:focus-within{outline:3px solid var(--accent);outline-offset:4px}.upload-picker:hover{background:#322b40}.upload-picker input{position:absolute;inset:0;width:100%;height:100%;min-height:44px;opacity:0;cursor:pointer}.upload-field small{display:block;font-size:12px;line-height:1.5}.upload-picker:has(input:disabled){opacity:.42}.setup #upload-filename{margin:8px 0;font-size:12px;overflow-wrap:anywhere}.start-review{display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--inset);border-radius:12px;padding:16px;margin-top:20px}.start-review>div{min-width:0}.start-review strong{display:block;overflow-wrap:anywhere}.start-review p{margin:4px 0 0}.start-review button{flex-shrink:0;max-width:100%;white-space:normal}.active-subtitles{padding:24px 0;border-top:1px solid var(--line);margin-top:24px;max-width:600px}.active-subtitles h2{font-size:24px;margin-bottom:12px}.active-subtitles p{font-size:13px;color:var(--muted)}.active-subtitles .switch-row{margin-top:16px}.setup .source-option:last-child{border-bottom:0}#upload-status,#catalogue-status,#source-status{margin-top:8px;overflow-wrap:anywhere}#upload-status:empty{display:none}#discovery-note{margin-bottom:16px}.setup-cancel{flex-shrink:0}#empty-view{padding:24px 0}#empty-view h1,#choose-film{display:none}#empty-view p{margin:0}#source-detail{overflow-wrap:anywhere}#caption-consequences{margin-top:16px}#caption-details{font-size:13px;color:var(--muted)}
-.setup #device-list>.source-choice{display:flex}.active-subtitles p{overflow-wrap:anywhere}
-@media(max-width:600px){.setup{padding:24px 0}.setup-grid,.subtitle-fields{grid-template-columns:minmax(0,1fr);gap:16px}.setup-heading{gap:8px;margin-bottom:16px}.setup-heading h2{font-size:28px}.setup-cancel{font-size:12px;padding:8px;max-width:112px}.start-review{display:block;padding:16px}.start-review button{width:100%;margin-top:16px}.setup .source-list{max-height:260px}.section-heading h2{font-size:21px}.section-heading button{padding:10px;font-size:12px}.active-subtitles{padding-top:24px}}
-.addon{margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}.addon h3{font-size:18px;margin-bottom:8px}.addon p{font-size:13px;color:var(--muted);overflow-wrap:anywhere}.addon .addon-match{font-size:14px;color:var(--text);margin-bottom:12px}.addon-actions{display:flex;flex-wrap:wrap;gap:10px}.addon-actions button{margin-top:12px}.addon-correction{margin-top:12px}.addon-alternatives{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.addon-alternatives button{border:1px solid var(--line);font-size:13px;text-align:left}.addon-alternatives:empty{display:none}.addon-form{display:flex;flex-wrap:wrap;gap:10px}.addon-form label{width:100%}.addon-form input{flex:1;min-width:0;background:var(--inset)}.addon-form button{flex-shrink:0}
-</style></head><body>
-<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" style="position:absolute"><defs>
-<symbol id="i-tv" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m9 5 11 7-11 7Z"/></symbol><symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3"/></symbol><symbol id="i-back" viewBox="0 0 24 24"><path d="M4 9a9 9 0 1 1 0 7M4 4v5h5"/></symbol><symbol id="i-forward" viewBox="0 0 24 24"><path d="M20 9a9 9 0 1 0 0 7m0-12v5h-5"/></symbol><symbol id="i-volume" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4Zm4 4a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol><symbol id="i-muted" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4Zm5 5 6 6m0-6-6 6"/></symbol><symbol id="i-subs" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M6 11h4m4 0h4M6 15h6m3 0h3"/></symbol><symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol><symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol><symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-5-5 5 5-5 5"/></symbol>
-</defs></svg>
-<main class="shell"><header class="topbar"><div class="destination"><svg aria-hidden="true"><use href="#i-tv"/></svg><div><strong>Ahora en tu TV</strong><span id="destination-name">Sin dispositivo elegido</span><button id="choose-device" class="change">Elegir dispositivo</button></div></div><div id="demo-banner" class="preview" hidden>Modo de prueba · No controla tu TV</div></header>
-<div id="error" class="problem danger" role="alert" hidden><span id="error-text"></span><button id="dismiss" class="quiet" aria-label="Cerrar error">Cerrar</button></div>
-<section id="remote" class="remote" tabindex="0" aria-label="Mando de la TV. Con el mando enfocado: Espacio para pausa, flechas para saltar 30 segundos.">
-<div id="session-view"><div class="identity"><div class="title-plate" aria-hidden="true"><b id="plate-text"></b><small>Sin portada</small></div><div class="identity-copy"><h1 id="title">Tu película en la TV</h1><p id="metadata" class="metadata">Duración —</p><button id="change-source" class="change">Cambiar película <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></div></div>
-<div id="problem" class="problem" hidden><h2 id="problem-title"></h2><p id="problem-copy"></p></div>
-<div id="message" class="session-line" role="status" aria-live="polite">Leyendo el estado…</div>
-<div class="transport"><button id="back" class="jump" aria-label="Retroceder 30 segundos" disabled><svg aria-hidden="true"><use href="#i-back"/></svg><span>30 s</span></button><button id="toggle" class="play primary" aria-label="Continuar" disabled></button><button id="forward" class="jump" aria-label="Adelantar 30 segundos" disabled><svg aria-hidden="true"><use href="#i-forward"/></svg><span>30 s</span></button></div>
-<div class="rail"><label class="sr-only" for="timeline">Previsualizar posición de la película</label><div class="timeline"><div class="timeline-track" aria-hidden="true"><span id="buffer-range" class="prepared" hidden></span><span id="timeline-progress" class="progress"></span></div><input id="timeline" type="range" min="0" max="1" value="0" step="1" disabled></div><div class="times tabular"><strong id="elapsed">—</strong><span id="total">—</span></div>
-<div id="seek-review" class="seek-review" hidden><strong id="seek-destination"></strong><button id="seek-cancel" class="quiet">Cancelar</button><button id="seek-apply" class="primary" disabled>Aplicar</button></div>
-<div class="rail-tools"><div class="volume"><button id="mute" class="icon-button" aria-label="Silenciar" disabled></button><label class="sr-only" for="volume">Volumen de la TV</label><input id="volume" type="range" min="0" max="100" value="0" disabled><output id="volume-value" for="volume">—</output></div><button id="open-subtitles" class="quiet"><svg aria-hidden="true"><use href="#i-subs"/></svg><span id="subtitle-label">Subtítulos</span></button><button id="open-more" class="quiet"><svg aria-hidden="true"><use href="#i-more"/></svg>Más</button></div></div>
-<p id="seek-warning" class="source-note muted">Saltar requiere recargar; puede tardar decenas de segundos. Conserva la pausa.</p>
+#app{max-width:440px;margin:0 auto;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg)}
+@media(min-width:700px){#app{box-shadow:0 0 0 1px var(--line)}}
+
+#demo-banner{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:10px 14px;background:var(--cell);border-bottom:1px solid var(--line);font-size:13px}
+#demo-banner strong{font:700 12px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase}
+#demo-banner label{color:var(--ink-2)}
+#demo-banner select{min-height:44px;max-width:100%;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:0 10px}
+
+#problem{margin:6px 14px 8px;border:1px solid var(--line);border-left:4px solid var(--yel);border-radius:6px;background:var(--pass);padding:12px 14px}
+#problem-kind::before{content:"";display:inline-block;width:8px;height:8px;margin-right:8px;background:var(--yel)}
+#problem h2{font:700 17px/1.2 var(--sans);font-stretch:88%;margin-top:7px}
+#problem-body{font:500 14px/1.4 var(--sans);color:var(--ink-2);margin-top:5px;overflow-wrap:anywhere}
+#problem-body:empty{display:none}
+#problem-action{margin-top:10px}
+#problem.info{border-left-color:var(--line)}
+#problem.info #problem-kind::before{background:var(--mute)}
+#problem.info h2{font-size:15px;margin-top:4px}
+#sheet #problem{margin:12px 14px 0}
+
+#prep{flex:1;display:flex;flex-direction:column}
+.top{height:58px;padding:14px 20px 0;display:flex;align-items:center;justify-content:space-between;flex:none}
+.brand{display:flex;align-items:center;gap:10px;font:700 13px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase}
+.brand i{width:10px;height:10px;background:var(--ink);display:block}
+
+.pass{margin:6px 14px 14px;flex:1;display:flex;flex-direction:column;background:var(--pass);border-radius:14px;position:relative}
+.pass-head{padding:16px 18px 12px;border-bottom:1px solid var(--line)}
+.pass-head h1{font:800 22px/1 var(--sans);font-stretch:75%;letter-spacing:.02em;text-transform:uppercase}
+.pass-body{flex:1;display:flex;flex-direction:column}
+#prep #plan,#prep-plan-slot{display:contents}
+.seg{padding:14px 18px 12px;border-bottom:1px solid var(--line)}
+#plan-movie{order:1}#destination{order:2}#plan-subs{order:3}
+.seg-h{display:flex;align-items:center;justify-content:space-between;min-height:30px;margin-bottom:4px}
+.seg-h h2{font:500 11px/1.2 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.seg-h b{color:var(--ink-2);font-weight:700;margin-right:8px}
+.seg-h .linkbtn{margin-right:-4px}
+#sheet .seg-h b{display:none}
+#sheet .seg{padding:14px 20px 12px}
+.opts{display:block}
+.opt{display:flex;align-items:center;gap:12px;width:100%;min-height:48px;border-top:1px dashed var(--line);color:var(--ink-2);padding:2px 0}
+.opts>template+.opt{border-top:0}
+.opt:hover:enabled{color:var(--ink)}
+.opt .mark{width:18px;height:18px;border:1.5px solid var(--mute);border-radius:2px;flex:none;display:grid;place-items:center}
+.opt .txt{flex:1;min-width:0}
+.opt .n{display:block;font:600 16px/1.15 var(--sans);font-stretch:90%;overflow-wrap:anywhere}
+.opt .sub{display:block;margin-top:5px;font:500 12px/1.25 var(--mono);color:var(--mute);letter-spacing:.03em;overflow-wrap:anywhere}
+.opt .sub:empty{display:none}
+.opt .r{font:500 12px/1.2 var(--mono);color:var(--mute);text-align:right;max-width:45%;overflow-wrap:anywhere}
+.opt[aria-pressed=true]{color:var(--ink);padding:8px 0 10px}
+.opt[aria-pressed=true] .mark{border-color:var(--ink);background:var(--ink)}
+.opt[aria-pressed=true] .mark::after{content:"";width:8px;height:8px;background:var(--bg)}
+.opt[aria-pressed=true] .n{font-size:24px;font-weight:700;font-stretch:82%;line-height:1.05}
+.opt:disabled .n,.opt:disabled .mark{opacity:.5}
+.opt.plain .mark{display:none}
+.seg-ctl{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden;min-height:46px;margin-top:4px}
+.seg-ctl button{font:600 13px/1.1 var(--sans);color:var(--ink-2);border-right:1px solid var(--line);padding:0 4px;text-align:center;min-height:44px}
+.seg-ctl button:last-child{border-right:0}
+.seg-ctl button:hover:enabled{background:var(--cell)}
+.seg-ctl button[aria-pressed=true]{background:var(--cell-hi);color:var(--ink);box-shadow:inset 0 -3px 0 var(--ink)}
+.seg-ctl button:disabled{opacity:.45}
+.seg-ctl button:focus-visible{outline-offset:-3px}
+.branch{margin-top:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}
+.chips button{min-height:44px;padding:0 12px;border:1px solid var(--line);border-radius:6px;font:600 13px/1.1 var(--sans);color:var(--ink-2)}
+.chips button[aria-pressed=true]{background:var(--cell-hi);color:var(--ink);border-color:var(--mute)}
+.chips button:disabled{opacity:.45}
+.match{font:500 12px/1.4 var(--mono);color:var(--ink-2);margin-top:8px}
+.match:empty{display:none}
+#stremio-correction{margin-top:4px}
+#stremio-form{display:grid;grid-template-columns:1fr auto;gap:0 8px;margin-top:8px}
+#stremio-form label{grid-column:1/-1;font:500 12px/1.2 var(--mono);color:var(--mute);margin-bottom:6px}
+#stremio-hint{min-width:0;height:48px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:0 12px}
+#stremio-search{min-height:48px;padding:0 16px;border-radius:8px;background:var(--cell-hi);font-weight:700}
+.filepick{position:relative;display:flex;align-items:center;gap:12px;min-height:48px;color:var(--ink-2);cursor:pointer}
+.filepick .mark{width:18px;height:18px;border:1.5px solid var(--mute);border-radius:2px;flex:none}
+.filepick:focus-within{outline:2px solid var(--ink);outline-offset:2px}
+.filepick input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+#upload-filename{display:block;margin-top:2px;font:500 12px/1.3 var(--mono);color:var(--mute);overflow-wrap:anywhere}
+#upload-filename:empty{display:none}
+#device-name{font:700 24px/1.05 var(--sans);font-stretch:82%;overflow-wrap:anywhere;margin-top:2px}
+#device-note{margin-top:4px;font:500 12px/1.3 var(--mono);color:var(--yel)}
+#device-note:empty{display:none}
+#device-rule{margin-top:8px;font-size:14px;color:var(--ink-2)}
+#device-stop{margin-top:6px}
+#device-details summary{min-height:44px;display:flex;align-items:center;cursor:pointer;color:var(--ink-2);font:600 13px/1 var(--sans)}
+#device-host{display:block;padding-bottom:8px;font:500 12px/1.3 var(--mono);color:var(--mute)}
+
+.stub{position:sticky;bottom:0;background:var(--pass);border-radius:0 0 14px 14px;padding:0 18px calc(16px + env(safe-area-inset-bottom))}
+.perf{position:relative;height:22px;margin:0 -18px}
+.perf::before{content:"";position:absolute;left:18px;right:18px;top:50%;border-top:2px dotted var(--perf)}
+.perf i{position:absolute;top:50%;width:22px;height:22px;margin-top:-11px;border-radius:50%;background:var(--bg)}
+.perf i:first-child{left:-11px}.perf i:last-child{right:-11px}
+.stub-row{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin:6px 0 12px}
+.stub-kv{display:flex;flex-direction:column;gap:6px;min-width:0}
+#stub-value{font:600 13px/1.25 var(--mono);letter-spacing:.06em;color:var(--ink);text-transform:uppercase;overflow-wrap:anywhere}
+#stub-value.miss{color:var(--yel)}
+.barcode{height:30px;width:100px;flex:none;background:repeating-linear-gradient(90deg,#b9bbb4 0 2px,transparent 2px 4px,#b9bbb4 4px 5px,transparent 5px 8px,#b9bbb4 8px 11px,transparent 11px 12px,#b9bbb4 12px 13px,transparent 13px 17px);opacity:.7}
+.barcode.off{opacity:.22}
+#start-note{margin:0 0 10px;font:500 12px/1.4 var(--mono);color:var(--ink-2)}
+#start-note:empty{display:none}
+.board-btn{width:100%;min-height:64px;border-radius:8px;background:var(--yel);color:var(--yel-ink);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 20px;font:800 18px/1.1 var(--sans);font-stretch:85%}
+.board-btn:hover:enabled{filter:brightness(1.07)}
+.board-btn:disabled{background:var(--cell);color:var(--mute)}
+.board-btn .ico{stroke-width:2.6}
+
+#mando{flex:1;display:flex;flex-direction:column;min-height:100dvh}
+.hdr{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 20px 0;min-height:62px;flex:none}
+#board{margin:4px 14px 0;background:var(--pass);border-radius:12px;padding:14px 14px 16px;flex:none}
+.board-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.board-top .linkbtn{margin:-8px -4px -8px 0}
+#board-title{font:800 28px/1.02 var(--sans);font-stretch:78%;overflow-wrap:anywhere}
+#board dl{display:flex;flex-wrap:wrap;gap:12px 14px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+#board dl>div{min-width:0}
+#board dt{margin-bottom:7px}
+.flaps{display:flex;gap:3px}
+.flap{width:22px;height:34px;background:var(--cell-hi);border-radius:3px;display:grid;place-items:center;font:700 21px/1 var(--mono);position:relative;font-variant-numeric:tabular-nums}
+.flap::after,.state::after{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--bg);opacity:.9}
+.state::after{opacity:.4}
+.flap.sep{width:10px;background:none}.flap.sep::after{display:none}
+.state{height:34px;display:flex;align-items:center;gap:8px;padding:0 10px;background:var(--cell-hi);border-radius:3px;font:700 13px/1 var(--mono);letter-spacing:.1em;position:relative;white-space:nowrap;overflow:hidden;text-transform:uppercase}
+.state i{flex:none;display:none}
+.state[data-glyph=play] i{display:block;width:0;height:0;border-left:8px solid var(--ink);border-top:5px solid transparent;border-bottom:5px solid transparent}
+.state[data-glyph=pause] i{display:block;width:8px;height:10px;border-left:3px solid var(--ink);border-right:3px solid var(--ink)}
+.state[data-glyph=spin] i{display:block;width:10px;height:10px;border:2px solid var(--mute);border-top-color:var(--ink);border-radius:50%;animation:turn .9s linear infinite}
+#board dl>.room{flex:1 1 100%;display:flex;justify-content:space-between;align-items:center;gap:10px}
+#board .room dt{margin:0}
+#board-room{font:600 14px/1.2 var(--mono);letter-spacing:.06em;text-transform:uppercase;text-align:right;overflow-wrap:anywhere}
+
+#timeline{margin:14px 20px 0;flex:none}
+.track{position:relative;height:56px}
+.track>span{position:absolute;display:block}
+.rail{left:0;right:0;top:24px;height:8px;background:var(--cell-hi);border-radius:2px}
+#track-buffer{top:24px;height:8px;background:#4a515a}
+#track-prog{top:24px;height:8px;left:0;background:var(--ink);border-radius:2px 0 0 2px}
+.ticks{left:0;right:0;top:38px;height:6px;background:repeating-linear-gradient(90deg,var(--line) 0 1px,transparent 1px 10%)}
+#track-head{top:14px;width:4px;height:28px;margin-left:-2px;background:var(--ink);border-radius:1px}
+#track-span{top:26px;height:4px;background:repeating-linear-gradient(90deg,var(--yel) 0 4px,transparent 4px 8px)}
+#track-ghost{top:10px;width:3px;height:36px;margin-left:-1.5px;background:var(--yel)}
+#track-preview{top:-14px;transform:translateX(-50%);background:var(--yel);color:var(--yel-ink);font:700 14px/1 var(--mono);padding:7px 9px;border-radius:4px;white-space:nowrap;pointer-events:none}
+#track{position:absolute;inset:0;width:100%;height:100%;margin:0;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer;touch-action:pan-y;border-radius:4px}
+#track::-webkit-slider-runnable-track{background:transparent;height:56px}
+#track::-moz-range-track{background:transparent;height:56px}
+#track::-webkit-slider-thumb{-webkit-appearance:none;width:1px;height:56px;background:transparent;border:0}
+#track::-moz-range-thumb{width:1px;height:56px;background:transparent;border:0}
+#track:disabled{cursor:default}
+#timeline[data-off=true] .rail{opacity:.5}
+#timeline[data-off=true] #track-prog,#timeline[data-off=true] #track-head{opacity:.45}
+.track-times{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.track-times .num{font-size:15px;font-weight:600}
+#total{color:var(--ink-2)}
+#track-hint{margin-top:6px;min-height:16px;font:500 12px/1.3 var(--mono);color:var(--ink-2);letter-spacing:.03em}
+#track-hint[data-pending=true]{color:var(--yel)}
+
+#waiting{margin:10px 14px 0;display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px dashed var(--line);border-radius:8px;padding:6px 6px 6px 14px;flex:none}
+#waiting>span{min-width:0}
+#waiting-text{display:block;font:600 12px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink);overflow-wrap:anywhere}
+#waiting-detail{display:block;font:500 12px/1.3 var(--sans);color:var(--ink-2);margin-top:2px}
+.sec{margin:12px 14px 0;display:grid;grid-template-columns:1fr auto;gap:8px;flex:none}
+.sec nav{display:contents}
+#sound{grid-column:1/-1;display:flex;align-items:center;gap:6px;min-height:52px;padding:0 14px 0 4px;border:1px solid var(--line);border-radius:8px}
+#mute{width:44px;height:44px;display:grid;place-items:center;flex:none;border-radius:6px}
+#mute[aria-pressed=true]{color:var(--mute)}
+#volume{flex:1;min-width:0;-webkit-appearance:none;appearance:none;height:44px;margin:0;background:transparent;cursor:pointer;--p:0%}
+#volume::-webkit-slider-runnable-track{height:6px;background:linear-gradient(90deg,var(--ink-2) var(--p),var(--cell-hi) var(--p));border-radius:1px}
+#volume::-moz-range-track{height:6px;background:var(--cell-hi);border-radius:1px}
+#volume::-moz-range-progress{height:6px;background:var(--ink-2);border-radius:1px}
+#volume::-webkit-slider-thumb{-webkit-appearance:none;width:4px;height:20px;margin-top:-7px;background:var(--ink);border:0;border-radius:1px}
+#volume::-moz-range-thumb{width:4px;height:20px;background:var(--ink);border:0;border-radius:1px}
+#volume:disabled{cursor:default;opacity:.45}
+#volume-text{font:600 13px/1 var(--mono);width:44px;text-align:right;flex:none}
+#open-subs{min-height:52px;padding:6px 14px;border:1px solid var(--line);border-radius:8px;display:flex;flex-direction:column;justify-content:center;gap:5px;min-width:0}
+#chip-value{font:600 13px/1.1 var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#open-subs[data-unapplied=true]{border-color:var(--yel)}
+#open-subs[data-unapplied=true] #chip-kind{color:var(--yel)}
+#open-subs[data-unapplied=true] #chip-kind::before{content:"";display:inline-block;width:7px;height:7px;margin-right:7px;background:var(--yel)}
+#open-subs:disabled,#open-more:disabled{opacity:.5}
+#open-more{width:52px;height:52px;border:1px solid var(--line);border-radius:8px;display:grid;place-items:center}
+#open-subs:hover:enabled,#open-more:hover:enabled{border-color:var(--mute)}
+#transport{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:16px 22px calc(18px + env(safe-area-inset-bottom));gap:14px;margin-top:auto;flex:none}
+.jwrap{position:relative}
+.jump{width:100%;min-height:64px;border-radius:10px;background:var(--cell);display:flex;align-items:center;justify-content:center;font:700 17px/1 var(--mono);font-variant-numeric:tabular-nums;text-align:center}
+.jump:hover:enabled{background:var(--cell-hi)}
+.jump:disabled{opacity:.4}
+.jwrap:first-child #skip-badge{right:auto;left:6px}
+#skip-badge{position:absolute;right:6px;top:-12px;background:var(--yel);color:var(--yel-ink);font:700 13px/1 var(--mono);padding:6px 8px;border-radius:4px;pointer-events:none}
+#toggle{width:104px;height:104px;border-radius:14px;background:var(--ink);color:var(--bg);display:grid;place-items:center}
+#toggle .ico{width:40px;height:40px}
+#toggle:hover:enabled{filter:brightness(.95)}
+#toggle:disabled{background:var(--cell-hi);color:var(--ink-2)}
+#toggle .spin{width:38px;height:38px;border-width:4px}
+
+dialog{border:0;padding:0;color:var(--ink);background:var(--pass);max-width:100%}
+dialog::backdrop{background:rgba(6,7,8,.72)}
+#sheet{width:min(440px,100%);margin:auto auto 0;max-height:calc(100dvh - 24px);border-radius:18px 18px 0 0;box-shadow:0 0 0 1px var(--line);overflow:hidden}
+#sheet[open]{display:flex;flex-direction:column;animation:rise .24s var(--ease)}
+@keyframes rise{from{transform:translateY(24px);opacity:0}}
+.sheet-h{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 12px 10px 20px;border-bottom:1px solid var(--line);flex:none}
+.sheet-h h2{font:800 26px/1 var(--sans);font-stretch:78%}
+#sheet-close{width:44px;height:44px;display:grid;place-items:center;border-radius:6px;color:var(--ink-2)}
+#sheet-close:hover{color:var(--ink)}
+.sbody{overflow-y:auto;flex:1;min-height:0;overscroll-behavior:contain;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 20px;min-height:56px;border-bottom:1px solid var(--line);cursor:pointer}
+.row .v{font:600 15px/1.2 var(--sans)}
+#cap-tracks{padding:0 20px}
+.switch{-webkit-appearance:none;appearance:none;width:52px;height:30px;margin:0;border-radius:4px;background:var(--cell-hi);position:relative;flex:none;cursor:pointer}
+.switch::after{content:"";position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:2px;background:var(--mute)}
+.switch:checked{background:var(--ink)}
+.switch:checked::after{left:auto;right:3px;background:var(--bg)}
+.switch:disabled{opacity:.4;cursor:default}
+#cap-sync{margin:14px 14px 0;border:1px solid var(--line);border-left:4px solid var(--line);border-radius:6px;padding:12px 14px 14px}
+#cap-sync[data-unapplied=true]{border-left-color:var(--yel)}
+#cap-sync h3{font:500 11px/1.2 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+#cap-sync[data-unapplied=true] h3{color:var(--yel)}
+#cap-delay{display:block;margin-top:6px;font:700 52px/1 var(--mono);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+#cap-sync[data-unapplied=true] #cap-delay{color:var(--yel)}
+#cap-meaning{margin-top:8px;font:500 14px/1.3 var(--sans)}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px}
+.steps button{min-height:48px;border-radius:6px;background:var(--cell-hi);font:700 14px/1 var(--mono);font-variant-numeric:tabular-nums;text-align:center}
+.steps button:hover:enabled{background:#30363c}
+.steps button:disabled{opacity:.4}
+#cap-reset{margin-top:6px;margin-left:-4px}
+#cap-on-tv{margin:10px 20px 0;font:500 12px/1.4 var(--mono);color:var(--ink-2)}
+#cap-note{margin:6px 20px 0;font:500 13px/1.4 var(--sans);color:var(--ink-2)}
+#sheet-subs-stremio-slot{padding:0 20px;border-top:1px solid var(--line);margin-top:14px}
+#sheet-subs-stremio-slot:empty{display:none}
+.acts{padding:14px 14px 6px;display:grid;grid-template-columns:auto 1fr;gap:10px;margin-top:14px;border-top:1px solid var(--line)}
+.acts .quiet{min-height:60px;padding:0 22px;font:600 15px/1 var(--sans);letter-spacing:0;text-transform:none}
+.acts .btn-y{min-height:60px;font-size:18px}
+#exact-form{display:grid;grid-template-columns:1fr auto;gap:8px;padding:14px 20px 0}
+#exact-form label{grid-column:1/-1;font:500 12px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
+#exact{min-width:0;height:52px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:600 20px/1 var(--mono);padding:0 14px;letter-spacing:.04em}
+#exact[aria-invalid=true]{border-color:var(--yel)}
+#exact-go{min-width:72px;min-height:52px}
+#exact-error{grid-column:1/-1;font:500 12px/1.3 var(--mono);color:var(--yel)}
+#exact-error:empty{display:none}
+#exact-help{padding:8px 20px 12px;font:500 12px/1.3 var(--mono);color:var(--mute);border-bottom:1px solid var(--line)}
+#details{padding:4px 20px;border-bottom:1px solid var(--line)}
+#details summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font:600 14px/1 var(--sans);color:var(--ink-2)}
+#details dl{padding-bottom:10px}
+#details dl>div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;font:500 12px/1.3 var(--mono)}
+#details dt{color:var(--mute);text-transform:uppercase;letter-spacing:.1em;font-size:11px;flex:none}
+#details dd{text-align:right;overflow-wrap:anywhere}
+#more-stop{margin:14px 20px 0;width:calc(100% - 40px);min-height:52px}
+#change-note{margin:0 20px 8px;font:500 12px/1.4 var(--mono);color:var(--ink-2)}
+#change-note:empty{display:none}
+#change-start{display:flex;width:calc(100% - 28px);margin:14px 14px 6px;min-height:60px;font-size:18px}
+
+#confirm{width:min(380px,calc(100% - 32px));margin:auto;border-radius:14px;border:1px solid var(--line);border-top:4px solid var(--yel);padding:18px 18px 16px}
+#confirm[open]{animation:rise .2s var(--ease)}
+#confirm h2{font:800 24px/1.05 var(--sans);font-stretch:78%;margin:0 0 8px}
+#confirm p{font:500 14px/1.4 var(--sans);color:var(--ink-2);margin:0 0 16px}
+#confirm .btns{display:grid;gap:8px}
+#confirm .btns .btn-y{min-height:56px;font-size:17px}
+#confirm .btns .quiet{min-height:52px;font:600 15px/1 var(--sans);letter-spacing:0;text-transform:none}
+
+@media(max-width:359px){.seg-ctl button{font-size:12px}.pass-head,.seg,#sheet .seg{padding-left:14px;padding-right:14px}.stub{padding-left:14px;padding-right:14px}.perf{margin:0 -14px}.perf::before{left:14px;right:14px}#transport{padding-left:14px;padding-right:14px}#toggle{width:88px;height:88px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-play" viewBox="0 0 34 38"><path d="M6 2l25 17L6 36z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 34 38"><rect x="4" y="2" width="9" height="34" rx="1" fill="currentColor" stroke="none"/><rect x="21" y="2" width="9" height="34" rx="1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 9.5a3.5 3.5 0 0 1 0 5"/></symbol>
+  <symbol id="i-muted" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-go" viewBox="0 0 24 24"><path d="M4 12h15M13 5l7 7-7 7"/></symbol>
+</svg>
+<div id="app">
+
+<aside id="demo-banner" hidden>
+  <strong>Modo de prueba</strong>
+  <span>No controla tu TV.</span>
+  <label for="scenario">Escenario</label>
+  <select id="scenario" data-change="scenario">
+    <option value="empty">Lista vacía</option><option value="devices-loading">Buscando dispositivos</option><option value="devices-empty">Sin dispositivos</option><option value="devices-error">Error al buscar dispositivos</option><option value="ready">Listo para elegir</option><option value="loading">Preparando</option><option value="error">Error</option><option value="foreign">Otro contenido en la TV</option><option value="disconnect">TV desconectada</option>
+  </select>
+</aside>
+
+<main id="prep" tabindex="-1" aria-labelledby="prep-title">
+  <header class="top"><div class="brand"><i></i>Cast · Stremio</div></header>
+  <div id="prep-problem-slot">
+    <section id="problem" hidden aria-labelledby="problem-title">
+      <p class="lbl" id="problem-kind">Aviso</p>
+      <h2 id="problem-title"></h2>
+      <p id="problem-body"></p>
+      <button id="problem-action" type="button" class="quiet"></button>
+    </section>
+  </div>
+
+  <div class="pass">
+    <div class="pass-head"><h1 id="prep-title">Pase de función</h1></div>
+    <div class="pass-body">
+      <div id="prep-plan-slot">
+        <div id="plan">
+          <section id="plan-movie" class="seg" aria-labelledby="plan-movie-h">
+            <div class="seg-h"><h2 id="plan-movie-h"><b>01</b>Película</h2><button id="refresh-sources" type="button" class="linkbtn" data-act="refreshSources">Actualizar</button></div>
+            <div id="source-list" class="opts" role="group" aria-labelledby="plan-movie-h">
+              <template><button type="button" class="opt" aria-pressed="false" data-act="pickSource"><span class="mark" aria-hidden="true"></span><span class="txt"><span class="n" data-f="label"></span><span class="sub" data-f="note"></span></span></button></template>
+            </div>
+            <p id="source-status" class="st" role="status"></p>
+          </section>
+
+          <section id="plan-subs" class="seg" aria-labelledby="plan-subs-h">
+            <div class="seg-h"><h2 id="plan-subs-h"><b>03</b>Subtítulos</h2></div>
+            <div id="subs-branches" class="seg-ctl" role="group" aria-labelledby="plan-subs-h">
+              <button id="branch-none" type="button" aria-pressed="false" data-act="subsBranch" data-arg="none">Sin</button>
+              <button id="branch-file" type="button" aria-pressed="false" data-act="subsBranch" data-arg="file">Del archivo</button>
+              <button id="branch-stremio" type="button" aria-pressed="false" data-act="subsBranch" data-arg="stremio">Stremio</button>
+              <button id="branch-upload" type="button" aria-pressed="false" data-act="subsBranch" data-arg="upload">Subir</button>
+            </div>
+
+            <div id="branch-file-body" class="branch" hidden>
+              <div id="file-entries" class="opts" role="group" aria-label="Subtítulos del archivo">
+                <template><button type="button" class="opt" aria-pressed="false" data-act="pickEntry"><span class="mark" aria-hidden="true"></span><span class="txt"><span class="n" data-f="label"></span></span><span class="r" data-f="tag"></span></button></template>
+              </div>
+            </div>
+
+            <div id="branch-stremio-body" class="branch" hidden>
+              <div id="stremio">
+                <p id="stremio-match" class="match"></p>
+                <div id="stremio-languages" class="chips" role="group" aria-label="Idioma">
+                  <template><button type="button" aria-pressed="false" data-act="stremioLanguage"><span data-f="label"></span></button></template>
+                </div>
+                <div id="stremio-versions" class="opts" role="group" aria-label="Versión">
+                  <template><button type="button" class="opt" aria-pressed="false" data-act="stremioVersion"><span class="mark" aria-hidden="true"></span><span class="txt"><span class="n" data-f="label"></span></span></button></template>
+                </div>
+                <button id="stremio-use" type="button" class="btn-n" data-act="stremioUse">Usar este subtítulo</button>
+                <p id="stremio-status" class="st" role="status"></p>
+                <button id="stremio-retry" type="button" class="linkbtn" data-act="stremioRetry" hidden>Reintentar</button>
+                <button id="stremio-wrong" type="button" class="linkbtn" data-act="stremioWrong" aria-expanded="false" aria-controls="stremio-correction">No es esta película</button>
+                <div id="stremio-correction" hidden>
+                  <div id="stremio-alternatives" class="opts">
+                    <template><button type="button" class="opt plain" data-act="stremioAlt"><span class="txt"><span class="n" data-f="label"></span></span></button></template>
+                  </div>
+                  <form id="stremio-form" data-submit="stremioSearch">
+                    <label for="stremio-hint">Título de la película</label>
+                    <input id="stremio-hint" type="text" maxlength="200" autocomplete="off" inputmode="text">
+                    <button id="stremio-search" type="submit">Buscar</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <div id="branch-upload-body" class="branch" hidden>
+              <label id="upload-label" class="filepick" for="upload-input"><span class="mark" aria-hidden="true"></span><span>Elegir archivo .srt o .vtt</span><input id="upload-input" type="file" accept=".srt,.vtt" data-change="filePicked"></label>
+              <span id="upload-filename"></span>
+            </div>
+
+            <p id="subs-status" class="st" role="status"></p>
+            <button id="refresh-catalogue" type="button" class="linkbtn" data-act="refreshCatalogue">Volver a leer la película</button>
+          </section>
+        </div>
+      </div>
+
+      <section id="destination" class="seg" aria-labelledby="destination-h">
+        <div class="seg-h"><h2 id="destination-h"><b>02</b>Destino · TV</h2><button id="refresh-devices" type="button" class="linkbtn" data-act="refreshDevices">Actualizar</button></div>
+        <p id="device-name">Sin TV elegida</p>
+        <div id="device-list" class="opts" role="group" aria-labelledby="destination-h">
+          <template><button type="button" class="opt" aria-pressed="false" data-act="pickDevice"><span class="mark" aria-hidden="true"></span><span class="txt"><span class="n" data-f="label"></span></span><span class="tag" data-f="tag"></span></button></template>
+        </div>
+        <p id="device-note"></p>
+        <p id="device-status" class="st" role="status"></p>
+        <p id="device-rule" class="st" hidden></p>
+        <button id="device-stop" type="button" class="quiet" data-act="stop" hidden>Detener</button>
+        <details id="device-details"><summary>Detalles</summary><span id="device-host"></span></details>
+      </section>
+    </div>
+
+    <footer id="stub" class="stub">
+      <div class="perf" aria-hidden="true"><i></i><i></i></div>
+      <div class="stub-row">
+        <div class="stub-kv"><span id="stub-label" class="lbl">Falta</span><span id="stub-value"></span></div>
+        <div id="barcode" class="barcode off" aria-hidden="true"></div>
+      </div>
+      <p id="start-note" role="status"></p>
+      <button id="start" type="button" class="board-btn" data-act="start"><span id="start-label">Iniciar</span><svg class="ico" aria-hidden="true"><use href="#i-go"/></svg></button>
+    </footer>
+  </div>
+</main>
+
+<main id="mando" tabindex="-1" hidden aria-labelledby="board-title">
+  <header class="hdr">
+    <div class="brand"><i></i>Cast · Stremio</div>
+    <button id="stop" type="button" class="quiet" data-act="stop">Detener</button>
+  </header>
+  <div id="mando-problem-slot"></div>
+
+  <section id="board" aria-label="Tablero">
+    <div class="board-top"><span class="lbl">Ahora en pantalla</span><button id="open-change" type="button" class="linkbtn" data-act="openChange">Cambiar película</button></div>
+    <h1 id="board-title"></h1>
+    <dl>
+      <div><dt class="lbl">Hora</dt><dd><div id="board-clock" class="flaps" aria-hidden="true"></div><span id="board-clock-sr" class="sr"></span></dd></div>
+      <div><dt class="lbl">Estado</dt><dd><div id="board-state" class="state" role="status" data-glyph=""><i></i><span id="board-state-text"></span></div></dd></div>
+      <div class="room"><dt class="lbl">Sala</dt><dd id="board-room"></dd></div>
+    </dl>
+  </section>
+
+  <section id="timeline" aria-label="Línea de tiempo" data-off="true">
+    <div class="track">
+      <span class="rail"></span><span id="track-buffer" aria-hidden="true"></span><span id="track-prog" aria-hidden="true"></span><span class="ticks" aria-hidden="true"></span>
+      <span id="track-span" hidden aria-hidden="true"></span><span id="track-head" aria-hidden="true"></span><span id="track-ghost" hidden aria-hidden="true"></span><span id="track-preview" class="num" hidden aria-hidden="true"></span>
+      <input id="track" type="range" min="0" max="0" step="1" value="0" aria-label="Posición" data-input="dragSeek" data-change="dropSeek">
+    </div>
+    <div class="track-times"><span id="elapsed" class="num"></span><span id="total" class="num"></span></div>
+    <p id="track-hint" role="status"></p>
+  </section>
+
+  <div id="waiting" hidden role="status">
+    <span><span id="waiting-text"></span><span id="waiting-detail"></span></span>
+    <button id="waiting-cancel" type="button" class="quiet" data-act="stop">Cancelar</button>
+  </div>
+
+  <div class="sec">
+    <section id="sound" aria-label="Sonido">
+      <button id="mute" type="button" data-act="mute" aria-pressed="false"><svg class="ico" aria-hidden="true"><use id="mute-icon" href="#i-volume"/></svg></button>
+      <input id="volume" type="range" min="0" max="100" step="1" value="0" aria-label="Volumen" data-input="volumePreview" data-change="volume">
+      <span id="volume-text" class="num"></span>
+    </section>
+    <nav aria-label="Más acciones">
+      <button id="open-subs" type="button" data-act="openSubs"><span id="chip-kind" class="lbl">Subtítulos</span><span id="chip-value"></span></button>
+      <button id="open-more" type="button" data-act="openMore" aria-label="Más"><svg class="ico" aria-hidden="true"><use href="#i-more"/></svg></button>
+    </nav>
+  </div>
+
+  <section id="transport" aria-label="Controles">
+    <div class="jwrap"><button id="back" type="button" class="jump" data-act="skip" data-arg="-30" aria-label="Retroceder 30 segundos">−30 s</button></div>
+    <button id="toggle" type="button" data-act="toggle"><svg id="toggle-glyph" class="ico" aria-hidden="true"><use id="toggle-icon" href="#i-pause"/></svg><span id="toggle-spinner" class="spin" hidden></span></button>
+    <div class="jwrap"><button id="forward" type="button" class="jump" data-act="skip" data-arg="30" aria-label="Avanzar 30 segundos">+30 s</button><span id="skip-badge" class="num" hidden role="status"></span></div>
+  </section>
+</main>
+
 </div>
-<section id="subtitles-panel" class="active-subtitles" hidden aria-labelledby="active-subtitles-heading" tabindex="-1"><h2 id="active-subtitles-heading">Subtítulos de la película en la TV</h2><p id="active-movie"></p><label for="active-subtitle">Pista de la sesión actual</label><select id="active-subtitle" disabled><option value="">Sin subtítulos</option></select><section id="active-addon" class="addon" aria-labelledby="active-addon-heading" hidden><h3 id="active-addon-heading">Subtítulos de Stremio</h3><p id="active-addon-match" class="addon-match" hidden></p><p id="active-addon-status" role="status" aria-live="polite" hidden></p><div id="active-addon-picker" class="subtitle-fields" hidden><div><label for="active-addon-language">Idioma</label><select id="active-addon-language" disabled></select></div><div><label for="active-addon-version">Versión</label><select id="active-addon-version" disabled></select></div></div><div class="addon-actions"><button id="active-addon-use" class="primary" disabled hidden>Usar este subtítulo</button><button id="active-addon-retry" disabled hidden>Reintentar</button><button id="active-addon-wrong" class="quiet" aria-controls="active-addon-correction" aria-expanded="false" disabled hidden>No es esta</button></div><div id="active-addon-correction" class="addon-correction" hidden><div id="active-addon-alternatives" class="addon-alternatives" role="group" aria-label="Otras coincidencias"></div><form id="active-addon-form" class="addon-form"><label for="active-addon-hint">Título con año y episodio, o ID de IMDb</label><input id="active-addon-hint" type="text" maxlength="200" autocomplete="off" disabled><button id="active-addon-search" type="submit" disabled>Buscar</button></form></div></section><div id="caption-controls"><div class="switch-row"><label for="subtitles">Mostrar subtítulos<input id="subtitles" type="checkbox" disabled></label></div><h3>Sincronización</h3><div class="delay-value"><output id="delay-value">—</output><small id="delay-meaning">Sin datos</small></div><div class="delay-buttons"><button id="delay-minus" disabled>Mostrar antes<br>−0,1 s</button><button id="delay-plus" disabled>Mostrar después<br>+0,1 s</button></div><button id="delay-reset" class="quiet reset" disabled>Restablecer</button></div><p id="caption-consequences">Cambiar pista o tiempo recarga la película en su posición actual y conserva la pausa. Puede tardar decenas de segundos. Solo mostrar u ocultar no recarga.</p><button id="apply" class="primary full" disabled>Aplicar a la película actual</button><p id="subtitle-actual" class="source-note"></p><details id="caption-details"><summary>Detalles de subtítulos</summary><p id="subtitle-plan"></p><p>Elegir una pista no confirma que esté visible en la TV. Rango de ajuste de −30 a +30 segundos.</p></details></section>
-<div id="empty-view" class="empty-view" hidden><h1>Elegí qué ver<br>en la TV.</h1><p id="empty-copy">No hay una película en esta sesión. Abrí una en Stremio y luego elegí una entrada de la caché.</p><button id="choose-film" class="primary">Elegir película <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></div>
-<div id="operation" class="operation" hidden><span id="operation-text"></span><button id="cancel-operation" class="quiet">Cancelar preparación</button></div>
-<p class="source-note muted">Enfocá el mando para usar Espacio y las flechas. Tab recorre los controles.</p>
-</section>
-<section id="setup" class="setup" tabindex="-1" aria-labelledby="setup-title" hidden><div class="setup-heading"><div><h2 id="setup-title">Elegí qué ver en la TV.</h2><p id="setup-intro">Elegí una película y un destino. Solo Iniciar en la TV envía la película.</p></div><button id="setup-cancel" class="quiet setup-cancel">Cancelar selección</button></div><p id="discovery-note">Las listas se actualizan automáticamente cada 30 segundos. También podés actualizarlas ahora.</p><div class="setup-grid">
-<section id="source-panel" aria-labelledby="source-heading"><div class="section-heading"><h2 id="source-heading">Película</h2><button id="discover">Actualizar películas</button></div><p id="source-status" role="status" aria-live="polite">Buscando películas…</p><p id="empty" class="source-note" hidden>Abrí una película en Stremio y pausala sin cerrarla. Luego actualizá esta lista.</p><fieldset id="source-list" class="source-list"><legend class="sr-only">Películas disponibles</legend></fieldset><p id="source-detail" class="source-note" hidden></p><p class="source-note">La caché puede incluir películas anteriores; no identifica la abierta en Stremio. Revisá Nombre original antes de enviarla.</p></section>
-<section id="device-panel" aria-labelledby="device-heading"><div class="section-heading"><h2 id="device-heading">Dispositivo</h2><button id="discover-devices">Actualizar dispositivos</button></div><p id="device-status" class="source-note" role="status" aria-live="polite">Buscando dispositivos Google Cast…</p><fieldset id="device-list" class="source-list"><legend class="sr-only">Dispositivos disponibles</legend></fieldset><p id="device-rule" class="source-note" hidden></p><button id="device-stop" class="danger full" hidden>Detener sesión</button></section></div>
-<section id="setup-subtitles" class="setup-subtitles" aria-labelledby="setup-subtitles-heading" hidden><h2 id="setup-subtitles-heading">Subtítulos para la película elegida</h2><div class="subtitle-fields"><div><label for="setup-subtitle">Pista o sin subtítulos</label><select id="setup-subtitle" disabled><option value="">Sin subtítulos</option></select><button id="refresh-catalogue" class="change" disabled>Actualizar pistas</button></div><div class="upload-field"><label for="subtitle-file">Archivo local opcional</label><div class="upload-picker"><span id="upload-action" aria-hidden="true">Subir archivo SRT / VTT</span><input id="subtitle-file" type="file" accept=".srt,.vtt" aria-label="Subir archivo SRT o VTT" aria-describedby="upload-filename upload-guidance upload-status" disabled></div><p id="upload-filename">Sin archivo elegido</p><small id="upload-guidance">UTF-8 · Hasta 1 MiB. El archivo queda en este puente.</small></div></div><section id="setup-addon" class="addon" aria-labelledby="setup-addon-heading" hidden><h3 id="setup-addon-heading">Subtítulos de Stremio</h3><p id="setup-addon-match" class="addon-match" hidden></p><p id="setup-addon-status" role="status" aria-live="polite" hidden></p><div id="setup-addon-picker" class="subtitle-fields" hidden><div><label for="setup-addon-language">Idioma</label><select id="setup-addon-language" disabled></select></div><div><label for="setup-addon-version">Versión</label><select id="setup-addon-version" disabled></select></div></div><div class="addon-actions"><button id="setup-addon-use" class="primary" disabled hidden>Usar este subtítulo</button><button id="setup-addon-retry" disabled hidden>Reintentar</button><button id="setup-addon-wrong" class="quiet" aria-controls="setup-addon-correction" aria-expanded="false" disabled hidden>No es esta</button></div><div id="setup-addon-correction" class="addon-correction" hidden><div id="setup-addon-alternatives" class="addon-alternatives" role="group" aria-label="Otras coincidencias"></div><form id="setup-addon-form" class="addon-form"><label for="setup-addon-hint">Título con año y episodio, o ID de IMDb</label><input id="setup-addon-hint" type="text" maxlength="200" autocomplete="off" disabled><button id="setup-addon-search" type="submit" disabled>Buscar</button></form></div></section><p id="catalogue-status" role="status" aria-live="polite"></p><p id="upload-status" role="status" aria-live="polite"></p></section>
-<div id="start-review" class="start-review" hidden><div><strong id="setup-summary"></strong><p id="start-destination">Elegí un dispositivo disponible.</p><p id="setup-choice">Sin subtítulos</p></div><button id="start" class="primary" disabled>Iniciar en la TV</button></div></section>
-<footer id="qa" class="demo" hidden><span class="demo-note">Películas y acciones sintéticas. No verifica el hardware.</span><div class="demo-tools"><label for="scenario">Estado de prueba</label><select id="scenario"><option value="empty">Lista vacía</option><option value="devices-loading">Buscando dispositivos</option><option value="devices-empty">Sin dispositivos</option><option value="devices-error">Error al buscar dispositivos</option><option value="ready">Listo para elegir</option><option value="loading">Preparando</option><option value="error">Error</option><option value="foreign">Otro contenido en la TV</option><option value="disconnect">TV desconectada</option></select></div></footer></main>
-<dialog id="settings" aria-labelledby="sheet-title"><div class="sheet-layout"><header class="sheet-header"><div class="sheet-heading"><h2 id="sheet-title">Elegir película</h2><small id="sheet-demo" hidden>Modo de prueba · No controla tu TV</small></div><button id="close-sheet" class="icon-button" aria-label="Cerrar ajustes"><svg aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="sheet-body">
-<div id="sheet-error" class="field-error" role="alert" hidden><p id="sheet-error-text"></p><button id="sheet-dismiss" class="quiet">Cerrar error</button></div>
-<section id="more-panel" hidden><form id="exact-form" class="exact-form"><label for="position">Ir a un tiempo exacto</label><input id="position" type="text" inputmode="text" placeholder="42:10 o 1:02:10" autocomplete="off" aria-describedby="exact-error" disabled><button id="seek" type="submit" disabled>Revisar salto</button><p id="exact-error" class="field-error" hidden></p></form><div id="exact-review" hidden><p id="exact-target"></p><div class="sheet-actions"><button id="exact-cancel" class="quiet">Cancelar</button><button id="exact-apply" class="primary" disabled>Aplicar salto</button></div></div><details><summary>Detalles de reproducción</summary><div class="details-content"><p id="buffer-status">Preparación para la TV: sin datos todavía</p><p>El tramo claro representa material preparado para la TV; no es un porcentaje de descarga. La caché de Stremio es otra cosa y puede estar incompleta.</p><p>La espera depende de la descarga y de la TV; no hay una estimación disponible.</p></div></details><details><summary>Ayuda y atajos</summary><div class="details-content"><p>Enfocá el mando fuera de sus botones. Los atajos se aplican solo ahí; nunca al escribir o dentro de ajustes.</p><div class="shortcut-list"><kbd>Espacio</kbd><span>Pausar o continuar</span><kbd>← / →</kbd><span>Saltar 30 segundos</span></div><p>Usá Tab para recorrer controles y Escape para cerrar esta hoja.</p></div></details><hr class="separator"><button id="stop" class="danger full" disabled>Detener película</button></section>
-<section id="confirm-panel" hidden><p id="confirm-body"></p><div class="sheet-actions"><button id="confirm-cancel" class="quiet">Cancelar</button><button id="confirm-accept" class="primary">Cambiar</button></div></section></div><footer class="sheet-footer" id="mini-transport"><div class="mini-copy"><strong id="mini-title">Sin película</strong><span id="mini-status">—</span></div><button id="mini-cancel" class="quiet cancel-mini" hidden>Cancelar preparación</button><button id="mini-play" class="mini-toggle primary" aria-label="Continuar" disabled></button></footer></div></dialog>
+
+<dialog id="sheet" aria-labelledby="sheet-title">
+  <header class="sheet-h">
+    <h2 id="sheet-title"></h2>
+    <button id="sheet-close" type="button" data-act="closeSheet" aria-label="Cerrar"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </header>
+  <div class="sbody">
+    <div id="sheet-problem-slot"></div>
+
+    <section id="sheet-subs" data-title="Enmienda al pase" hidden>
+      <div id="cap-tracks" class="opts" role="group" aria-label="Subtítulo">
+        <template><button type="button" class="opt" aria-pressed="false" data-act="capTrack"><span class="mark" aria-hidden="true"></span><span class="txt"><span class="n" data-f="label"></span></span></button></template>
+      </div>
+      <label class="row" for="cap-visible"><span class="v">Mostrar subtítulos</span><input id="cap-visible" class="switch" type="checkbox" role="switch" data-change="capVisible"></label>
+      <div id="cap-sync" role="group" aria-labelledby="cap-sync-h">
+        <h3 id="cap-sync-h">Sincronía</h3>
+        <output id="cap-delay" for="cap-m1000 cap-m100 cap-p100 cap-p1000 cap-reset"></output>
+        <p id="cap-meaning"></p>
+        <div class="steps">
+          <button id="cap-m1000" type="button" data-act="capNudge" data-arg="-1000">−1 s</button>
+          <button id="cap-m100" type="button" data-act="capNudge" data-arg="-100">−0,1 s</button>
+          <button id="cap-p100" type="button" data-act="capNudge" data-arg="100">+0,1 s</button>
+          <button id="cap-p1000" type="button" data-act="capNudge" data-arg="1000">+1 s</button>
+        </div>
+        <button id="cap-reset" type="button" class="linkbtn" data-act="capReset">Restablecer</button>
+      </div>
+      <p id="cap-on-tv"></p>
+      <p id="cap-note"></p>
+      <div id="sheet-subs-stremio-slot"></div>
+      <div class="acts">
+        <button id="cap-discard" type="button" class="quiet" data-act="capDiscard">Cancelar</button>
+        <button id="cap-apply" type="button" class="btn-y" data-act="capApply">Aplicar</button>
+      </div>
+    </section>
+
+    <section id="sheet-more" data-title="Más" hidden>
+      <form id="exact-form" data-submit="gotoTime">
+        <label for="exact">Ir a un tiempo exacto</label>
+        <input id="exact" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="h:mm:ss" aria-describedby="exact-error" data-input="exactInput">
+        <button id="exact-go" type="submit" class="btn-y">Ir</button>
+        <p id="exact-error" role="alert"></p>
+      </form>
+      <p id="exact-help">Escribí m:ss o h:mm:ss.</p>
+      <details id="details"><summary>Detalles</summary>
+        <dl>
+          <div><dt>TV</dt><dd id="detail-tv"></dd></div>
+          <div><dt>Dirección</dt><dd id="detail-host"></dd></div>
+          <div><dt>Archivo</dt><dd id="detail-file"></dd></div>
+          <div><dt>Preparado</dt><dd id="detail-prepared"></dd></div>
+        </dl>
+      </details>
+      <button id="more-stop" type="button" class="quiet" data-act="stop">Detener</button>
+    </section>
+
+    <section id="sheet-change" data-title="Cambiar película" hidden>
+      <div id="sheet-change-slot"></div>
+      <p id="change-note" role="status"></p>
+      <button id="change-start" type="button" class="btn-y" data-act="start">Cambiar película en la TV</button>
+    </section>
+  </div>
+</dialog>
+
+<dialog id="confirm" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-body"></p>
+  <div class="btns">
+    <button id="confirm-accept" type="button" class="btn-y" data-act="confirmAccept"></button>
+    <button id="confirm-cancel" type="button" class="quiet" data-act="confirmCancel" autofocus></button>
+  </div>
+</dialog>
+
 <script>const token='__TOKEN__';
-__SCRIPT__
-</script></body></html>
+__SCRIPT__</script>
+</body>
+</html>

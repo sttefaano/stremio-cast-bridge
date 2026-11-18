@@ -642,38 +642,36 @@ class ControlHTTPTest(unittest.TestCase):
         h.path = '/'
         h.do_GET()
         body = h.reply.call_args.args[1]
-        self.assertIn('id="timeline"', body)
+        self.assertIn('id="track"', body)
         self.assertIn('Modo de prueba', body)
         self.assertIn("const token='secret'", body)
         self.assertNotIn('__SCRIPT__', body)
+        self.assertNotIn('__TOKEN__', body)
         from html.parser import HTMLParser
         class Panel(HTMLParser):
             def __init__(self):
                 super().__init__()
-                self.in_dialog = False
-                self.dialogs = 0
-                self.dialog_ids = set()
-                self.page_ids = set()
+                self.dialog = None
+                self.dialogs = []
+                self.ids = {}
             def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
                 if tag == 'dialog':
-                    self.in_dialog = True
-                    self.dialogs += 1
-                if self.in_dialog:
-                    self.dialog_ids.add(dict(attrs).get('id'))
-                else:
-                    self.page_ids.add(dict(attrs).get('id'))
+                    self.dialog = attrs.get('id')
+                    self.dialogs.append(self.dialog)
+                if 'id' in attrs:
+                    self.ids[attrs['id']] = self.dialog
             def handle_endtag(self, tag):
                 if tag == 'dialog':
-                    self.in_dialog = False
+                    self.dialog = None
         panel = Panel()
         panel.feed(body)
-        self.assertEqual(panel.dialogs, 1)
-        self.assertTrue({'more-panel', 'confirm-panel', 'mini-transport', 'mini-play',
-                         'mini-cancel', 'sheet-demo'} <= panel.dialog_ids)
-        self.assertTrue({'setup', 'source-panel', 'subtitles-panel', 'device-panel'} <= panel.page_ids)
-        self.assertTrue({'source-panel', 'subtitles-panel', 'device-panel'}.isdisjoint(panel.dialog_ids))
-        self.assertIn('id="seek-apply"', body)
-        self.assertIn('id="seek-cancel"', body)
+        self.assertEqual(panel.dialogs, ['sheet', 'confirm'])
+        for inside in ('sheet-subs', 'sheet-more', 'sheet-change'):
+            self.assertEqual(panel.ids[inside], 'sheet', inside)
+        for outside in ('prep', 'mando', 'problem', 'track'):
+            self.assertIsNone(panel.ids[outside], outside)
+        self.assertNotIn('seek-apply', body)
         self.assertIn('inputmode="text"', body)
         self.assertNotIn('La noche del faro', body)
         self.assertNotIn('connect-src \'none\'', body)
@@ -686,7 +684,7 @@ class ControlHTTPTest(unittest.TestCase):
         h.path = '/'
         h.do_GET()
         body = h.reply.call_args.args[1]
-        self.assertIn('Sin dispositivo elegido', body)
+        self.assertIn('Sin TV elegida', body)
         self.assertNotIn('<TV &', body)
         self.assertNotIn('<img', body)
         self.assertNotIn('<video', body)
