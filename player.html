@@ -81,7 +81,7 @@ input[type=text]{accent-color:var(--ink)}
 .opt:hover:enabled{color:var(--ink)}
 .opt .mark{width:18px;height:18px;border:1.5px solid var(--mute);border-radius:2px;flex:none;display:grid;place-items:center}
 .opt .txt{flex:1;min-width:0}
-.opt .n{display:block;font:600 16px/1.15 var(--sans);font-stretch:90%;overflow-wrap:anywhere}
+.opt .n{display:block;font:600 16px/1.15 var(--sans);font-stretch:90%;overflow-wrap:break-word}
 .opt .sub{display:block;margin-top:5px;font:500 12px/1.25 var(--mono);color:var(--mute);letter-spacing:.03em;overflow-wrap:anywhere}
 .opt .sub:empty{display:none}
 .opt .r{font:500 12px/1.2 var(--mono);color:var(--mute);text-align:right;max-width:45%;overflow-wrap:anywhere}
@@ -91,6 +91,7 @@ input[type=text]{accent-color:var(--ink)}
 .opt[aria-pressed=true] .n{font-size:24px;font-weight:700;font-stretch:82%;line-height:1.05}
 .opt:disabled .n,.opt:disabled .mark{opacity:.5}
 .opt.plain .mark{display:none}
+.opt[aria-pressed=true] .tag{display:none}
 .seg-ctl{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden;min-height:46px;margin-top:4px}
 .seg-ctl button{font:600 13px/1.1 var(--sans);color:var(--ink-2);border-right:1px solid var(--line);padding:0 4px;text-align:center;min-height:44px}
 .seg-ctl button:last-child{border-right:0}
@@ -262,7 +263,8 @@ dialog::backdrop{background:rgba(6,7,8,.72)}
 #cap-note{margin:6px 20px 0;font:500 13px/1.4 var(--sans);color:var(--ink-2)}
 #sheet-subs-stremio-slot{padding:0 20px;border-top:1px solid var(--line);margin-top:14px}
 #sheet-subs-stremio-slot:empty{display:none}
-.acts{padding:14px 14px 6px;display:grid;grid-template-columns:auto 1fr;gap:10px;margin-top:14px;border-top:1px solid var(--line)}
+.acts{position:sticky;bottom:0;background:var(--pass);padding:14px 14px 6px;display:grid;grid-template-columns:auto 1fr;gap:10px;margin-top:14px;border-top:1px solid var(--line)}
+.acts.one{grid-template-columns:1fr;gap:8px}
 .acts .quiet{min-height:60px;padding:0 22px;font:600 15px/1 var(--sans);letter-spacing:0;text-transform:none}
 .acts .btn-y{min-height:60px;font-size:18px}
 #exact-form{display:grid;grid-template-columns:1fr auto;gap:8px;padding:14px 20px 0}
@@ -280,9 +282,9 @@ dialog::backdrop{background:rgba(6,7,8,.72)}
 #details dt{color:var(--mute);text-transform:uppercase;letter-spacing:.1em;font-size:11px;flex:none}
 #details dd{text-align:right;overflow-wrap:anywhere}
 #more-stop{margin:14px 20px 0;width:calc(100% - 40px);min-height:52px}
-#change-note{margin:0 20px 8px;font:500 12px/1.4 var(--mono);color:var(--ink-2)}
+#change-note{font:500 12px/1.4 var(--mono);color:var(--ink-2)}
 #change-note:empty{display:none}
-#change-start{display:flex;width:calc(100% - 28px);margin:14px 14px 6px;min-height:60px;font-size:18px}
+#change-start{width:100%}
 
 #confirm{width:min(380px,calc(100% - 32px));margin:auto;border-radius:14px;border:1px solid var(--line);border-top:4px solid var(--yel);padding:18px 18px 16px}
 #confirm[open]{animation:rise .2s var(--ease)}
@@ -526,8 +528,10 @@ dialog::backdrop{background:rgba(6,7,8,.72)}
 
     <section id="sheet-change" data-title="Cambiar película" hidden>
       <div id="sheet-change-slot"></div>
-      <p id="change-note" role="status"></p>
-      <button id="change-start" type="button" class="btn-y" data-act="start">Cambiar película en la TV</button>
+      <div class="acts one">
+        <p id="change-note" role="status"></p>
+        <button id="change-start" type="button" class="btn-y" data-act="start">Cambiar película en la TV</button>
+      </div>
     </section>
   </div>
 </dialog>
