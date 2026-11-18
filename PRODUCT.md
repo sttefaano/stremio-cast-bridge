@@ -12,7 +12,7 @@ Stefano uses this local panel to watch a Stremio movie on a classic Chromecast w
 
 ## Product Purpose
 
-Choose a video-capable Google Cast destination and the intended movie, then control its TV playback. Choose an embedded text subtitle in any available language, a subtitle from Stremio's own addon, a local SRT or VTT file, or no subtitles.
+Choose a video-capable Google Cast destination and the intended movie, then control its TV playback. The panel has two modes on one page. Preparar takes three taps: the movie, the TV and Iniciar. The last TV used is preselected, never started. The subtitle decision is one choice among Sin (the default), Del archivo (an embedded text track in any available language), Stremio (a subtitle from Stremio's own addon) and Subir (a local SRT or VTT file). After Iniciar the page becomes Mando: a departures board with title, clock, state and room, then the timeline, the transport, volume and mute, the subtitle chip and Más.
 
 ## Operating Context
 
@@ -28,10 +28,14 @@ The bridge provides start, pause, resume, stop, seeking, subtitle selection and 
 
 - Familiar player controls lead; technical details remain secondary.
 - Clearly distinguish a selected movie from the movie playing on the TV.
-- Keep preparation in one in-page flow. During playback the current movie and transport lead; preparation and caption editing open only when requested.
+- Keep preparation in one in-page flow. During playback the current movie and transport lead. Subtitles, exact time, details and Cambiar película open as sheets only when requested.
+- A seek happens when the user releases the timeline, never while dragging. Escape or a cancelled gesture sends nothing. Taps on ±30 s add up and send one seek.
+- A subtitle track or timing edit is a draft until the user chooses Aplicar. Showing or hiding the subtitles applies at once.
+- Detener asks first while the movie plays or is paused. In a problem block, and as Cancelar while the TV is still preparing, it stops at once.
+- One problem block per state and one Detener on screen. When the problem block offers Detener, the header drops its own.
 - State, waiting, errors and recovery must be understandable without jargon.
 - Never control receiver content that does not belong to this bridge.
 
 ## Evidence on Hand
 
-README.md and bridge.py describe incumbent behavior. Existing tests cover playback ownership, input-seek restart, subtitle timing, growing HLS and startup lifecycle. Neither a complete movie run nor new control behavior on hardware is certified by preview tests.
+README.md and bridge.py describe incumbent behavior. Existing tests cover playback ownership, input-seek restart, subtitle timing, growing HLS and startup lifecycle. `tests/panel-core.test.cjs` and `tests/panel-shell.test.cjs` cover the panel's rules and its page, and `scripts/verify_setup_browser.py` drives both modes in a browser against the demo. Neither a complete movie run nor new control behavior on hardware is certified by preview tests.
