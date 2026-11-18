@@ -66,11 +66,12 @@ const Panel = (() => {
    * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}|{kind:'stop',snap:StopSnap}} confirm
    * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
    * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
-   * @property {boolean} stoppedNotice @property {{text:string,error:string}} exact
+   * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
+   * @property {boolean} stopIssued  our Stop was sent; the next return to Preparar shows the notice  @property {{text:string,error:string}} exact
    * @property {'preparar'|'mando'|null} mode @property {boolean} reseed @property {Ticket|null} clock
    * @property {string|null} lastSourceId @property {string} lastDeviceLabel
    */
-  /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number}} Model */
+  /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
   // ───────── constants and pure helpers
   const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024;
@@ -231,6 +232,7 @@ const Panel = (() => {
       const done = l.command;
       l.command = null;
       onCommandDone(m, fx, done);
+      uiSettleFocus(m, fx);
     }
     startAdvance(m, fx);
     capAdvance(m, fx);
@@ -257,6 +259,7 @@ const Panel = (() => {
     else if (c.owner === 'seek') seekOnCommandDone(m, c);
     else if (c.owner === 'captions') capOnCommandDone(m, c);
     else if (c.owner === 'volume') m.remote.volumePreview = null;
+    else if (c.owner === 'stop' && !c.ok) m.ui.stopIssued = false;
   }
 
   // ───────── plan: movie, catalogue, subtitle decision, Start
@@ -611,6 +614,7 @@ const Panel = (() => {
   function remoteSync(m) {
     const key = playbackKey(m.link.status);
     if (key === m.remote.key) return;
+    if (m.remote.stop) m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
     m.remote = freshRemote(key);
     if (m.ui.sheet === 'subs') m.ui.sheet = null;
   }
@@ -798,20 +802,17 @@ const Panel = (() => {
     m.remote.stop = null;
     u.confirm = null;
     u.sheet = null;
-    linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n});
+    if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
   }
-  /** After a poll issued since the click: same TV, same playback and no command since, else the consent is void. */
+  /**
+   * After a poll issued since the click: no command since and, because remoteSync would have dropped the consent
+   * (with a message) if the TV, its revision or the playback had changed, the consent still holds.
+   */
   function stopAdvance(m, fx) {
-    const st = m.remote.stop, l = m.link, s = l.status;
+    const st = m.remote.stop, l = m.link;
     if (!st || l.appliedSeq <= st.afterSeq) return;
-    const k = st.snap;
     m.remote.stop = null;
-    if (st.generation !== l.generation) return;
-    if (s?.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision || (s.playback_id ?? null) !== k.playbackId) {
-      m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
-      return;
-    }
-    if (caps(m).stop) remoteStopNow(m, fx, k.playbackId ? {playback_id: k.playbackId} : {});
+    if (st.generation === l.generation && caps(m).stop) remoteStopNow(m, fx, st.snap.playbackId ? {playback_id: st.snap.playbackId} : {});
   }
 
   // ───────── ui: layers, errors
@@ -867,6 +868,50 @@ const Panel = (() => {
     if ((u.sheet === 'more' || u.sheet === 'change') && !c.owned) u.sheet = null;
     if (u.sheet === 'change' && c.foreign) { u.sheet = null; planReset(m, null); }
     if (u.confirm?.kind === 'replace' && c.foreign) u.confirm = null;
+    if (u.confirm?.kind === 'stop') {
+      const k = u.confirm.snap;
+      if (!c.stop) u.confirm = null;
+      else if (k.deviceId !== s.selected_device?.id || k.deviceRevision !== s.device_revision || k.playbackId !== (s.playback_id ?? null)) {
+        u.confirm = null;
+        u.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
+      }
+    }
+  }
+  /** The focus ticket is honoured once the command settles, and only if the user has not touched anything since. */
+  function uiSettleFocus(m, fx) {
+    const f = m.ui.focus;
+    m.ui.focus = null;
+    if (f && f.n === m.n) fx.push({fx: 'focus', ref: f.ref, n: f.n});
+  }
+  /** What the one problem block says, or null. The same function decides what dismissNotice dismisses. */
+  function problemOf(m) {
+    const s = m.link.status || NO_STATUS, c = caps(m), u = m.ui;
+    const stopAction = label => ({act: 'stop', label, enabled: c.stop});
+    if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
+    if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
+    if (s.phase === 'receiver_changed') return {kind: 'foreign', title: 'Hay otro contenido en la TV', body: 'Este mando no lo controla. Detené para volver a elegir.', action: stopAction('Detener y volver a elegir')};
+    if (s.phase === 'disconnected') return {kind: 'disconnected', title: 'TV no disponible', body: 'Se perdió la conexión con la TV. Detené para volver a elegir.', action: stopAction('Detener')};
+    if (s.phase === 'error') return {kind: 'failed', title: 'No se pudo completar la acción', body: s.message || 'Revisá la película y volvé a intentar.', action: s.can_change_device === false ? stopAction('Detener') : null};
+    const say = u.errors.local ?? backendError(m);
+    if (say) return {kind: 'notice', title: 'No se pudo completar la acción', body: say, action: {act: 'dismissNotice', label: 'Entendido', enabled: true}};
+    if (u.stoppedNotice) return {kind: 'stopped', title: `Película detenida en ${u.lastDeviceLabel || 'la TV'}`, body: '', action: {act: 'dismissNotice', label: 'Cerrar', enabled: true}};
+    return null;
+  }
+  /** The server's action_error, unless dismissed, absorbed by a caption apply that reported it, or an apply is still pending. */
+  function backendError(m) {
+    const s = m.link.status, id = errorIdentity(s), e = m.ui.errors;
+    return id && id !== e.dismissed && id !== e.absorbed && !m.remote.captions.apply ? s.action_error : null;
+  }
+  function uiDismissNotice(m) {
+    const kind = problemOf(m)?.kind, e = m.ui.errors;
+    if (kind !== 'notice' && kind !== 'stopped') return;
+    if (kind === 'stopped') m.ui.stoppedNotice = false;
+    else if (e.local !== null) e.local = null;
+    else e.dismissed = errorIdentity(m.link.status);
+  }
+  /** Demo scenarios exist only when the server says it is the demo (policy 17). */
+  function uiScenario(m, fx, value, msg) {
+    if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
   }
 
   // ───────── public: init / step
@@ -879,13 +924,13 @@ const Panel = (() => {
   const freshRemote = key => ({key, seek: {s: 'idle'}, captions: {draft: null, apply: null}, volumePreview: null, stop: null, overlay: null, addon: freshAddon()});
   const freshUi = () => ({
     sheet: null, confirm: null, errors: {local: null, observed: null, dismissed: null, absorbed: null}, focus: null,
-    stoppedNotice: false, exact: {text: '', error: ''}, mode: null, reseed: false, clock: null, lastSourceId: null, lastDeviceLabel: '',
+    stoppedNotice: false, stopIssued: false, exact: {text: '', error: ''}, mode: null, reseed: false, clock: null, lastSourceId: null, lastDeviceLabel: '',
   });
 
   /** @param {{lastDeviceId?:string|null}} [boot] @returns {{model:Model,fx:object[]}} the first poll is in fx */
   function init(boot = {}) {
     const m = {
-      nextTicket: 0, now: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
+      nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
       link: {status: null, online: false, statusAt: 0, generation: 0, seq: 0, appliedSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
       plan: freshPlan(null), remote: freshRemote(playbackKey(null)), ui: freshUi(),
     };
@@ -901,6 +946,7 @@ const Panel = (() => {
   function step(m, msg) {
     const fx = [];
     m.now = msg.at ?? m.now;
+    m.n = msg.n ?? m.n;
     if (msg.t === 'status') linkOnStatus(m, fx, msg);
     else if (msg.t === 'reply') linkRouteReply(m, fx, msg);
     else if (msg.t === 'timer') onTimer(m, fx, msg);
@@ -919,6 +965,7 @@ const Panel = (() => {
       l.pollTimer = null;
       if (!l.polling) linkIssuePoll(m, fx);
     } else if (msg.name === 'skip') seekOnTimer(m, fx, msg);
+    else if (msg.name === 'clock' && msg.ticket === m.ui.clock) m.ui.clock = null;
   }
   /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
   function reconcile(m, fx) {
@@ -930,13 +977,19 @@ const Panel = (() => {
     // 3. back in Preparar after an owned playback: movie and TV stay chosen, the subtitle decision starts over
     if (s) {
       const mode = modeOf(m);
-      if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; }
+      if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
+      if (mode === 'mando') u.stoppedNotice = false;
       u.mode = mode;
     }
     if (u.reseed && l.online && s && !m.plan.sourceId) {
       u.reseed = false;
       const id = [s.source_id, u.lastSourceId].find(x => x && s.sources.some(y => y.id === x));
       if (id) planPickSource(m, fx, id);
+    }
+    // the flap clock ticks only while a movie plays
+    if (u.mode === 'mando' && s?.phase === 'playing' && l.online && u.clock === null) {
+      u.clock = ticketOf(m);
+      fx.push({fx: 'timer', name: 'clock', ms: CLOCK_MS, ticket: u.clock});
     }
     // 4/5. remember the TV the server confirmed; pre-select it when nothing is selected (never casts)
     if (s?.selected_device && s.selected_device.id !== m.prefs.lastDeviceId) {
@@ -1181,12 +1234,18 @@ const Panel = (() => {
    * @typedef {object} View  Everything the page shows, as plain data. Completed section by section below.
    * @property {'preparar'|'mando'} mode @property {PlanView} plan @property {DestinationView} destination @property {ConfirmView|null} confirm
    */
+  function viewProblem(m) {
+    const p = problemOf(m);
+    return p && {...p, host: m.ui.sheet ? 'sheet' : 'page'};
+  }
   function view(m) {
     const mode = modeOf(m);
     return {
       mode,
       plan: viewPlan(m), destination: viewDestination(m), confirm: viewConfirm(m),
       mando: mode === 'mando' ? viewMando(m) : null, sheet: viewSheet(m),
+      problem: viewProblem(m), demo: m.link.status?.demo === true ? {scenario: m.link.status.scenario || ''} : null,
+      wake: mode === 'mando', restoring: m.ui.focus,
     };
   }
 
@@ -1227,6 +1286,8 @@ const Panel = (() => {
     capDiscard: m => capDiscard(m),
     exactInput: (m, fx, g) => { m.ui.exact = {text: String(g.arg ?? ''), error: ''}; },
     gotoTime: (m, fx, g) => seekGoto(m, fx, g.arg, g),
+    dismissNotice: m => uiDismissNotice(m),
+    scenario: (m, fx, g) => uiScenario(m, fx, g.arg, g),
     openSubs: m => uiOpen(m, 'subs'),
     openMore: m => uiOpen(m, 'more'),
     openChange: m => uiOpen(m, 'change'),

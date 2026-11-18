@@ -17,8 +17,8 @@ function panel(initial, boot = {lastDeviceId: null}) {
   const {Panel} = load();
   const {model, fx} = Panel.init(boot);
   const pending = plain(fx);
-  let at = 0;
-  const send = msg => { pending.push(...plain(Panel.step(model, {at: at += 10, n: 0, ...msg}).fx)); };
+  let at = 0, n = 0;
+  const send = msg => { pending.push(...plain(Panel.step(model, {at: at += 10, n, ...msg}).fx)); };
   const take = pred => {
     const i = pending.findIndex(pred);
     assert.notEqual(i, -1, 'expected effect');
@@ -27,7 +27,7 @@ function panel(initial, boot = {lastDeviceId: null}) {
   const p = {
     Panel, model, pending, send,
     get view() { return plain(Panel.view(model)); },
-    tap: (t, arg, from, n = 0) => send({t, arg, from, n}),
+    tap: (t, arg, from, count = n) => { n = count; send({t, arg, from}); },
     status: (raw, ok = true) => { const f = take(e => e.fx === 'poll'); send({t: 'status', gen: f.gen, seq: f.seq, ok, raw: raw && fixture(raw)}); },
     polls: () => pending.filter(e => e.fx === 'poll').length,
     posted: action => pending.find(e => e.fx === 'post' && e.action === action),
@@ -930,6 +930,29 @@ test('captions are refused while busy, foreign or offline and while an apply is 
   assert.equal(p.polls(), 1);
 });
 
+test('an Aplicar or a visibility toggle that finds the TV busy says so, sends nothing and keeps the draft', () => {
+  const busy = {...subsOk('text-a', 0), ...withTracks, command_pending: true};
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status(busy);
+  assert.equal(p.posts('subtitles').length, 0);
+  assert.match(p.view.problem.body, /ocupada/);
+  assert.equal(p.view.sheet.unapplied, true, 'the draft survives');
+  p.fire('poll');
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  assert.equal(p.view.sheet.unapplied, true);
+  assert.equal(p.view.sheet.apply.enabled, true, 'and can be applied again once the TV is free');
+  const q = panel({...subsOk('text-a', 0), ...withTracks});
+  q.tap('openSubs');
+  q.tap('capVisible', false);
+  q.status(busy);
+  assert.equal(q.posts('subtitles').length, 0);
+  assert.match(q.view.problem.body, /ocupada/);
+  assert.equal(q.view.sheet.visible.checked, true, 'the switch goes back to what the TV shows');
+});
+
 test('a partial failure names the visibility change and keeps the draft', () => {
   const p = panel({...subsOk('text-a', 0, false), ...withTracks});
   p.tap('openSubs');
@@ -1204,4 +1227,383 @@ test('the remote stays keyed to one playback: a new playback starts with idle se
   p.status({...playing, playback_id: 'play-b'});
   assert.equal(p.view.mando.badge, null);
   assert.equal(p.view.mando.track.preview, null);
+});
+
+// ───────── ui: layers, errors, notices, focus; and reconcile
+
+const stopped = {...idle, phase: 'stopped', title: 'Alpha', source_id: 'a'};
+const stopFromPlaying = p => { p.tap('stop'); p.tap('confirmAccept'); p.status(playing); p.settle('stop', stopped); };
+
+test('Detener returns to Preparar with the movie and the TV still chosen and a dismissible notice', () => {
+  const p = panel(subsOk('text-a', 0));
+  stopFromPlaying(p);
+  assert.equal(p.view.mode, 'preparar');
+  assert.deepEqual([p.view.problem.kind, p.view.problem.title, p.view.problem.action.act], ['stopped', 'Película detenida en Sala · Chromecast', 'dismissNotice']);
+  assert.equal(p.view.destination.label, 'Sala · Chromecast', 'the TV is still selected server-side');
+  assert.equal(p.view.plan.sources.find(r => r.selected)?.id, 'a', 'the movie is seeded from what the bridge kept');
+  assert.equal(p.view.plan.branches.find(b => b.selected).id, 'none', 'the subtitle decision starts over');
+  p.reply(p.posted('catalogue'), {ok: true, body: {catalogue: catalogue('a')}});
+  assert.equal(p.view.plan.primary.enabled, true, 'one tap to start again');
+  p.tap('dismissNotice');
+  assert.equal(p.view.problem, null);
+});
+
+test('the stopped notice needs our Stop: a movie that ended or a failed stop says nothing', () => {
+  const ended = panel(playing);
+  ended.fire('poll');
+  ended.status({...idle, phase: 'ended', title: 'Alpha', source_id: 'a'});
+  assert.equal(ended.view.mode, 'preparar');
+  assert.equal(ended.view.problem, null);
+  const failed = panel({...playing, phase: 'loading', pending: true});
+  failed.tap('stop');
+  failed.settle('stop', {...playing, phase: 'loading', pending: true}, {ok: false, code: 'busy', message: 'Ocupado.'});
+  failed.fire('poll');
+  failed.status({...stopped});
+  assert.equal(failed.view.problem?.kind === 'stopped', false);
+});
+
+test('re-seeding falls back to the last movie we owned when the bridge did not keep the source id', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  p.status(playing);
+  p.settle('stop', {...stopped, source_id: null});
+  assert.equal(p.view.plan.sources.find(r => r.selected)?.id, 'a');
+});
+
+test('a local error shows once, is cleared by the next command, and dismiss clears it', () => {
+  const p = panel(playing);
+  p.tap('toggle');
+  p.settle('pause', {...playing, command_pending: true}, {ok: false, code: 'busy', message: 'La TV está ocupada.'});
+  assert.deepEqual([p.view.problem.kind, p.view.problem.body], ['notice', 'La TV está ocupada.']);
+  p.tap('dismissNotice');
+  assert.equal(p.view.problem, null);
+  p.tap('toggle');
+  p.fire('poll');
+  p.status(playing);
+  p.tap('toggle');
+  p.settle('pause', {...playing, command_pending: true}, {ok: false, timeout: true});
+  assert.equal(p.view.problem.body, 'La acción tardó demasiado. Revisá el estado antes de reintentar.');
+  p.fire('poll');
+  p.status(playing);
+  p.tap('toggle');
+  assert.equal(p.view.problem, null, 'a new command clears the old message');
+});
+
+test('the same backend error text with a new revision shows again; stable polls stay dismissed', () => {
+  const failing = revision => ({...playing, action_error: 'La TV no respondió.', action_error_revision: revision});
+  const p = panel(failing(1));
+  assert.equal(p.view.problem.body, 'La TV no respondió.');
+  p.tap('dismissNotice');
+  assert.equal(p.view.problem, null);
+  for (let i = 0; i < 3; i++) { p.fire('poll'); p.status(failing(1)); }
+  assert.equal(p.view.problem, null, 'dismissal persists across polls');
+  p.fire('poll');
+  p.status(failing(2));
+  assert.equal(p.view.problem.body, 'La TV no respondió.');
+});
+
+test('a new backend error is the latest word: it replaces a local message', () => {
+  const p = panel(playing);
+  p.tap('toggle');
+  p.settle('pause', playing, {ok: false, message: 'Local.'});
+  assert.equal(p.view.problem.body, 'Local.');
+  p.fire('poll');
+  p.status({...playing, action_error: 'Del servidor.', action_error_revision: 1});
+  assert.equal(p.view.problem.body, 'Del servidor.');
+});
+
+test('there is exactly one problem block per state, in priority order, hosted in the open sheet', () => {
+  const states = {
+    offline: [null, 'offline'], unknown: [{...playing, phase: 'warp'}, 'unknown'], foreign: [{...playing, phase: 'receiver_changed'}, 'foreign'],
+    disconnected: [{...playing, phase: 'disconnected'}, 'disconnected'], failed: [{...idle, phase: 'error', message: 'Falló la lectura.'}, 'failed'],
+    notice: [{...playing, action_error: 'Algo.', action_error_revision: 1}, 'notice'],
+  };
+  for (const [name, [status, kind]] of Object.entries(states)) {
+    const p = panel(status ?? playing);
+    if (!status) offline(p);
+    assert.equal(p.view.problem.kind, kind, name);
+    assert.equal(p.view.problem.host, 'page', name);
+  }
+  const both = panel({...playing, phase: 'receiver_changed', action_error: 'Algo.', action_error_revision: 1});
+  assert.equal(both.view.problem.kind, 'foreign', 'the stronger problem wins; the error is not shown beside it');
+  const p = panel(playing);
+  p.tap('openMore');
+  p.fire('poll');
+  p.status({...playing, action_error: 'Algo.', action_error_revision: 1});
+  assert.equal(p.view.problem.host, 'sheet');
+});
+
+test('foreign, disconnected and unknown offer only Detener, with the wording each deserves', () => {
+  const copy = {receiver_changed: ['Hay otro contenido en la TV', 'Detener y volver a elegir'], disconnected: ['TV no disponible', 'Detener'], warp: ['Estado desconocido de la TV', 'Detener']};
+  for (const [phase, [title, label]] of Object.entries(copy)) {
+    const p = panel({...playing, phase});
+    assert.deepEqual([p.view.problem.title, p.view.problem.action.label, p.view.problem.action.act, p.view.problem.action.enabled], [title, label, 'stop', true], phase);
+  }
+  const off = panel(playing);
+  offline(off);
+  assert.equal(off.view.problem.title, 'Sin conexión con el puente');
+  assert.equal(off.view.problem.action, null);
+});
+
+test('a phase of error with a locked TV stays in Mando with Detener; otherwise Preparar shows the problem', () => {
+  const locked = panel({...playing, phase: 'error', can_change_device: false, message: 'La TV rechazó el archivo.'});
+  assert.equal(locked.view.mode, 'mando');
+  assert.deepEqual([locked.view.problem.kind, locked.view.problem.body, locked.view.problem.action.act], ['failed', 'La TV rechazó el archivo.', 'stop']);
+  const free = panel({...idle, phase: 'error', message: 'No se pudo preparar.'});
+  assert.equal(free.view.mode, 'preparar');
+  assert.deepEqual([free.view.problem.kind, free.view.problem.action], ['failed', null]);
+});
+
+test('a worker failure after a 202 start arrives as the backend error and the plan stays', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('start');
+  p.status(idle);
+  p.settle('start', {...idle, action_error: 'La TV rechazó la película.', action_error_revision: 3});
+  assert.equal(p.view.problem.kind, 'notice');
+  assert.equal(p.view.problem.body, 'La TV rechazó la película.');
+  assert.equal(p.view.plan.primary.enabled, true, 'the choice is intact: a retry is one tap');
+});
+
+test('a 409 busy answer to start is shown and does not leave the page waiting', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('start');
+  p.status(idle);
+  p.settle('start', {...idle, command_pending: true}, {ok: false, code: 'busy', message: 'La TV está ocupada.'});
+  assert.equal(p.view.problem.body, 'La TV está ocupada.');
+  p.fire('poll');
+  p.status(idle);
+  assert.equal(p.view.plan.primary.enabled, true);
+  assert.equal(p.view.plan.primary.label, 'Iniciar en Sala (Chromecast)');
+});
+
+test('a destination change during Start says so', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('start');
+  p.status({...idle, device_revision: 2});
+  assert.equal(p.view.problem.body, 'El destino cambió. Revisá la TV y volvé a intentar.');
+});
+
+test('a stale or changed track list during Start says so and sends nothing', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('subsBranch', 'file');
+  p.tap('pickEntry', 'text-a');
+  p.tap('start');
+  p.status({...idle, catalogues: {a: {state: 'loading', analysis_id: 'x'}}});
+  assert.equal(p.posts('start').length, 0);
+  assert.match(p.view.problem.body, /La lista de subtítulos cambió/);
+});
+
+test('a stop that finds another playback says so and sends nothing', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  p.status({...playing, playback_id: 'play-z'});
+  assert.equal(p.view.problem.body, 'La TV cambió o hay otra sesión. Revisá antes de detener.');
+  assert.equal(p.posts('stop').length, 0);
+});
+
+test('an open stop confirm closes with a message when the playback changes under it', () => {
+  for (const change of [{playback_id: 'play-z'}, {device_revision: 2}]) {
+    const p = panel(playing);
+    p.tap('stop');
+    assert.equal(p.view.confirm.kind, 'stop');
+    p.fire('poll');
+    p.status({...playing, ...change});
+    assert.equal(p.view.confirm, null, JSON.stringify(change));
+    assert.equal(p.view.problem.body, 'La TV cambió o hay otra sesión. Revisá antes de detener.');
+    p.tap('confirmAccept');
+    assert.equal(p.posts('stop').length, 0);
+    assert.equal(p.polls(), 0, 'nothing waits to stop the new playback');
+  }
+});
+
+test('a partial caption failure names the visibility change and keeps the draft', () => {
+  const hidden = {...subsOk('text-a', 0, false), ...withTracks};
+  const p = panel(hidden);
+  p.tap('openSubs');
+  p.tap('capTrack', 'text2-a');
+  p.tap('capNudge', 400);
+  p.tap('capApply');
+  p.status(hidden);
+  p.reply(p.posted('subtitles'), {ok: false, message: 'La TV rechazó el cambio.'});
+  p.status({...subsOk('text-a', 0, true), ...withTracks});
+  assert.equal(p.view.problem.host, 'sheet');
+  assert.equal(p.view.problem.body, 'La visibilidad ya cambió; la sincronía sigue sin confirmar. La TV rechazó el cambio. Tu ajuste sigue en borrador.');
+  assert.equal(p.view.sheet.unapplied, true);
+});
+
+test('a rejected delay change does not claim visibility changed when it was already hidden', () => {
+  const hidden = {...subsOk('text-a', 0, false), ...withTracks};
+  const p = panel(hidden);
+  p.tap('openSubs');
+  p.tap('capNudge', 400);
+  p.tap('capApply');
+  p.status(hidden);
+  p.reply(p.posted('subtitles'), {ok: false, message: 'La TV rechazó el cambio.'});
+  p.status(hidden);
+  assert.equal(p.view.problem.body, 'La TV rechazó el cambio. Tu ajuste sigue en borrador.');
+});
+
+test('a backend error while an apply is pending is shown once, as the apply failure, and stays dismissed', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 400);
+  p.tap('capApply');
+  p.status(subsOk('text-a', 0));
+  p.reply(p.posted('subtitles'));
+  p.status({...subsOk('text-a', 0), action_error: 'No se pudo cambiar el subtítulo.', action_error_revision: 7});
+  assert.equal(p.view.problem.body, 'No se pudo cambiar el subtítulo. Tu ajuste sigue en borrador.');
+  p.tap('dismissNotice');
+  assert.equal(p.view.problem, null, 'the same error is not shown again behind the failure');
+  p.fire('poll');
+  p.status({...subsOk('text-a', 0), action_error: 'No se pudo cambiar el subtítulo.', action_error_revision: 7});
+  assert.equal(p.view.problem, null);
+});
+
+test('a backend error that arrives while an apply is waiting does not show behind it', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 400);
+  p.tap('capApply');
+  p.status({...subsOk('text-a', 0), action_error: 'Otra cosa.', action_error_revision: 9});
+  assert.equal(p.view.sheet.apply.pending, true);
+  assert.equal(p.view.problem, null, 'suppressed while the apply is pending');
+});
+
+// scenario, layers, focus
+
+test('a demo scenario posts only when the server says it is the demo; production has no demo block', () => {
+  const prod = panel(playing);
+  prod.tap('scenario', 'error');
+  assert.equal(prod.posts().length, 0);
+  assert.equal(prod.view.demo, null);
+  const demo = panel({...playing, demo: true, scenario: 'ready'});
+  assert.deepEqual(demo.view.demo, {scenario: 'ready'});
+  demo.tap('scenario', 'error');
+  assert.deepEqual(demo.posted('scenario').body, {state: 'error'});
+});
+
+test('Escape closes only the top layer: a confirm over the Cambiar película sheet leaves the sheet', () => {
+  const p = panel(playing);
+  p.tap('openChange');
+  choose(p, 'b');
+  p.tap('start');
+  assert.equal(p.view.confirm.kind, 'replace');
+  assert.equal(p.view.sheet.kind, 'change');
+  p.tap('dismiss');
+  assert.deepEqual([p.view.confirm, p.view.sheet.kind], [null, 'change']);
+  p.tap('dismiss');
+  assert.equal(p.view.sheet, null);
+  assert.equal(p.view.plan.sources.some(r => r.selected), false, 'closing the sheet drops the draft');
+});
+
+test('opening Cambiar película starts from an empty plan; a confirmed start closes it only on success', () => {
+  const p = panel(playing);
+  p.tap('openChange');
+  assert.equal(p.view.plan.sources.some(r => r.selected), false);
+  choose(p, 'b');
+  p.tap('start');
+  p.tap('confirmAccept');
+  p.status(playing);
+  p.settle('start', playing, {ok: false, code: 'unavailable_destination', message: 'La TV no está disponible.'});
+  assert.equal(p.view.sheet.kind, 'change', 'a failed start leaves the sheet for another try');
+  assert.equal(p.view.problem.host, 'sheet');
+  p.tap('start');
+  p.tap('confirmAccept');
+  p.fire('poll');
+  p.status(playing);
+  p.settle('start', {...playing, source_id: 'b', title: 'Beta'});
+  assert.equal(p.view.sheet, null);
+});
+
+test('layers cannot outlive the permission that opened them', () => {
+  const change = panel(playing);
+  change.tap('openChange');
+  change.fire('poll');
+  change.status({...playing, phase: 'receiver_changed'});
+  assert.equal(change.view.sheet, null, 'a foreign receiver closes the change sheet');
+  const more = panel(playing);
+  more.tap('openMore');
+  more.fire('poll');
+  more.status(stopped);
+  assert.equal(more.view.sheet, null, 'there is no Más without a playback');
+  const replace = panel(playing);
+  replace.tap('openChange');
+  choose(replace, 'b');
+  replace.tap('start');
+  replace.fire('poll');
+  replace.status({...playing, phase: 'disconnected'});
+  assert.equal(replace.view.confirm, null, 'no replacement question for a TV we do not control');
+  const stopAsk = panel(playing);
+  stopAsk.tap('stop');
+  stopAsk.fire('poll');
+  stopAsk.status(stopped);
+  assert.equal(stopAsk.view.confirm, null, 'nothing left to stop');
+  const subs = panel(playing);
+  subs.tap('openSubs');
+  subs.fire('poll');
+  subs.status({...playing, phase: 'receiver_changed'});
+  assert.equal(subs.view.sheet, null);
+  subs.tap('openSubs');
+  assert.equal(subs.view.sheet, null, 'and it cannot be reopened');
+});
+
+test('a confirm blocks opening another layer', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('openMore');
+  p.tap('openSubs');
+  p.tap('openChange');
+  assert.equal(p.view.sheet, null);
+});
+
+test('focus returns to the control once the command settles, only if the user has not touched anything since', () => {
+  const p = panel(playing);
+  p.tap('toggle', undefined, 'toggle', 5);
+  assert.deepEqual(p.view.restoring, {ref: 'toggle', n: 5});
+  assert.equal(p.effects('focus').length, 0, 'not while the command is in flight');
+  p.reply(p.posted('pause'));
+  p.status({...playing, phase: 'paused'});
+  assert.deepEqual(p.effects('focus').map(f => [f.ref, f.n]), [['toggle', 5]]);
+  assert.equal(p.view.restoring, null);
+  const q = panel(playing);
+  q.tap('toggle', undefined, 'toggle', 5);
+  q.tap('openMore', undefined, 'open-more', 6);
+  q.reply(q.posted('pause'));
+  q.status({...playing, phase: 'paused'});
+  assert.equal(q.effects('focus').length, 0, 'the user moved on: no focus is stolen');
+});
+
+test('a skip restores focus to the control that started it, when its command settles', () => {
+  const p = panel(playing);
+  p.tap('skip', 30, 'forward', 3);
+  p.send({t: 'timer', name: 'skip', ticket: p.effects('timer').filter(t => t.name === 'skip').pop().ticket});
+  p.settle('seek', {...playing, absolute_time: 80});
+  assert.deepEqual(p.effects('focus').map(f => f.ref), ['forward']);
+});
+
+test('standing rules are idempotent: a message that changes nothing produces no effects', () => {
+  const p = panel(playing);
+  p.tap('openSubs');
+  p.pending.length = 0;
+  const before = p.view;
+  for (let i = 0; i < 3; i++) p.send({t: 'nothing', at: 20});
+  assert.deepEqual(p.pending, []);
+  assert.deepEqual(p.view, before);
+});
+
+test('the flap clock timer is armed once while playing and re-armed after each tick, never while paused', () => {
+  const p = panel(playing);
+  assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1);
+  p.send({t: 'timer', name: 'nothing', ticket: 0});
+  assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1, 'not armed twice');
+  p.fire('clock');
+  assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1, 're-armed after the tick');
+  const q = panel(paused);
+  assert.equal(q.effects('timer').filter(t => t.name === 'clock').length, 0);
 });
