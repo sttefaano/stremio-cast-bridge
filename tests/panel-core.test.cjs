@@ -1607,3 +1607,114 @@ test('the flap clock timer is armed once while playing and re-armed after each t
   const q = panel(paused);
   assert.equal(q.effects('timer').filter(t => t.name === 'clock').length, 0);
 });
+
+// ───────── keyboard and the View contract
+
+const key = (p, k, extra = {}) => p.Panel.keyMsg(p.view, {key: k, mods: false, repeat: false, typing: false, onButton: false, idle: true, n: 0, ...extra});
+
+test('keys: Space, arrows and M drive the remote; Z and X nudge the subtitle draft', () => {
+  const p = panel(playing);
+  assert.deepEqual(plain(key(p, ' ')), {t: 'toggle'});
+  assert.deepEqual(plain(key(p, 'ArrowLeft')), {t: 'skip', arg: -30});
+  assert.deepEqual(plain(key(p, 'ArrowRight')), {t: 'skip', arg: 30});
+  assert.deepEqual(plain(key(p, 'M')), {t: 'mute'});
+  assert.deepEqual(plain(key(p, 'z')), {t: 'capNudge', arg: -100});
+  assert.deepEqual(plain(key(p, 'x')), {t: 'capNudge', arg: 100});
+  assert.equal(key(p, 'q'), null);
+});
+
+test('keys stay off while typing, with a modifier, held down, or when Space belongs to a button', () => {
+  const p = panel(playing);
+  assert.equal(key(p, ' ', {typing: true}), null);
+  assert.equal(key(p, 'ArrowLeft', {typing: true}), null);
+  assert.equal(key(p, 'm', {mods: true}), null);
+  assert.equal(key(p, 'ArrowRight', {repeat: true}), null);
+  assert.equal(key(p, ' ', {onButton: true}), null, 'the button activates itself once');
+});
+
+test('keys stay off in Preparar and while a confirm or any sheet except the subtitle sheet is open', () => {
+  const prep = panel(idle);
+  for (const k of [' ', 'ArrowLeft', 'm', 'z']) assert.equal(key(prep, k), null);
+  const p = panel(playing);
+  p.tap('stop');
+  for (const k of [' ', 'ArrowLeft', 'm', 'z']) assert.equal(key(p, k), null, 'confirm open');
+  p.tap('confirmCancel');
+  p.tap('openMore');
+  for (const k of [' ', 'ArrowLeft', 'm', 'z', 'x']) assert.equal(key(p, k), null, 'Más open');
+  p.tap('closeSheet');
+  p.tap('openSubs');
+  assert.equal(key(p, ' '), null);
+  assert.equal(key(p, 'ArrowLeft'), null);
+  assert.deepEqual(plain(key(p, 'x')), {t: 'capNudge', arg: 100}, 'sync keys keep working while the subtitle sheet is open');
+});
+
+test('Z and X open the subtitle sheet when captions are available and nudge the draft; without captions they do nothing', () => {
+  const p = panel(subsOk('text-a', 0));
+  p.send(key(p, 'x'));
+  assert.equal(p.view.sheet.kind, 'subs');
+  assert.equal(p.view.sheet.delay.text, '+0,1 s');
+  p.send(key(p, 'x'));
+  assert.equal(p.view.sheet.delay.text, '+0,2 s');
+  const q = panel({...playing, phase: 'receiver_changed'});
+  assert.equal(key(q, 'z'), null, 'a foreign receiver has no captions to nudge');
+  const r = panel({...playing, phase: 'loading', pending: true});
+  r.send({t: 'capNudge', arg: 100});
+  assert.equal(r.view.sheet?.unapplied ?? false, false, 'busy: the key does not open or edit anything');
+});
+
+test('while focus is being restored, arrows and Space are swallowed and are not a seek', () => {
+  const p = panel(playing);
+  p.tap('toggle', undefined, 'toggle', 4);
+  assert.equal(key(p, 'ArrowRight', {n: 4}), 'swallow');
+  assert.equal(key(p, ' ', {n: 4}), 'swallow');
+  assert.deepEqual(plain(key(p, 'ArrowRight', {n: 5})), {t: 'skip', arg: 30}, 'a later interaction ends the restore');
+  assert.deepEqual(plain(key(p, 'ArrowRight', {n: 4, idle: false})), {t: 'skip', arg: 30}, 'focus is somewhere on purpose');
+  p.send(key(p, 'ArrowRight', {n: 4}) === 'swallow' ? {t: 'nothing'} : {t: 'skip', arg: 30});
+  assert.equal(p.posts('seek').length + p.effects('timer').filter(t => t.name === 'skip').length, 0);
+});
+
+test('the view is plain JSON data and every action it names is a known message', () => {
+  const states = {
+    offline: panel(null), preparar: panel(idle), mando: panel(playing), waiting: panel({...playing, phase: 'loading', pending: true}),
+    foreign: panel({...playing, phase: 'receiver_changed'}), error: panel({...playing, action_error: 'Algo.', action_error_revision: 1}),
+  };
+  const subs = panel(playing); subs.tap('openSubs'); states.subs = subs;
+  const more = panel(playing); more.tap('openMore'); states.more = more;
+  const change = panel(playing); change.tap('openChange'); states.change = change;
+  const confirm = panel(playing); confirm.tap('stop'); states.confirm = confirm;
+  for (const [name, p] of Object.entries(states)) {
+    const v = p.view;
+    assert.deepEqual(Object.keys(v).sort(), ['confirm', 'demo', 'destination', 'mando', 'mode', 'plan', 'problem', 'restoring', 'sheet', 'wake'], name);
+    assert.deepEqual(JSON.parse(JSON.stringify(v)), v, `${name}: nothing is lost in JSON, so nothing is a function or undefined`);
+    assert.equal(v.wake, v.mode === 'mando', name);
+    assert.equal(v.mando === null, v.mode === 'preparar', name);
+    if (v.problem?.action) assert.ok(Object.hasOwn(states.mando.Panel.ACTS, v.problem.action.act), name);
+  }
+  assert.equal(states.subs.view.sheet.kind, 'subs');
+  assert.equal(states.more.view.sheet.kind, 'more');
+  assert.equal(states.change.view.sheet.kind, 'change');
+  assert.equal(states.confirm.view.confirm.kind, 'stop');
+});
+
+test('every message the page can send is a handler in ACTS; an unknown or inherited name does nothing', () => {
+  const {Panel} = load();
+  const names = ['pickSource', 'refreshSources', 'pickDevice', 'refreshDevices', 'refreshCatalogue', 'subsBranch', 'pickEntry', 'filePicked',
+    'stremioLanguage', 'stremioVersion', 'stremioUse', 'stremioRetry', 'stremioWrong', 'stremioAlt', 'stremioSearch', 'start',
+    'toggle', 'skip', 'dragSeek', 'dropSeek', 'seekAbandon', 'volumePreview', 'volume', 'mute', 'stop', 'openSubs', 'openMore', 'openChange',
+    'capTrack', 'capVisible', 'capNudge', 'capReset', 'capApply', 'capDiscard', 'exactInput', 'gotoTime',
+    'closeSheet', 'dismiss', 'confirmAccept', 'confirmCancel', 'dismissNotice', 'scenario'];
+  for (const name of names) assert.equal(typeof Panel.ACTS[name], 'function', name);
+  assert.deepEqual(Object.keys(Panel.ACTS).sort(), [...names].sort(), 'no handler without a name in the contract');
+  const p = panel(playing);
+  for (const t of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'nothing']) p.send({t});
+  assert.deepEqual(p.pending.filter(e => e.fx === 'post'), []);
+});
+
+test('the core reads no document, fetch, timer, storage or token; the token placeholder lives only in the markup', () => {
+  const src = fs.readFileSync('player.js', 'utf8');
+  const core = src.slice(0, src.indexOf('return {init, step, view'));
+  for (const banned of ['document.', 'fetch(', 'setTimeout', 'setInterval', 'localStorage', 'navigator.', 'window.', '__TOKEN__']) assert.equal(core.includes(banned), false, banned);
+  assert.equal(src.includes('__TOKEN__'), false);
+  assert.equal(fs.readFileSync('player.html', 'utf8').split('__TOKEN__').length - 1, 1);
+  assert.match(fs.readFileSync('player.html', 'utf8'), /const token='__TOKEN__';/);
+});

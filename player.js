@@ -1,5 +1,5 @@
 // Panel core: pure data in, plain data out. It never touches document, fetch, timers, storage or `token`;
-// the shell below performs effects and paints Panel.view().
+// a DOM shell performs the effects it returns and paints Panel.view().
 const Panel = (() => {
   // ───────── wire types (server contract)
   /** @typedef {'idle'|'preparing'|'buffering'|'loading'|'playing'|'paused'|'disconnected'|'receiver_changed'|'ended'|'stopped'|'error'} Phase */
@@ -231,7 +231,7 @@ const Panel = (() => {
     if (l.command?.stage === 'confirming' && l.appliedSeq > l.command.afterSeq) {
       const done = l.command;
       l.command = null;
-      onCommandDone(m, fx, done);
+      onCommandDone(m, done);
       uiSettleFocus(m, fx);
     }
     startAdvance(m, fx);
@@ -253,8 +253,7 @@ const Panel = (() => {
     if (c.owner === 'captions') return m.remote.captions.apply?.ticket === c.ticket;
     return true;
   }
-  function onCommandDone(m, fx, c) {
-    void fx;
+  function onCommandDone(m, c) {
     if (c.owner === 'start') planOnCommandDone(m, c);
     else if (c.owner === 'seek') seekOnCommandDone(m, c);
     else if (c.owner === 'captions') capOnCommandDone(m, c);
@@ -1156,6 +1155,18 @@ const Panel = (() => {
   }
   const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(delta))} s`;
 
+  /**
+   * @typedef {object} MandoView  The departures board and the remote. Null in Preparar.
+   * @property {{title:string,clock:string,state:string,room:string}} board  clock is display-only (interpolated while playing)
+   * @property {{enabled:boolean,max:number,value:number,elapsed:string,total:string,preview:string|null,previewAt:number|null,target:string|null,buffered:{start:number,end:number}|null}} track
+   *           value and elapsed are the real position; preview ('→ h:mm:ss') exists only while dragging, target while a sent seek has not settled
+   * @property {Ctl} back @property {Ctl} forward @property {string|null} badge  accumulated skip, '+60 s'
+   * @property {Ctl&{icon:'play'|'pause'|'spinner',label:string}} toggle
+   * @property {null|{text:string,detail:string,cancel:Ctl}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
+   * @property {Ctl&{percent:number|null,text:string}} volume @property {Ctl&{pressed:boolean,label:string}} mute
+   * @property {Ctl&{label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
+   * @property {Ctl} more @property {Ctl} change @property {Ctl} stop
+   */
   function viewMando(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
     const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
@@ -1231,8 +1242,24 @@ const Panel = (() => {
   }
 
   /**
-   * @typedef {object} View  Everything the page shows, as plain data. Completed section by section below.
-   * @property {'preparar'|'mando'} mode @property {PlanView} plan @property {DestinationView} destination @property {ConfirmView|null} confirm
+   * @typedef {object} ProblemView  The ONE problem block. kind priority: offline > unknown > foreign > disconnected > failed > notice > stopped.
+   * @property {'offline'|'unknown'|'foreign'|'disconnected'|'failed'|'notice'|'stopped'} kind
+   * @property {string} title @property {string} body  '' when the title says it all
+   * @property {'page'|'sheet'} host  'sheet' while a sheet is open: the block renders there, once, never also on the page
+   * @property {null|{act:'stop'|'dismissNotice',label:string,enabled:boolean}} action
+   */
+  /**
+   * @typedef {object} View  Everything the page shows, as plain data (JSON-safe, no wire types). The contract the markup and shell consume.
+   * @property {'preparar'|'mando'} mode  Preparar shows plan + destination + stub; Mando shows the board and the remote
+   * @property {ProblemView|null} problem
+   * @property {{scenario:string}|null} demo  non-null only when the server says status.demo === true
+   * @property {PlanView} plan  also rendered inside the "Cambiar película" sheet
+   * @property {DestinationView} destination
+   * @property {MandoView|null} mando
+   * @property {SubsSheetView|MoreSheetView|{kind:'change'}|null} sheet  at most one sheet is open
+   * @property {ConfirmView|null} confirm  stacks above a sheet
+   * @property {boolean} wake  the shell holds a Wake Lock iff true (Mando)
+   * @property {{ref:string,n:number}|null} restoring  a command is in flight and focus will return to control `ref`; keyMsg swallows keys meanwhile
    */
   function viewProblem(m) {
     const p = problemOf(m);
@@ -1297,7 +1324,27 @@ const Panel = (() => {
     confirmAccept: (m, fx) => uiConfirmAccept(m, fx),
   });
 
-  return {init, step, view, ACTS, caps, formatTime, parseTime, decodeSubtitle};
+  const SWALLOWED = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ']);
+  /**
+   * Keyboard policy, pure. `k` = {key, mods, repeat, typing, onButton, idle, n}: typing is an input/select/textarea target (the
+   * timeline range is not), onButton means Space belongs to the focused button, idle means nothing has focus.
+   * Returns a message for step, 'swallow' (cancel the key, send nothing) or null (leave it to the browser).
+   * @param {View} v @returns {{t:string,arg?:any}|'swallow'|null}
+   */
+  function keyMsg(v, k) {
+    if (v.restoring && v.restoring.n === k.n && k.idle && SWALLOWED.has(k.key)) return 'swallow';
+    if (k.mods || k.repeat || k.typing || v.confirm || v.mode !== 'mando' || !v.mando) return null;
+    const key = k.key.length === 1 ? k.key.toLowerCase() : k.key;
+    if ((key === 'z' || key === 'x') && (v.sheet ? v.sheet.kind === 'subs' : v.mando.chip.enabled)) return {t: 'capNudge', arg: key === 'z' ? -100 : 100};
+    if (v.sheet) return null;
+    if (key === ' ') return k.onButton ? null : {t: 'toggle'};
+    if (key === 'ArrowLeft') return {t: 'skip', arg: -SKIP_S};
+    if (key === 'ArrowRight') return {t: 'skip', arg: SKIP_S};
+    if (key === 'm') return {t: 'mute'};
+    return null;
+  }
+
+  return {init, step, view, keyMsg, ACTS, formatTime, parseTime};
 })();
 
 if (typeof module !== 'undefined') module.exports = {Panel};
