@@ -1209,6 +1209,27 @@ test('the board glyph follows the phase, not the copy: play, pause, spinner whil
   assert.equal(p.view.mando.board.glyph, null, 'a state we cannot confirm shows no glyph');
 });
 
+test('one Detener at a time: a problem block that offers it takes the header\'s place, in Mando and in the Más sheet', () => {
+  const header = status => panel(status).view.mando.stop;
+  assert.deepEqual(header(playing), {enabled: true, shown: true});
+  const error = {...playing, phase: 'error', can_change_device: false, message: 'Falló'};
+  for (const status of [error, {...playing, phase: 'receiver_changed'}, {...playing, phase: 'disconnected'}, {...playing, phase: 'wat'}]) {
+    const v = panel(status).view;
+    assert.equal(v.problem.action.act, 'stop', status.phase);
+    assert.equal(v.mando.stop.shown, false, `${status.phase}: the problem block already offers Detener`);
+    assert.equal(v.mando.stop.enabled, v.problem.action.enabled);
+  }
+  const notice = panel({...playing, action_error: 'Algo.', action_error_revision: 1}).view;
+  assert.equal(notice.problem.action.act, 'dismissNotice');
+  assert.equal(notice.mando.stop.shown, true, 'a notice has no Detener, so the header keeps its own');
+  const p = panel(error);
+  p.tap('openMore');
+  assert.equal(p.view.sheet.stop.shown, false, 'the sheet shows the problem block with Detener, not a second one');
+  const q = panel(playing);
+  q.tap('openMore');
+  assert.equal(q.view.sheet.stop.shown, true);
+});
+
 test('waiting has shape: a spinner in the key, the TV by name and Cancelar, which is stop', () => {
   for (const phase of ['preparing', 'buffering', 'loading']) {
     const p = panel({...playing, phase, pending: true, message: null});

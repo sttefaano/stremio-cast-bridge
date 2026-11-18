@@ -340,6 +340,14 @@ test('the board glyph is painted from the view, so rewording the state text cann
   assert.equal(s.$('board-state').getAttribute('data-glyph'), '');
 });
 
+test('the error scenario shows Detener once: the header hides while the problem block offers it', async () => {
+  const s = await shell({...playing, phase: 'error', can_change_device: false, message: 'Falló'});
+  const stops = () => ['stop', 'problem-action', 'more-stop'].filter(id => visible(s.$(id)) && s.$(id).getAttribute('data-act') === 'stop');
+  assert.deepEqual(stops(), ['problem-action']);
+  await s.poll(playing);
+  assert.deepEqual(stops(), ['stop']);
+});
+
 test('the plan, the problem block and the Stremio block move to where the view puts them', async () => {
   const s = await shell({...playing, catalogues: {...base.catalogues, a: {state: 'ready', catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1})}},
     active_catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1}), action_error: 'Falló algo', action_error_revision: 1});

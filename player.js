@@ -896,6 +896,7 @@ const Panel = (() => {
     if (u.stoppedNotice) return {kind: 'stopped', title: `Película detenida en ${u.lastDeviceLabel || 'la TV'}`, body: '', action: {act: 'dismissNotice', label: 'Cerrar', enabled: true}};
     return null;
   }
+  const problemOffersStop = m => problemOf(m)?.action?.act === 'stop';
   /** The server's action_error, unless dismissed, absorbed by a caption apply that reported it, or an apply is still pending. */
   function backendError(m) {
     const s = m.link.status, id = errorIdentity(s), e = m.ui.errors;
@@ -1166,7 +1167,7 @@ const Panel = (() => {
    * @property {null|{text:string,detail:string,cancel:Ctl}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
    * @property {Ctl&{percent:number|null,text:string}} volume @property {Ctl&{pressed:boolean,label:string}} mute
    * @property {Ctl&{label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
-   * @property {Ctl} more @property {Ctl} change @property {Ctl} stop
+   * @property {Ctl} more @property {Ctl} change @property {Ctl&{shown:boolean}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
    */
   function viewMando(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
@@ -1196,7 +1197,7 @@ const Panel = (() => {
         enabled: c.online && !c.foreign && hasCaptions, unapplied: capDirty(m),
         label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
       },
-      more: {enabled: c.owned}, change: {enabled: c.owned && !c.foreign && c.online}, stop: {enabled: c.stop},
+      more: {enabled: c.owned}, change: {enabled: c.owned && !c.foreign && c.online}, stop: {enabled: c.stop, shown: !problemOffersStop(m)},
     };
   }
 
@@ -1225,7 +1226,7 @@ const Panel = (() => {
       stremio: viewStremio(m, 'remote'),
     };
   }
-  /** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl}} MoreSheetView */
+  /** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl&{shown:boolean}}} MoreSheetView */
   function viewMoreSheet(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
     return {
@@ -1235,7 +1236,7 @@ const Panel = (() => {
         tv: deviceLabel(sel), host: sel?.host || '', file: s.sources.find(x => x.id === s.source_id)?.filename || 'Nombre no disponible',
         prepared: b ? `De ${formatTime(b.start)} a ${formatTime(b.end)}` : 'Sin datos todavía',
       },
-      stop: {enabled: c.stop},
+      stop: {enabled: c.stop, shown: !problemOffersStop(m)},
     };
   }
   function viewSheet(m) {
@@ -1554,7 +1555,7 @@ function paintMando(doc, v) {
   ctl(chip, m.chip); attr(chip, 'data-unapplied', m.chip.unapplied);
   put(byId(doc, 'chip-kind'), 'textContent', m.chip.unapplied ? 'Sin aplicar' : 'Subtítulos');
   put(byId(doc, 'chip-value'), 'textContent', m.chip.label);
-  ctl(byId(doc, 'open-more'), m.more); ctl(byId(doc, 'open-change'), m.change); ctl(byId(doc, 'stop'), m.stop);
+  ctl(byId(doc, 'open-more'), m.more); ctl(byId(doc, 'open-change'), m.change); ctl(byId(doc, 'stop'), m.stop); put(byId(doc, 'stop'), 'hidden', !m.stop.shown);
 }
 
 function paintSubsSheet(doc, s) {
@@ -1582,7 +1583,7 @@ function paintMoreSheet(doc, s) {
   put(byId(doc, 'detail-host'), 'textContent', s.details.host);
   put(byId(doc, 'detail-file'), 'textContent', s.details.file);
   put(byId(doc, 'detail-prepared'), 'textContent', s.details.prepared);
-  ctl(byId(doc, 'more-stop'), s.stop);
+  ctl(byId(doc, 'more-stop'), s.stop); put(byId(doc, 'more-stop'), 'hidden', !s.stop.shown);
 }
 
 /** Open or close a native dialog to match the view. Returns true when it closed. */
