@@ -224,6 +224,7 @@ const Panel = (() => {
   /** Everything that waits for fresh server truth, in dependency order. */
   function advanceOnStatus(m, fx) {
     const l = m.link;
+    remoteSync(m);
     uiObserveError(m);
     planAdoptSnapshot(m);
     if (l.command?.stage === 'confirming' && l.appliedSeq > l.command.afterSeq) {
@@ -232,6 +233,9 @@ const Panel = (() => {
       onCommandDone(m, fx, done);
     }
     startAdvance(m, fx);
+    capAdvance(m, fx);
+    stopAdvance(m, fx);
+    seekOnStatus(m);
   }
   function linkOnCommandReply(m, fx, msg) {
     const c = m.link.command;
@@ -250,6 +254,9 @@ const Panel = (() => {
   function onCommandDone(m, fx, c) {
     void fx;
     if (c.owner === 'start') planOnCommandDone(m, c);
+    else if (c.owner === 'seek') seekOnCommandDone(m, c);
+    else if (c.owner === 'captions') capOnCommandDone(m, c);
+    else if (c.owner === 'volume') m.remote.volumePreview = null;
   }
 
   // ───────── plan: movie, catalogue, subtitle decision, Start
@@ -599,12 +606,220 @@ const Panel = (() => {
     }
   }
 
+  // ───────── remote: seek, volume, captions, stop
+  /** Drafts and flows belong to one playback identity. Runs before any flow advances, so none acts on a playback it was not made for. */
+  function remoteSync(m) {
+    const key = playbackKey(m.link.status);
+    if (key === m.remote.key) return;
+    m.remote = freshRemote(key);
+    if (m.ui.sheet === 'subs') m.ui.sheet = null;
+  }
+  const durationOf = s => finite(s?.duration) && s.duration > 0 ? s.duration : null;
+
+  /** Position on the line while dragging; the real elapsed time stays frozen until release. */
+  function seekDrag(m, pos) {
+    const d = durationOf(m.link.status);
+    if (caps(m).transport && d && finite(pos)) m.remote.seek = {s: 'dragging', preview: clamp(pos, 0, d)};
+  }
+  /** Pointer cancel or Escape while dragging: back to idle, nothing sent. */
+  function seekAbandon(m) {
+    if (m.remote.seek.s === 'dragging') m.remote.seek = {s: 'idle'};
+  }
+  function seekSend(m, fx, body, target, msg) {
+    const ticket = linkCommand(m, fx, 'seek', body, {owner: 'seek', from: msg?.from, n: msg?.n});
+    m.remote.seek = ticket ? {s: 'sent', target, ticket, sawBusy: false} : {s: 'idle'};
+  }
+  /** Release commits: one seek {position}. */
+  function seekDrop(m, fx, pos, msg) {
+    const d = durationOf(m.link.status);
+    if (!caps(m).transport || !d) return;
+    if (!finite(pos) || pos < 0 || pos > d) {
+      m.remote.seek = {s: 'idle'};
+      m.ui.errors.local = 'El tiempo está fuera de la duración de la película.';
+      return;
+    }
+    seekSend(m, fx, {position: pos}, pos, msg);
+  }
+  /** ±30 taps accumulate, clamped so the badge and the sent delta never pass [0, duration]; one seek {delta} after SKIP_MS. */
+  function seekSkip(m, fx, delta, msg) {
+    const s = m.link.status, d = durationOf(s), k = m.remote.seek;
+    if (!caps(m).transport || !d || !finite(s.absolute_time) || !finite(delta)) return;
+    const sum = (k.s === 'skipping' ? k.delta : 0) + delta, ticket = ticketOf(m);
+    m.remote.seek = {s: 'skipping', delta: clamp(sum, -s.absolute_time, d - s.absolute_time), ticket, from: msg?.from ?? k.from, n: msg?.n ?? k.n};
+    fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
+  }
+  function seekOnTimer(m, fx, msg) {
+    const k = m.remote.seek, s = m.link.status;
+    if (k.s !== 'skipping' || k.ticket !== msg.ticket) return;
+    if (k.delta === 0) m.remote.seek = {s: 'idle'};
+    else if (caps(m).transport) seekSend(m, fx, {delta: k.delta}, clamp(s.absolute_time + k.delta, 0, durationOf(s) ?? Infinity), k);
+    else if (m.link.command) {
+      const ticket = ticketOf(m);
+      m.remote.seek = {...k, ticket};
+      fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
+    } else m.remote.seek = {s: 'idle'};
+  }
+  /** A sent seek stays on screen until the TV is usable and either was seen busy or reached the target (policy 14). */
+  function seekOnStatus(m) {
+    const k = m.remote.seek, s = m.link.status, c = caps(m);
+    if (k.s === 'dragging' && !c.transport) m.remote.seek = {s: 'idle'};
+    if (k.s !== 'sent') return;
+    if (s.pending || s.command_pending) k.sawBusy = true;
+    if (c.transport && (k.sawBusy || finite(s.absolute_time) && Math.abs(s.absolute_time - k.target) < SETTLE_S)) m.remote.seek = {s: 'idle'};
+  }
+  /** A rejected seek clears only its own target. */
+  function seekOnCommandDone(m, c) {
+    const k = m.remote.seek;
+    if (!c.ok && k.s === 'sent' && k.ticket === c.ticket) m.remote.seek = {s: 'idle'};
+  }
+  /** Exact time applies directly; invalid input stays in the field with a reason. */
+  function seekGoto(m, fx, text, msg) {
+    const d = durationOf(m.link.status), pos = parseTime(String(text ?? ''));
+    if (!caps(m).transport || !d) return;
+    if (pos === null || pos > d) { m.ui.exact = {text: String(text ?? ''), error: `Usá m:ss o h:mm:ss, hasta ${formatTime(d)}.`}; return; }
+    m.ui.sheet = null;
+    m.ui.exact = {text: '', error: ''};
+    seekSend(m, fx, {position: pos}, pos, msg);
+  }
+
+  function volumePreview(m, value) {
+    if (caps(m).transport && finite(m.link.status.volume) && finite(value)) m.remote.volumePreview = clamp(Math.round(value), 0, 100);
+  }
+  function volumeSet(m, fx, value, msg) {
+    const ok = caps(m).transport && finite(m.link.status.volume) && finite(value);
+    if (ok) linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, {owner: 'volume', from: msg.from, n: msg.n});
+    if (!ok || !m.link.command) m.remote.volumePreview = null;
+  }
+  function muteToggle(m, fx, msg) {
+    const s = m.link.status;
+    if (caps(m).transport && typeof s.muted === 'boolean') linkCommand(m, fx, 'mute', {muted: !s.muted}, {from: msg.from, n: msg.n});
+  }
+  function toggle(m, fx, msg) {
+    if (!caps(m).transport) return;
+    linkCommand(m, fx, m.link.status.phase === 'playing' ? 'pause' : 'resume', {}, {from: msg.from, n: msg.n});
+  }
+
+  // captions: the draft is edited locally; Aplicar and the visibility toggle share one pipeline that waits for readback
+  const MAX_READS = 6;
+  const capSame = (a, b) => a.subtitleId === b.subtitleId && a.delayMs === b.delayMs;
+  /** Derived, never stored: the draft differs from what the TV has. */
+  const capDirty = m => !!m.remote.captions.draft && !capSame(m.remote.captions.draft, capServer(m.link.status));
+  /** capTrack / capNudge / capReset. A draft equal to the server's is no draft. */
+  function capEdit(m, kind, arg) {
+    if (!caps(m).captions) return;
+    const cur = capDraft(m);
+    let next;
+    if (kind === 'track') {
+      const id = arg === '' || arg == null ? null : String(arg);
+      if (id !== null && !entryOf(remoteCatalogue(m), id)?.supported) return;
+      next = {subtitleId: id, delayMs: id === null ? 0 : cur.delayMs};
+    } else if (!cur.subtitleId || (kind === 'nudge' && !finite(arg))) return;
+    else next = {subtitleId: cur.subtitleId, delayMs: kind === 'reset' ? 0 : clamp(Math.round((cur.delayMs + arg) / 100) * 100, -30000, 30000)};
+    m.remote.captions.draft = capSame(next, capServer(m.link.status)) ? null : next;
+  }
+  function capBegin(m, fx, kind, want, msg) {
+    const s = m.link.status;
+    m.remote.captions.apply = {
+      kind, stage: 'verifying', want, catalogueId: s.active_catalogue.id, afterSeq: linkRequestPoll(m, fx), ticket: null,
+      prevVisible: typeof s.subtitles_enabled === 'boolean' ? s.subtitles_enabled : null, errorAtStart: errorIdentity(s), reads: 0, from: msg?.from, n: msg?.n,
+    };
+  }
+  /** Aplicar sends the draft. A new track shows itself; the same track keeps the visibility the TV has. */
+  function capApply(m, fx, msg) {
+    if (!caps(m).captions || !capDirty(m)) return;
+    const d = m.remote.captions.draft, srv = capServer(m.link.status);
+    capBegin(m, fx, 'plan', {subtitleId: d.subtitleId, delayMs: d.subtitleId ? d.delayMs : 0,
+      enabled: d.subtitleId === null ? false : d.subtitleId !== srv.subtitleId ? true : srv.enabled}, msg);
+  }
+  /** The toggle sends the SERVER's track and delay with the new visibility, so an unapplied draft never rides along. */
+  function capVisible(m, fx, on, msg) {
+    const srv = capServer(m.link.status);
+    if (!caps(m).captions || !srv.subtitleId || srv.enabled === !!on) return;
+    capBegin(m, fx, 'visibility', {...srv, enabled: !!on}, msg);
+  }
+  function capDiscard(m) {
+    m.remote.captions.draft = null;
+    if (m.ui.sheet === 'subs') uiDismiss(m);
+  }
+  function capFail(m, message) {
+    const a = m.remote.captions.apply, s = m.link.status;
+    const partial = !!a && typeof a.prevVisible === 'boolean' && s?.subtitles_enabled !== a.prevVisible && s?.subtitles_enabled === a.want.enabled && s?.subtitle_delay_ms !== a.want.delayMs;
+    m.remote.captions.apply = null;
+    m.ui.errors.local = `${partial ? 'La visibilidad ya cambió; la sincronía sigue sin confirmar. ' : ''}${message}${a?.kind === 'plan' ? ' Tu ajuste sigue en borrador.' : ''}`;
+  }
+  /** The server holds exactly what was asked for, by every field it reports. */
+  function capSettled(s, a) {
+    const srv = capServer(s), w = a.want, choice = s.subtitle_choice;
+    return srv.subtitleId === w.subtitleId && srv.enabled === w.enabled && srv.delayMs === w.delayMs
+      && (w.subtitleId === null || choice?.catalogue_id === a.catalogueId)
+      && (!finite(s.subtitle_delay_ms) || s.subtitle_delay_ms === w.delayMs)
+      && (typeof s.subtitles_enabled !== 'boolean' || s.subtitles_enabled === w.enabled);
+  }
+  /** Runs on every applied status (policy 13). A playback identity change dropped the apply already, in reconcile. */
+  function capAdvance(m, fx) {
+    const a = m.remote.captions.apply, l = m.link, s = l.status, c = caps(m);
+    if (!a) return;
+    if (!c.online || c.foreign || s.phase === 'error') return capFail(m, 'Se interrumpió el cambio. Revisá el estado de la TV.');
+    if (a.stage === 'verifying') {
+      if (l.appliedSeq <= a.afterSeq) return;
+      if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
+      if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
+      const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, {owner: 'captions', from: a.from, n: a.n});
+      if (ticket) { a.stage = 'posting'; a.ticket = ticket; } else m.remote.captions.apply = null;
+    } else if (a.stage === 'reading') {
+      if (c.busy) return;
+      const id = errorIdentity(s);
+      if (id && id !== a.errorAtStart) { m.ui.errors.absorbed = id; return capFail(m, s.action_error); }
+      if (capSettled(s, a)) {
+        m.remote.captions.apply = null;
+        if (a.kind === 'plan' && m.remote.captions.draft && capSame(m.remote.captions.draft, a.want)) m.remote.captions.draft = null;
+        if (a.kind === 'plan' && m.ui.sheet === 'subs') m.ui.sheet = null;
+      } else if (++a.reads >= MAX_READS) capFail(m, 'No se pudo confirmar el cambio en la TV. Revisá el estado y reintentá.');
+    }
+  }
+  function capOnCommandDone(m, c) {
+    const a = m.remote.captions.apply;
+    if (a?.ticket !== c.ticket) return;
+    if (c.ok) a.stage = 'reading'; else capFail(m, m.ui.errors.local || 'No se pudo aplicar el cambio.');
+  }
+
+  /** stop intent (policy 8). Confirm only while playing or paused; anything else stops at once and interrupts. */
+  function remoteStop(m, fx, msg) {
+    const c = caps(m), s = m.link.status;
+    if (!c.stop) return;
+    if (c.stopNeedsConfirm) m.ui.confirm = {kind: 'stop', snap: {deviceId: s.selected_device?.id, deviceRevision: s.device_revision, playbackId: s.playback_id ?? null}};
+    else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
+  }
+  function remoteStopNow(m, fx, body, msg) {
+    const u = m.ui;
+    planTouch(m);
+    m.remote.captions.apply = null;
+    m.remote.seek = {s: 'idle'};
+    m.remote.stop = null;
+    u.confirm = null;
+    u.sheet = null;
+    linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n});
+  }
+  /** After a poll issued since the click: same TV, same playback and no command since, else the consent is void. */
+  function stopAdvance(m, fx) {
+    const st = m.remote.stop, l = m.link, s = l.status;
+    if (!st || l.appliedSeq <= st.afterSeq) return;
+    const k = st.snap;
+    m.remote.stop = null;
+    if (st.generation !== l.generation) return;
+    if (s?.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision || (s.playback_id ?? null) !== k.playbackId) {
+      m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
+      return;
+    }
+    if (caps(m).stop) remoteStopNow(m, fx, k.playbackId ? {playback_id: k.playbackId} : {});
+  }
+
   // ───────── ui: layers, errors
   /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
   function uiOpen(m, sheet) {
     const s = m.link.status || NO_STATUS, c = caps(m);
     if (m.ui.confirm) return;
-    if (sheet === 'subs' && !(s.playback_id && remoteCatalogue(m))) return;
+    if (sheet === 'subs' && !(s.playback_id && remoteCatalogue(m) && c.online && !c.foreign)) return;
     if (sheet === 'more' && !c.owned) return;
     if (sheet === 'change') {
       if (!c.owned || c.foreign || !c.online) return;
@@ -630,6 +845,11 @@ const Panel = (() => {
       const k = c.snap;
       if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;
       p.start = {stage: 'verifying', snap: k, consent: c.consent, afterSeq: linkRequestPoll(m, fx)};
+    } else {
+      planTouch(m);
+      m.remote.captions.apply = null;
+      m.remote.seek = {s: 'idle'};
+      m.remote.stop = {snap: c.snap, afterSeq: linkRequestPoll(m, fx), generation: m.link.generation};
     }
   }
   /** A new backend error identity is the latest word: it replaces a local message and ends a seek wait (policy 14, 15). */
@@ -643,7 +863,7 @@ const Panel = (() => {
   /** Layers can't outlive the permission that opened them. */
   function uiValidLayers(m) {
     const u = m.ui, s = m.link.status || NO_STATUS, c = caps(m);
-    if (u.sheet === 'subs' && !(s.playback_id && remoteCatalogue(m))) u.sheet = null;
+    if (u.sheet === 'subs' && !(s.playback_id && remoteCatalogue(m)) || u.sheet === 'subs' && c.foreign) u.sheet = null;
     if ((u.sheet === 'more' || u.sheet === 'change') && !c.owned) u.sheet = null;
     if (u.sheet === 'change' && c.foreign) { u.sheet = null; planReset(m, null); }
     if (u.confirm?.kind === 'replace' && c.foreign) u.confirm = null;
@@ -698,14 +918,12 @@ const Panel = (() => {
     if (msg.name === 'poll' && msg.ticket === l.pollTimer) {
       l.pollTimer = null;
       if (!l.polling) linkIssuePoll(m, fx);
-    }
+    } else if (msg.name === 'skip') seekOnTimer(m, fx, msg);
   }
   /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
   function reconcile(m, fx) {
     const l = m.link, s = l.status, u = m.ui, c = caps(m);
-    // 1. remote drafts belong to one playback identity
-    const key = playbackKey(s);
-    if (key !== m.remote.key) m.remote = freshRemote(key);
+    remoteSync(m);
     // 2. remember what we owned, to label the stopped notice and re-seed Preparar
     if (s && c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
     uiValidLayers(m);
@@ -865,27 +1083,113 @@ const Panel = (() => {
     return {kind: 'stop', title: '¿Detener la película en la TV?', body: `Se corta en ${deviceLabel(s.selected_device) || 'la TV'} y volvés a elegir.`, accept: 'Detener', cancel: 'Seguir viendo'};
   }
 
+  const BOARD_STATE = {playing: 'REPRODUCIENDO', paused: 'EN PAUSA', preparing: 'PREPARANDO', buffering: 'CARGANDO', loading: 'CARGANDO',
+    disconnected: 'SIN SEÑAL', receiver_changed: 'OTRO CONTENIDO', error: 'CON ERROR'};
+  const WAITING_COPY = {preparing: 'Preparando la película para la TV…', buffering: 'Preparando más contenido para la TV…', loading: 'Cargando la película en la TV…'};
+
+  /** Where the flap clock reads: the last status plus the time since, capped so a stalled poll never invents a position. */
+  function shownPosition(m) {
+    const s = m.link.status || NO_STATUS;
+    if (!finite(s.absolute_time)) return null;
+    const run = s.phase === 'playing' && m.link.online ? clamp((m.now - m.link.statusAt) / 1000, 0, CLOCK_CAP_S) : 0;
+    return Math.min(s.absolute_time + run, durationOf(s) ?? Infinity);
+  }
+  /** The prepared range the TV can play without waiting, clamped to the movie. */
+  function bufferedRange(s) {
+    const d = durationOf(s);
+    if (!d || !(LIVE.includes(s.phase) || WAITING.includes(s.phase)) || !finite(s.buffered_start) || !finite(s.buffered_end)) return null;
+    const start = clamp(s.buffered_start, 0, d);
+    return {start, end: clamp(s.buffered_end, start, d)};
+  }
+  const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(delta))} s`;
+
+  function viewMando(m) {
+    const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
+    const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
+    const chosen = s.subtitle_choice, hasCaptions = !!s.playback_id && !!remoteCatalogue(m);
+    const volume = m.remote.volumePreview ?? (finite(s.volume) ? Math.round(s.volume * 100) : null);
+    const spinner = waiting || !!m.link.command || !!s.command_pending;
+    return {
+      board: {
+        title: s.title || 'Tu película en la TV', clock: formatTime(pos), room: deviceLabel(sel) || 'Sin TV',
+        state: !c.online ? 'SIN CONFIRMAR' : BOARD_STATE[s.phase] ?? 'SIN CONFIRMAR',
+      },
+      track: {
+        enabled: c.transport && !!d, max: d ?? 0, value: pos ?? 0, elapsed: formatTime(pos), total: formatTime(d),
+        preview: k.s === 'dragging' ? `→ ${formatTime(k.preview)}` : null, previewAt: k.s === 'dragging' ? k.preview : null,
+        target: k.s === 'sent' ? `→ ${formatTime(k.target)}` : null, buffered: bufferedRange(s),
+      },
+      back: {enabled: c.transport && !!d}, forward: {enabled: c.transport && !!d},
+      badge: k.s === 'skipping' && k.delta !== 0 ? signedSkip(k.delta) : null,
+      toggle: {enabled: c.transport, icon: spinner ? 'spinner' : s.phase === 'playing' ? 'pause' : 'play',
+        label: spinner ? 'Esperando' : s.phase === 'playing' ? 'Pausar' : 'Continuar'},
+      waiting: waiting ? {text: `Esperando a ${deviceLabel(sel) || 'la TV'}`, detail: s.message || WAITING_COPY[s.phase], cancel: {enabled: c.stop}} : null,
+      volume: {enabled: c.transport && finite(s.volume), percent: volume, text: volume === null ? '—' : `${volume}%`},
+      mute: {enabled: c.transport && typeof s.muted === 'boolean', pressed: s.muted === true, label: s.muted ? 'Activar sonido' : 'Silenciar'},
+      chip: {
+        enabled: c.online && !c.foreign && hasCaptions, unapplied: capDirty(m),
+        label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
+      },
+      more: {enabled: c.owned}, change: {enabled: c.owned && !c.foreign && c.online}, stop: {enabled: c.stop},
+    };
+  }
+
+  /**
+   * @typedef {object} SubsSheetView  "Enmienda al pase"
+   * @property {'subs'} kind @property {Row[]} tracks  'Sin subtítulos' (id '') then the supported tracks
+   * @property {Ctl&{checked:boolean}} visible  applies at once, through the same pipeline as Aplicar
+   * @property {{text:string,meaning:string}} delay @property {Ctl} steps
+   * @property {Ctl&{label:string,pending:boolean}} apply @property {Ctl} discard @property {boolean} unapplied
+   * @property {string} onTv @property {string} note @property {StremioView|null} stremio
+   */
+  function viewSubsSheet(m) {
+    const s = m.link.status || NO_STATUS, c = caps(m), srv = capServer(s), d = capDraft(m), a = m.remote.captions.apply, cat = remoteCatalogue(m);
+    const row = (id, label) => ({id, label, selected: d.subtitleId === (id || null), enabled: c.captions});
+    const dirty = capDirty(m);
+    return {
+      kind: 'subs',
+      tracks: [row('', 'Sin subtítulos'), ...(cat?.entries || []).filter(e => e.supported === true).map(e => row(e.id, [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ')))],
+      visible: {enabled: c.captions && !!srv.subtitleId, checked: a?.kind === 'visibility' ? a.want.enabled : srv.enabled},
+      delay: {text: signedSeconds(d.delayMs), meaning: d.subtitleId ? delayMeaning(d.delayMs) : 'Sin subtítulos no hay nada que sincronizar'},
+      steps: {enabled: c.captions && !!d.subtitleId},
+      apply: {enabled: c.captions && dirty, pending: a?.kind === 'plan', label: a?.kind === 'plan' ? 'Aplicando…' : 'Aplicar'},
+      discard: {enabled: dirty}, unapplied: dirty,
+      onTv: !srv.subtitleId ? 'En la TV: sin subtítulos.' : `En la TV: ${srv.enabled ? 'visibles' : 'ocultos'} · ${signedSeconds(srv.delayMs)}.`,
+      note: 'Cambiar la pista o la sincronía recarga la película en la TV unos segundos y conserva la posición y la pausa. Mostrar u ocultar no recarga.',
+      stremio: viewStremio(m, 'remote'),
+    };
+  }
+  /** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl}} MoreSheetView */
+  function viewMoreSheet(m) {
+    const s = m.link.status || NO_STATUS, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
+    return {
+      kind: 'more',
+      exact: {enabled: c.transport && !!durationOf(s), text: m.ui.exact.text, error: m.ui.exact.error},
+      details: {
+        tv: deviceLabel(sel), host: sel?.host || '', file: s.sources.find(x => x.id === s.source_id)?.filename || 'Nombre no disponible',
+        prepared: b ? `De ${formatTime(b.start)} a ${formatTime(b.end)}` : 'Sin datos todavía',
+      },
+      stop: {enabled: c.stop},
+    };
+  }
+  function viewSheet(m) {
+    const k = m.ui.sheet;
+    return k === 'subs' ? viewSubsSheet(m) : k === 'more' ? viewMoreSheet(m) : k === 'change' ? {kind: 'change'} : null;
+  }
+
   /**
    * @typedef {object} View  Everything the page shows, as plain data. Completed section by section below.
    * @property {'preparar'|'mando'} mode @property {PlanView} plan @property {DestinationView} destination @property {ConfirmView|null} confirm
    */
   function view(m) {
-    const s = m.link.status || NO_STATUS;
+    const mode = modeOf(m);
     return {
-      mode: modeOf(m),
+      mode,
       plan: viewPlan(m), destination: viewDestination(m), confirm: viewConfirm(m),
-      mando: {board: {state: s.phase === 'playing' ? 'REPRODUCIENDO' : s.phase === 'paused' ? 'EN PAUSA' : ''}, toggle: {enabled: caps(m).transport}},
+      mando: mode === 'mando' ? viewMando(m) : null, sheet: viewSheet(m),
     };
   }
 
-  function toggle(m, fx, msg) {
-    if (!caps(m).transport) return;
-    linkCommand(m, fx, m.link.status.phase === 'playing' ? 'pause' : 'resume', {}, {from: msg.from, n: msg.n});
-  }
-  function stop(m, fx, msg) {
-    if (!caps(m).stop) return;
-    linkCommand(m, fx, 'stop', {}, {from: msg.from, n: msg.n});
-  }
   /**
    * THE list of user messages and their handlers: (model, fx, msg) -> void. `arg` arrives as the shell read it (string or
    * number); every handler re-checks caps() before it does anything, so a stale click, a key and a test hit one guard.
@@ -907,7 +1211,22 @@ const Panel = (() => {
     stremioAlt: (m, fx, g) => addonAlternative(m, fx, stremioScope(m), Number(g.arg)),
     stremioSearch: (m, fx, g) => addonSearch(m, fx, stremioScope(m), g.arg),
     start: (m, fx) => planStart(m, fx),
-    toggle, stop,
+    toggle, stop: remoteStop,
+    skip: (m, fx, g) => seekSkip(m, fx, Number(g.arg), g),
+    dragSeek: (m, fx, g) => seekDrag(m, Number(g.arg)),
+    dropSeek: (m, fx, g) => seekDrop(m, fx, Number(g.arg), g),
+    seekAbandon: m => seekAbandon(m),
+    volumePreview: (m, fx, g) => volumePreview(m, Number(g.arg)),
+    volume: (m, fx, g) => volumeSet(m, fx, Number(g.arg), g),
+    mute: (m, fx, g) => muteToggle(m, fx, g),
+    capTrack: (m, fx, g) => capEdit(m, 'track', g.arg),
+    capNudge: (m, fx, g) => { if (!m.ui.sheet) uiOpen(m, 'subs'); capEdit(m, 'nudge', Number(g.arg)); },
+    capReset: m => capEdit(m, 'reset'),
+    capVisible: (m, fx, g) => capVisible(m, fx, g.arg === true || g.arg === 'true', g),
+    capApply: (m, fx, g) => capApply(m, fx, g),
+    capDiscard: m => capDiscard(m),
+    exactInput: (m, fx, g) => { m.ui.exact = {text: String(g.arg ?? ''), error: ''}; },
+    gotoTime: (m, fx, g) => seekGoto(m, fx, g.arg, g),
     openSubs: m => uiOpen(m, 'subs'),
     openMore: m => uiOpen(m, 'more'),
     openChange: m => uiOpen(m, 'change'),

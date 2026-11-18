@@ -33,7 +33,8 @@ function panel(initial, boot = {lastDeviceId: null}) {
     posted: action => pending.find(e => e.fx === 'post' && e.action === action),
     posts: action => pending.filter(e => e.fx === 'post' && (!action || e.action === action)),
     reply: (f, r = {ok: true, body: {accepted: true}}) => { pending.splice(pending.indexOf(f), 1); send({t: 'reply', ticket: f.ticket, ...r}); },
-    fire: name => { const f = take(e => e.fx === 'timer' && e.name === name); send({t: 'timer', name, ticket: f.ticket}); },
+    // the newest timer of a name: an older one was superseded and the core would ignore it anyway
+    fire: name => { const i = pending.findLastIndex(e => e.fx === 'timer' && e.name === name); assert.notEqual(i, -1, 'expected timer'); const [f] = pending.splice(i, 1); send({t: 'timer', name, ticket: f.ticket}); },
     file: bytes => { const f = take(e => e.fx === 'read'); send({t: 'file', ticket: f.ticket, bytes}); },
     effects: kind => pending.filter(e => e.fx === kind),
     // command round trip: HTTP reply, then the confirming poll carries the resulting status
@@ -55,9 +56,9 @@ const playing = {...destination, phase: 'playing', title: 'Alpha', source_id: 'a
   duration: 500, absolute_time: 50, volume: .3, muted: false, subtitle_delay_ms: 0, subtitles_enabled: true};
 function fixture(s) {
   const catalogues = Object.fromEntries((s.sources || []).map(source => [source.id, {state: 'ready', catalogue: catalogue(source.id, s.addons?.[source.id], s.extra?.[source.id])}]));
-  const active = ['playing', 'paused', 'preparing', 'buffering', 'loading'].includes(s.phase);
+  const active = ['playing', 'paused', 'preparing', 'buffering', 'loading', 'receiver_changed', 'disconnected'].includes(s.phase);
   const own = s.source_id || 'a';
-  return {...destination, source_discovery: 'ready', catalogues, ...(active ? {
+  return {...destination, source_discovery: 'ready', catalogues, pending: ['preparing', 'buffering', 'loading', 'receiver_changed', 'disconnected'].includes(s.phase), ...(active ? {
     playback_id: 'play-a', active_catalogue: catalogue(own, s.addons?.[own], s.extra?.[own]),
     subtitle_choice: {catalogue_id: 'cat-' + own, subtitle_id: 'text-' + own, enabled: true, delay_ms: s.subtitle_delay_ms ?? 0, label: '日本語', language: 'jpn'}} : {}), ...s};
 }
@@ -629,4 +630,578 @@ test('a movie that leaves the list ends the plan and the page falls back to choo
   p.status({...idle, sources: [{id: 'b', title: 'Beta'}]});
   assert.equal(p.view.plan.sources.some(r => r.selected), false);
   assert.deepEqual(p.view.plan.stub.missing, ['PELÍCULA']);
+});
+
+// ───────── remote: seek, volume, captions, stop
+
+const paused = {...playing, phase: 'paused'};
+const seekTo = (p, pos) => { p.tap('dragSeek', pos); p.tap('dropSeek', pos); };
+
+test('seek commits on release: dragging previews and sends nothing, the elapsed time stays real', () => {
+  const p = panel(playing);
+  p.tap('dragSeek', 300);
+  assert.equal(p.posts().length, 0);
+  assert.deepEqual([p.view.mando.track.preview, p.view.mando.track.elapsed, p.view.mando.track.previewAt], ['→ 5:00', '0:50', 300]);
+  p.tap('dropSeek', 300);
+  assert.deepEqual(p.posted('seek').body, {device_id: 'tv-a', device_revision: 1, position: 300});
+  assert.equal(p.posts().length, 1, 'one seek per release');
+  assert.equal(p.view.mando.track.preview, null);
+  assert.equal(p.view.mando.track.target, '→ 5:00');
+});
+
+test('a release outside the movie sends nothing; a seek while busy or foreign is refused', () => {
+  const p = panel(playing);
+  p.tap('dropSeek', 501);
+  p.tap('dropSeek', -1);
+  assert.equal(p.posts().length, 0);
+  for (const status of [{...playing, command_pending: true}, {...playing, phase: 'loading', pending: true}, {...playing, phase: 'receiver_changed'}]) {
+    const q = panel(status);
+    q.tap('dragSeek', 100);
+    q.tap('dropSeek', 100);
+    q.tap('skip', 30);
+    assert.equal(q.posts().length + q.effects('timer').filter(t => t.name === 'skip').length, 0, status.phase);
+    assert.equal(q.view.mando.track.enabled, false);
+  }
+});
+
+test('Escape or pointer cancel while dragging goes back to idle and sends nothing', () => {
+  const p = panel(playing);
+  p.tap('dragSeek', 200);
+  p.tap('seekAbandon');
+  assert.equal(p.view.mando.track.preview, null);
+  assert.equal(p.posts().length, 0);
+  p.tap('dropSeek', 200);
+  p.tap('seekAbandon');
+  assert.ok(p.view.mando.track.target, 'abandon after a release does not forget the sent seek');
+});
+
+test('the target stays until the TV is usable and either was seen busy or is within 2 s', () => {
+  const p = panel(playing);
+  seekTo(p, 300);
+  p.settle('seek', {...playing, absolute_time: 50});
+  assert.equal(p.view.mando.track.target, '→ 5:00', 'still at the old place: keep the target');
+  p.fire('poll');
+  p.status({...playing, absolute_time: 50, pending: true});
+  p.fire('poll');
+  p.status({...playing, absolute_time: 52});
+  assert.equal(p.view.mando.track.target, null, 'it was busy and is usable again');
+  const q = panel(playing);
+  seekTo(q, 300);
+  q.settle('seek', {...playing, absolute_time: 299});
+  assert.equal(q.view.mando.track.target, null, 'within 2 s of the target');
+});
+
+test('a rejected seek clears only its own target; a worker failure arrives only as action_error', () => {
+  const p = panel(playing);
+  seekTo(p, 300);
+  p.settle('seek', {...playing, command_pending: true}, {ok: false, code: 'busy', message: 'La TV está ocupada.'});
+  assert.equal(p.view.mando.track.target, null, 'a 409 clears the fictional target');
+  const q = panel(playing);
+  seekTo(q, 300);
+  q.settle('seek', {...playing, absolute_time: 50}, {ok: true, body: {accepted: true}});
+  assert.ok(q.view.mando.track.target);
+  q.fire('poll');
+  q.status({...playing, absolute_time: 50, action_error: 'La TV no pudo saltar.', action_error_revision: 4});
+  assert.equal(q.view.mando.track.target, null, 'the worker failure reached the page as action_error and ended the wait');
+});
+
+test('±30 taps accumulate into one seek delta after a quiet 600 ms and show their sum', () => {
+  const p = panel(playing);
+  p.tap('skip', 30); p.tap('skip', 30); p.tap('skip', 30);
+  assert.equal(p.view.mando.badge, '+90 s');
+  assert.equal(p.posts().length, 0);
+  const timers = p.effects('timer').filter(t => t.name === 'skip');
+  assert.equal(timers.length, 3);
+  assert.ok(timers.every(t => t.ms === 600));
+  p.send({t: 'timer', name: 'skip', ticket: timers[0].ticket});
+  assert.equal(p.posts().length, 0, 'an older timer is stale');
+  p.send({t: 'timer', name: 'skip', ticket: timers[2].ticket});
+  assert.deepEqual(p.posted('seek').body, {device_id: 'tv-a', device_revision: 1, delta: 90});
+  assert.equal(p.view.mando.badge, null);
+});
+
+test('the accumulated skip is clamped so neither the badge nor the delta passes the movie', () => {
+  const p = panel({...playing, absolute_time: 20});
+  p.tap('skip', -30);
+  assert.equal(p.view.mando.badge, '−20 s');
+  const q = panel({...playing, absolute_time: 490});
+  q.tap('skip', 30); q.tap('skip', 30);
+  assert.equal(q.view.mando.badge, '+10 s');
+  q.send({t: 'timer', name: 'skip', ticket: q.effects('timer').filter(t => t.name === 'skip').pop().ticket});
+  assert.equal(q.posted('seek').body.delta, 10);
+  const r = panel({...playing, absolute_time: 0});
+  r.tap('skip', -30);
+  assert.equal(r.view.mando.badge, null);
+  r.send({t: 'timer', name: 'skip', ticket: r.effects('timer').pop().ticket});
+  assert.equal(r.posts().length, 0, 'nothing to skip');
+});
+
+test('a skip timer that finds our own short command re-arms; a busy TV drops the skip silently', () => {
+  const p = panel(playing);
+  p.tap('skip', 30);
+  p.tap('mute');
+  const first = p.effects('timer').filter(t => t.name === 'skip')[0];
+  p.send({t: 'timer', name: 'skip', ticket: first.ticket});
+  assert.equal(p.posts('seek').length, 0);
+  const again = p.effects('timer').filter(t => t.name === 'skip').pop();
+  assert.notEqual(again.ticket, first.ticket);
+  p.reply(p.posted('mute'));
+  p.status({...playing, muted: true});
+  p.send({t: 'timer', name: 'skip', ticket: again.ticket});
+  assert.equal(p.posts('seek').length, 1);
+  const q = panel(playing);
+  q.tap('skip', 30);
+  q.fire('poll');
+  q.status({...playing, phase: 'buffering', pending: true});
+  q.send({t: 'timer', name: 'skip', ticket: q.effects('timer').filter(t => t.name === 'skip').pop().ticket});
+  assert.equal(q.posts().length, 0);
+  assert.equal(q.view.mando.badge, null);
+});
+
+test('exact time validates inline, sends nothing when invalid, and applies directly when valid', () => {
+  const p = panel(playing);
+  p.tap('openMore');
+  p.tap('gotoTime', '9:99');
+  assert.match(p.view.sheet.exact.error, /m:ss o h:mm:ss, hasta 8:20/);
+  p.tap('gotoTime', '10:00');
+  assert.equal(p.posts().length, 0, 'beyond the duration');
+  p.tap('exactInput', '1:05');
+  assert.equal(p.view.sheet.exact.error, '', 'typing clears the message');
+  p.tap('gotoTime', '1:05');
+  assert.equal(p.posted('seek').body.position, 65);
+  assert.equal(p.view.sheet, null, 'the sheet closes: there is no review step');
+});
+
+test('volume previews while dragging and sends one level on release; mute sends the opposite', () => {
+  const p = panel(playing);
+  p.tap('volumePreview', 80);
+  assert.equal(p.view.mando.volume.text, '80%');
+  assert.equal(p.posts().length, 0);
+  p.tap('volume', 80);
+  assert.deepEqual(p.posted('volume').body, {device_id: 'tv-a', device_revision: 1, level: 0.8});
+  assert.equal(p.view.mando.volume.percent, 80, 'the slider does not jump back before the confirming poll');
+  p.settle('volume', {...playing, volume: .8});
+  assert.equal(p.view.mando.volume.percent, 80);
+  p.tap('mute');
+  assert.deepEqual(p.posted('mute').body, {device_id: 'tv-a', device_revision: 1, muted: true});
+  assert.equal(panel({...playing, volume: null, muted: null}).view.mando.volume.enabled, false, 'volume is null until the TV reports it');
+});
+
+test('the clock interpolates while playing, capped 2 s past the last status; the guards use the raw status', () => {
+  const p = panel({...playing, absolute_time: 100});
+  p.send({t: 'timer', name: 'clock', ticket: 0, at: 1500});
+  assert.equal(p.view.mando.board.clock, '1:41', 'a second and a half after the status');
+  p.send({t: 'timer', name: 'clock', ticket: 0, at: 60000});
+  assert.equal(p.view.mando.board.clock, '1:42', 'a stalled poll never invents more than 2 s');
+  const q = panel({...paused, absolute_time: 100});
+  q.send({t: 'timer', name: 'clock', ticket: 0, at: 1000});
+  assert.equal(q.view.mando.board.clock, '1:40', 'paused does not tick');
+});
+
+// captions
+
+const subsOk = (id, delay, enabled = true, extra = {}) => ({...playing, subtitle_delay_ms: delay, subtitles_enabled: enabled, ...extra, subtitle_choice: {catalogue_id: 'cat-a', subtitle_id: id, enabled, delay_ms: delay, label: 'x', language: 'jpn'}});
+const extraTrack = [{id: 'text2-a', kind: 'embedded', label: 'English', language: 'eng', supported: true, reason: null}];
+const withTracks = {extra: {a: extraTrack}};
+
+test('the caption draft rounds to 0,1 s, clamps at ±30 s, resets and is dirty only while it differs', () => {
+  const p = panel({...playing, ...withTracks});
+  p.tap('openSubs');
+  assert.equal(p.view.sheet.unapplied, false);
+  p.tap('capNudge', 100); p.tap('capNudge', 100);
+  assert.deepEqual([p.view.sheet.delay.text, p.view.sheet.delay.meaning, p.view.sheet.unapplied, p.view.mando.chip.unapplied], ['+0,2 s', 'Aparecen 0,2 s después que la voz', true, true]);
+  p.tap('capNudge', -330);
+  assert.equal(p.view.sheet.delay.text, '−0,1 s', 'every value is a multiple of 0,1 s');
+  p.tap('capReset');
+  assert.equal(p.view.sheet.unapplied, false, 'back to the TV\'s value is no draft');
+  for (let i = 0; i < 40; i++) p.tap('capNudge', 1000);
+  assert.equal(p.view.sheet.delay.text, '+30,0 s');
+  p.tap('capNudge', -1000);
+  p.tap('capNudge', -60000);
+  assert.equal(p.view.sheet.delay.text, '−30,0 s');
+  p.tap('capNudge', NaN);
+  assert.equal(p.view.sheet.delay.text, '−30,0 s');
+});
+
+test('choosing no track zeroes the delay and a track the TV cannot play is refused', () => {
+  const p = panel({...playing, subtitle_delay_ms: 500, ...withTracks});
+  p.tap('openSubs');
+  p.tap('capTrack', 'image-a');
+  assert.equal(p.view.sheet.unapplied, false);
+  assert.deepEqual(p.view.sheet.tracks.map(t => [t.id, t.selected]), [['', false], ['text-a', true], ['text2-a', false]], 'image tracks are not offered');
+  p.tap('capTrack', '');
+  assert.deepEqual([p.view.sheet.delay.text, p.view.sheet.steps.enabled, p.view.sheet.unapplied], ['+0,0 s', false, true]);
+  p.tap('capTrack', 'text2-a');
+  assert.deepEqual([p.view.sheet.delay.text, p.view.sheet.steps.enabled], ['+0,0 s', true]);
+});
+
+test('Aplicar waits for a fresh poll, posts the draft, and settles only on readback', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capTrack', 'text2-a');
+  p.tap('capNudge', 400);
+  p.tap('capApply');
+  assert.equal(p.posts('subtitles').length, 0, 'nothing is sent from the click');
+  assert.equal(p.view.sheet.apply.pending, true);
+  p.status(subsOk('text-a', 0));
+  const post = p.posted('subtitles');
+  assert.deepEqual(post.body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a', catalogue_id: 'cat-a', subtitle_id: 'text2-a', enabled: true, delay_ms: 400});
+  p.reply(post);
+  p.status({...subsOk('text-a', 0), phase: 'loading', pending: true});
+  assert.equal(p.view.sheet.apply.pending, true, 'the TV is still reloading');
+  p.fire('poll');
+  p.status(subsOk('text-a', 0));
+  assert.equal(p.view.sheet.apply.pending, true, 'the old values are not the readback');
+  p.fire('poll');
+  p.status(subsOk('text2-a', 400));
+  assert.equal(p.view.sheet, null, 'settled: the sheet closes');
+  assert.equal(p.view.mando.chip.unapplied, false);
+  assert.match(p.view.mando.chip.label, /\+0,4 s/);
+});
+
+test('a delay-only apply keeps the visibility the TV has, a new track shows itself', () => {
+  const hidden = {...subsOk('text-a', 0, false), ...withTracks};
+  const p = panel(hidden);
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status(hidden);
+  assert.deepEqual([p.posted('subtitles').body.enabled, p.posted('subtitles').body.delay_ms], [false, 300]);
+  const q = panel(hidden);
+  q.tap('openSubs');
+  q.tap('capTrack', 'text2-a');
+  q.tap('capApply');
+  q.status(hidden);
+  assert.equal(q.posted('subtitles').body.enabled, true);
+  const r = panel(hidden);
+  r.tap('openSubs');
+  r.tap('capTrack', '');
+  r.tap('capApply');
+  r.status(hidden);
+  assert.deepEqual([r.posted('subtitles').body.subtitle_id, r.posted('subtitles').body.enabled, r.posted('subtitles').body.delay_ms], [null, false, 0]);
+});
+
+test('the visibility toggle applies at once and sends the server track and delay, never the draft', () => {
+  const p = panel({...subsOk('text-a', 200), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capTrack', 'text2-a');
+  p.tap('capNudge', 700);
+  p.tap('capVisible', false);
+  assert.equal(p.view.sheet.visible.checked, false, 'the switch shows what was asked while it settles');
+  p.status(subsOk('text-a', 200));
+  assert.deepEqual(p.posted('subtitles').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a', catalogue_id: 'cat-a', subtitle_id: 'text-a', enabled: false, delay_ms: 200});
+  p.reply(p.posted('subtitles'));
+  p.status(subsOk('text-a', 200, false));
+  assert.equal(p.view.sheet.visible.checked, false);
+  assert.equal(p.view.sheet.unapplied, true, 'the draft survived the toggle');
+  assert.equal(p.view.sheet.delay.text, '+0,9 s');
+  assert.notEqual(p.view.sheet, null, 'a visibility change does not close the sheet');
+});
+
+test('the visibility toggle does nothing when the TV already shows that, or when there is no track', () => {
+  const p = panel(subsOk('text-a', 0));
+  p.tap('openSubs');
+  p.tap('capVisible', true);
+  assert.equal(p.polls(), 0);
+  const q = panel({...playing, subtitle_choice: undefined});
+  q.tap('capVisible', true);
+  assert.equal(q.polls(), 0, 'no track, nothing to show');
+  assert.equal(q.view.mando.chip.label, 'Sin subtítulos');
+});
+
+test('captions are refused while busy, foreign or offline and while an apply is in flight', () => {
+  const edits = [{...playing, command_pending: true}, {...playing, phase: 'loading', pending: true}, {...playing, phase: 'disconnected'}];
+  for (const status of edits) {
+    const p = panel(status);
+    p.tap('openSubs');
+    p.tap('capNudge', 100);
+    assert.equal(p.view.sheet?.unapplied ?? false, false, status.phase);
+  }
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 100);
+  p.tap('capApply');
+  p.tap('capNudge', 100);
+  p.tap('capVisible', false);
+  p.tap('capApply');
+  assert.equal(p.view.sheet.delay.text, '+0,1 s', 'the draft is frozen while it is being applied');
+  assert.equal(p.view.sheet.apply.enabled, false);
+  assert.equal(p.view.sheet.visible.enabled, false);
+  assert.equal(p.polls(), 1);
+});
+
+test('a partial failure names the visibility change and keeps the draft', () => {
+  const p = panel({...subsOk('text-a', 0, false), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capTrack', 'text2-a');
+  p.tap('capApply');
+  p.status(subsOk('text-a', 0, false));
+  p.reply(p.posted('subtitles'), {ok: false, message: 'La TV rechazó el cambio.'});
+  p.status(subsOk('text-a', 0, true));
+  assert.equal(p.view.sheet.apply.pending, false);
+  assert.equal(p.view.sheet.unapplied, true, 'the draft is kept for a retry');
+  assert.equal(p.view.sheet.apply.enabled, true);
+});
+
+test('a playback change drops the apply and the draft silently', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status({...subsOk('text-a', 0), playback_id: 'play-b'});
+  assert.equal(p.posts('subtitles').length, 0, 'nothing is sent for the old playback');
+  assert.equal(p.view.sheet, null, 'the subtitle sheet cannot outlive the playback it edits');
+  assert.equal(p.view.mando.chip.unapplied, false);
+});
+
+test('an apply interrupted by another sender or a lost TV fails loudly and keeps the draft', () => {
+  for (const phase of ['receiver_changed', 'disconnected']) {
+    const p = panel({...subsOk('text-a', 0), ...withTracks});
+    p.tap('openSubs');
+    p.tap('capNudge', 300);
+    p.tap('capApply');
+    p.status({...subsOk('text-a', 0), phase});
+    assert.equal(p.view.mando.chip.unapplied, true, phase);
+    assert.equal(p.posts('subtitles').length, 0, phase);
+  }
+});
+
+test('an apply that the TV never confirms ends instead of hanging the sheet', () => {
+  const p = panel(subsOk('text-a', 0));
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status(subsOk('text-a', 0));
+  p.reply(p.posted('subtitles'));
+  p.status(subsOk('text-a', 0));
+  for (let i = 0; i < 8 && p.view.sheet.apply.pending; i++) { p.fire('poll'); p.status(subsOk('text-a', 0)); }
+  assert.equal(p.view.sheet.apply.pending, false);
+  assert.equal(p.view.sheet.unapplied, true);
+});
+
+test('a later command voids an apply that was waiting for its verification poll', () => {
+  const p = panel(subsOk('text-a', 0));
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.tap('mute');
+  p.status({...subsOk('text-a', 0)});
+  assert.equal(p.posts('subtitles').length, 0);
+});
+
+// the live Stremio picker in the subtitle sheet
+
+const liveAddon = addonReady(2);
+const liveStatus = (extra = {}) => ({...subsOk('text-a', 0), addons: {a: liveAddon}, ...extra});
+const liveEntry = {id: 'ad-9', kind: 'addon', label: 'Español · Alpha.es.srt', language: 'spa', supported: true, reason: null};
+
+test('the live sheet pulls offers for the active catalogue and a downloaded subtitle becomes the draft', () => {
+  const p = panel(liveStatus());
+  p.tap('openSubs');
+  assert.deepEqual(p.posted('subtitle_offers').body, {source_id: 'a', catalogue_id: 'cat-a'});
+  p.reply(p.posted('subtitle_offers'), {ok: true, body: offers});
+  assert.equal(p.view.sheet.stremio.match, 'Coincidencia: Alpha (2020)');
+  p.tap('stremioUse');
+  p.reply(p.posted('subtitle_fetch'), {ok: true, body: {entry: liveEntry, catalogue: catalogue('a', liveAddon, [liveEntry])}});
+  assert.match(p.view.sheet.stremio.status, /Subtítulo listo: Español.*Se usará solo al aplicar/);
+  assert.equal(p.view.sheet.unapplied, true);
+  assert.ok(p.view.sheet.tracks.some(t => t.id === 'ad-9' && t.selected), 'the entry is in the list and chosen');
+  p.tap('capApply');
+  p.status(liveStatus());
+  assert.equal(p.posted('subtitles').body.subtitle_id, 'ad-9', 'Aplicar sends the downloaded track');
+});
+
+test('the live block stays inert while an apply is pending', () => {
+  const p = panel(liveStatus());
+  p.tap('openSubs');
+  p.reply(p.posted('subtitle_offers'), {ok: true, body: offers});
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  assert.equal(p.view.sheet.stremio.use.enabled, false);
+  p.tap('stremioUse');
+  assert.equal(p.posts('subtitle_fetch').length, 0);
+});
+
+test('a download finishing after the playback changed cannot become the draft', () => {
+  const p = panel(liveStatus());
+  p.tap('openSubs');
+  p.reply(p.posted('subtitle_offers'), {ok: true, body: offers});
+  p.tap('stremioUse');
+  const fetch = p.posted('subtitle_fetch');
+  p.fire('poll');
+  p.status({...liveStatus(), playback_id: 'play-b'});
+  p.reply(fetch, {ok: true, body: {entry: liveEntry, catalogue: catalogue('a', liveAddon, [liveEntry])}});
+  assert.equal(p.view.mando.chip.unapplied, false);
+});
+
+test('a late lookup receipt with an older addon revision cannot roll the live sheet back', () => {
+  const p = panel(liveStatus({addons: {a: addonReady(2, {revision: 3})}}));
+  p.tap('openSubs');
+  p.reply(p.posted('subtitle_offers'), {ok: true, body: {...offers, revision: 3}});
+  p.tap('stremioWrong');
+  p.tap('stremioAlt', 0);
+  p.reply(p.posted('subtitle_lookup'), {ok: true, body: {catalogue: catalogue('a', addonReady(2, {revision: 1}))}});
+  assert.equal(p.view.sheet.stremio.languages.length, 2);
+});
+
+// stop
+
+test('confirmed stop re-polls, re-checks the TV and the playback, and sends the captured playback_id', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  assert.equal(p.posts().length + p.polls(), 0, 'playing asks first');
+  assert.equal(p.view.confirm.kind, 'stop');
+  p.tap('confirmAccept');
+  assert.equal(p.posts().length, 0, 'accepting waits for fresh status');
+  p.status(playing);
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+});
+
+test('stop consent is void for a different playback, TV or revision, or after any command in between', () => {
+  const swaps = {playback: {playback_id: 'play-b'}, device: {selected_device: {...destination.selected_device, id: 'tv-b'}}, revision: {device_revision: 2}};
+  for (const [name, change] of Object.entries(swaps)) {
+    const p = panel(playing);
+    p.tap('stop');
+    p.tap('confirmAccept');
+    p.status({...playing, ...change});
+    assert.equal(p.posts('stop').length, 0, name);
+  }
+  const q = panel(playing);
+  q.tap('stop');
+  q.tap('confirmAccept');
+  q.tap('toggle');
+  q.status(playing);
+  q.reply(q.posted('pause'));
+  q.status({...playing, phase: 'paused'});
+  assert.equal(q.posts('stop').length, 0, 'an intervening command voids the stop');
+});
+
+test('stop with Seguir viendo or Escape sends nothing', () => {
+  for (const act of ['confirmCancel', 'dismiss']) {
+    const p = panel(playing);
+    p.tap('stop');
+    p.tap(act);
+    assert.equal(p.view.confirm, null);
+    assert.equal(p.posts().length + p.polls(), 0, act);
+  }
+});
+
+test('preparation, a foreign receiver and an error stop at once with device and playback identity', () => {
+  for (const status of [{...playing, phase: 'loading', pending: true}, {...playing, phase: 'receiver_changed'}, {...playing, phase: 'disconnected'}, {...playing, phase: 'buffering', pending: true}]) {
+    const p = panel(status);
+    p.tap('stop');
+    assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'}, status.phase);
+  }
+});
+
+test('with no selected TV the stop body carries no device fields at all', () => {
+  const p = panel({...playing, phase: 'disconnected', selected_device: null});
+  p.tap('stop');
+  assert.deepEqual(p.posted('stop').body, {playback_id: 'play-a'});
+  const q = panel({...idle, phase: 'error', can_change_device: false, selected_device: null});
+  q.tap('stop');
+  assert.deepEqual(q.posted('stop').body, {});
+});
+
+test('stop interrupts an in-flight command and its late reply cannot overwrite cleanup', () => {
+  const p = panel(playing);
+  p.fire('poll');
+  const stale = p.effects('poll')[0];
+  p.tap('toggle');
+  const pause = p.posted('pause');
+  p.send({t: 'status', gen: stale.gen, seq: stale.seq, ok: true, raw: fixture({...playing, phase: 'loading', pending: true})});
+  p.pending.splice(p.pending.indexOf(stale), 1);
+  assert.equal(p.view.mando.board.state, 'REPRODUCIENDO');
+  p.tap('stop');
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'}, 'busy: immediate, no confirm, and the bridge still sees which playback to stop');
+  p.reply(pause);
+  assert.equal(p.posts('pause').length + p.posts('resume').length, 0);
+  p.reply(p.posted('stop'));
+  p.status({...idle, phase: 'stopped', title: 'Alpha', source_id: 'a'});
+  assert.equal(p.view.mode, 'preparar');
+});
+
+test('stopping drops a pending apply, seek and Start along with the open sheet', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.tap('stop');
+  p.tap('confirmAccept');
+  p.status(subsOk('text-a', 0));
+  p.status(subsOk('text-a', 0));
+  assert.equal(p.posts('subtitles').length, 0, 'stop wins over the apply waiting for the same poll');
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+  assert.equal(p.view.sheet, null);
+  assert.equal(p.view.mando.chip.unapplied, true, 'the draft is not the stop\'s business');
+});
+
+test('receiver_changed and disconnected leave only Detener', () => {
+  for (const phase of ['receiver_changed', 'disconnected']) {
+    const p = panel({...playing, phase});
+    const m = p.view.mando;
+    assert.deepEqual([m.toggle.enabled, m.back.enabled, m.forward.enabled, m.track.enabled, m.volume.enabled, m.mute.enabled, m.chip.enabled, m.change.enabled], new Array(8).fill(false), phase);
+    assert.equal(m.stop.enabled, true, phase);
+    p.tap('openChange');
+    p.tap('openSubs');
+    assert.equal(p.view.sheet, null, phase);
+    assert.equal(p.view.plan.primary.enabled, false, phase);
+  }
+});
+
+test('an unknown phase fails closed: nothing is startable and only Detener works', () => {
+  const p = panel({...playing, phase: 'warp-drive'});
+  assert.equal(p.view.mode, 'mando');
+  assert.equal(p.view.mando.toggle.enabled, false);
+  assert.equal(p.view.mando.stop.enabled, true);
+  assert.equal(p.view.plan.primary.enabled, false);
+  p.tap('stop');
+  assert.ok(p.posted('stop'));
+});
+
+test('offline keeps the board, marks it unconfirmed and disables every unsafe action', () => {
+  const p = panel(playing);
+  offline(p);
+  const m = p.view.mando;
+  assert.equal(m.board.title, 'Alpha');
+  assert.equal(m.board.state, 'SIN CONFIRMAR');
+  assert.deepEqual([m.toggle.enabled, m.track.enabled, m.volume.enabled, m.chip.enabled, m.stop.enabled], [false, false, false, false, false]);
+  p.tap('toggle');
+  p.tap('stop');
+  assert.equal(p.posts().length, 0);
+  p.fire('poll');
+  p.status(playing);
+  assert.equal(p.view.mando.toggle.enabled, true, 'back online, back in control');
+});
+
+test('waiting has shape: a spinner in the key, the TV by name and Cancelar, which is stop', () => {
+  for (const phase of ['preparing', 'buffering', 'loading']) {
+    const p = panel({...playing, phase, pending: true, message: null});
+    const m = p.view.mando;
+    assert.deepEqual([m.toggle.icon, m.toggle.enabled, m.waiting.text, m.waiting.cancel.enabled], ['spinner', false, 'Esperando a Sala · Chromecast', true], phase);
+    p.tap('toggle');
+    assert.equal(p.posts('resume').length + p.posts('pause').length, 0);
+    p.tap('stop');
+    assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'}, phase);
+  }
+  assert.equal(panel(playing).view.mando.waiting, null);
+});
+
+test('a command racing the TV\'s own busy state is refused locally, as the real bridge would with a 409', () => {
+  const p = panel({...playing, command_pending: true});
+  p.tap('toggle');
+  p.tap('skip', 30);
+  p.tap('mute');
+  assert.equal(p.posts().length + p.effects('timer').filter(t => t.name === 'skip').length, 0);
+  assert.equal(p.view.mando.toggle.icon, 'spinner');
+});
+
+test('the remote stays keyed to one playback: a new playback starts with idle seek and no draft', () => {
+  const p = panel(playing);
+  p.tap('dragSeek', 200);
+  p.tap('skip', 30);
+  p.fire('poll');
+  p.status({...playing, playback_id: 'play-b'});
+  assert.equal(p.view.mando.badge, null);
+  assert.equal(p.view.mando.track.preview, null);
 });
