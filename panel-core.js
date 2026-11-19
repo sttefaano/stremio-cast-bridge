@@ -80,7 +80,8 @@
  * @typedef {object} Ui
  * @property {null|'subs'|'more'|'change'} sheet
  * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}|{kind:'stop',key:string}} confirm  a stop confirm holds the playbackKey it was asked for
- * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
+ * @property {{local:{text:string,lost:boolean}|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors
+ *           identities are `${rev}:${text}`; a lost local error is a flow the outage dropped, so the offline block says it
  * @property {{ref:string,n:number,ticket:Ticket}|null} focus  control to refocus once command `ticket` settles
  * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
  * @property {boolean} stopIssued  our Stop was sent; the next return to Preparar shows the notice
@@ -278,16 +279,16 @@ function advanceOnStatus(m, fx) {
 /** A gated flow with no fresh status in time is dropped: acting later could land on a TV the user has since changed. */
 function linkOnDeadline(m, msg) {
   const st = m.plan.start, a = m.remote.captions.apply, held = g => g?.deadline === msg.ticket;
-  if (st?.stage === 'verifying' && held(st.gate)) { m.plan.start = null; m.ui.errors.local = 'No se pudo iniciar: sin conexión. Probá de nuevo.'; }
-  else if (held(m.remote.stop)) { m.remote.stop = null; m.ui.errors.local = 'No se pudo detener: sin conexión. Probá de nuevo.'; }
-  else if (a?.stage === 'verifying' && held(a.gate)) capFail(m, 'No se pudo aplicar el cambio: sin conexión. Probá de nuevo.');
+  if (st?.stage === 'verifying' && held(st.gate)) { m.plan.start = null; uiSay(m, 'No se pudo iniciar: sin conexión. Probá de nuevo.', true); }
+  else if (held(m.remote.stop)) { m.remote.stop = null; uiSay(m, 'No se pudo detener: sin conexión. Probá de nuevo.', true); }
+  else if (a?.stage === 'verifying' && held(a.gate)) capFail(m, 'No se pudo aplicar el cambio: sin conexión. Probá de nuevo.', true);
 }
 function linkOnReply(m, fx, msg) {
   const c = m.link.inflight.find(x => x.ticket === msg.ticket);
   if (!c) return false;
   if (c.stage !== 'posting') return true;
   const error = msg.ok ? null : {text: commandError(msg), code: msg.code ?? null};
-  if (error && !OWNERS[c.action]?.quiet?.(m, c, error)) m.ui.errors.local = error.text;
+  if (error && !OWNERS[c.action]?.quiet?.(m, c, error)) uiSay(m, error.text);
   Object.assign(c, {stage: 'confirming', ok: msg.ok, error, afterSeq: linkRequestPoll(m, fx)});
   return true;
 }
@@ -475,11 +476,11 @@ function startAdvance(m, fx) {
   if (st?.stage !== 'verifying' || !gatePassed(m, st.gate)) return;
   const k = st.snap;
   p.start = null;
-  if (s.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { m.ui.errors.local = 'El destino cambió. Revisá la TV y volvé a intentar.'; return; }
+  if (s.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { uiSay(m, 'El destino cambió. Revisá la TV y volvé a intentar.'); return; }
   if (!caps(m).start || !s.sources.some(x => x.id === k.sourceId) || samePlan(m)) return;
   const snap = s.catalogues?.[k.sourceId];
   if (snap?.state !== 'ready' || snap.catalogue.id !== k.catalogueId || (k.subtitleId && !snap.catalogue.entries.some(e => e.id === k.subtitleId && e.supported === true))) {
-    m.ui.errors.local = 'La lista de subtítulos cambió. Revisá la película y volvé a iniciar.';
+    uiSay(m, 'La lista de subtítulos cambió. Revisá la película y volvé a iniciar.');
     return;
   }
   const now = replacementIdentity(s);
@@ -506,7 +507,7 @@ function remoteSync(m) {
   if (key === m.remote.key) return;
   const stopping = m.remote.stop;
   m.remote = freshRemote(key);
-  if (stopping && caps(m).stop) m.ui.errors.local = STOP_MOVED;
+  if (stopping && caps(m).stop) uiSay(m, STOP_MOVED);
   if (m.ui.sheet === 'subs') m.ui.sheet = null;
 }
 const durationOf = s => finite(s.duration) && s.duration > 0 ? s.duration : null;
@@ -530,7 +531,7 @@ function seekDrop(m, fx, pos, msg) {
   if (!caps(m).transport || !d) return;
   if (!finite(pos) || pos < 0 || pos > d) {
     m.remote.seek = {s: 'idle'};
-    m.ui.errors.local = 'El tiempo está fuera de la duración de la película.';
+    uiSay(m, 'El tiempo está fuera de la duración de la película.');
     return;
   }
   seekSend(m, fx, {position: pos}, pos, msg);
@@ -639,11 +640,11 @@ function capDiscard(m) {
   m.remote.captions.draft = null;
   if (m.ui.sheet === 'subs') uiDismiss(m);
 }
-function capFail(m, message) {
+function capFail(m, message, lost = false) {
   const a = m.remote.captions.apply, s = m.link.status;
   const partial = !!a && typeof a.prevVisible === 'boolean' && s.subtitles_enabled !== a.prevVisible && s.subtitles_enabled === a.want.enabled && s.subtitle_delay_ms !== a.want.delayMs;
   m.remote.captions.apply = null;
-  m.ui.errors.local = `${partial ? 'La visibilidad ya cambió; la sincronía sigue sin confirmar. ' : ''}${message}${a?.kind === 'plan' ? ' Tu ajuste sigue en borrador.' : ''}`;
+  uiSay(m, `${partial ? 'La visibilidad ya cambió; la sincronía sigue sin confirmar. ' : ''}${message}${a?.kind === 'plan' ? ' Tu ajuste sigue en borrador.' : ''}`, lost);
 }
 /** The server holds exactly what was asked for, by every field it reports. */
 function capSettled(s, a) {
@@ -713,6 +714,9 @@ function stopAdvance(m, fx) {
 }
 
 // ───────── ui: layers, errors
+function uiSay(m, text, lost = false) {
+  m.ui.errors.local = {text, lost};
+}
 /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
 function uiOpen(m, sheet) {
   if (m.ui.confirm || !caps(m).sheets[sheet].open) return;
@@ -759,7 +763,7 @@ function uiValidLayers(m) {
   if (k?.kind === 'replace' && c.foreign) u.confirm = null;
   if (k?.kind === 'stop' && (k.key !== m.remote.key || (c.online && !c.stop))) {
     u.confirm = null;
-    if (c.stop) u.errors.local = STOP_MOVED;
+    if (c.stop) uiSay(m, STOP_MOVED);
   }
 }
 /** The focus ticket is honoured once the command settles, and only if the user has not touched anything since. */
@@ -773,12 +777,12 @@ function uiSettleFocus(m, fx, c) {
 function problemOf(m) {
   const s = m.link.status, c = caps(m), u = m.ui;
   const stopAction = label => ({act: 'stop', label: c.stopping ? STOPPING : label, enabled: c.stop});
-  if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: u.errors.local ?? 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
+  if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: u.errors.local?.lost ? u.errors.local.text : 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
   if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
   if (s.phase === 'receiver_changed') return {kind: 'foreign', title: 'Hay otro contenido en la TV', body: 'Este mando no lo controla. Detené para volver a elegir.', action: stopAction('Detener y volver a elegir')};
   if (s.phase === 'disconnected') return {kind: 'disconnected', title: 'TV no disponible', body: 'Se perdió la conexión con la TV. Detené para volver a elegir.', action: stopAction('Detener')};
   if (s.phase === 'error') return {kind: 'failed', title: 'No se pudo completar la acción', body: s.message || 'Revisá la película y volvé a intentar.', action: s.can_change_device === false ? stopAction('Detener') : null};
-  const say = u.errors.local ?? backendError(m);
+  const say = u.errors.local?.text ?? backendError(m);
   if (say) return {kind: 'notice', title: 'No se pudo completar la acción', body: say, action: {act: 'dismissNotice', label: 'Entendido', enabled: true}};
   if (u.stoppedNotice) return {kind: 'stopped', title: `Película detenida en ${u.lastDeviceLabel || 'la TV'}`, body: '', action: {act: 'dismissNotice', label: 'Cerrar', enabled: true}};
   return null;

@@ -62,6 +62,18 @@ test('a local error shows once, is cleared by the next command, and dismiss clea
   assert.equal(p.view.problem, null, 'a new command clears the old message');
 });
 
+test('the offline block says only what the outage cost; an earlier notice waits for the link and is dismissible there', () => {
+  const p = panel(playing);
+  p.tap('dropSeek', 9999);
+  offline(p);
+  assert.deepEqual([p.view.problem.kind, p.view.problem.body], ['offline', 'No podemos confirmar qué pasa en la TV. Seguimos intentando.']);
+  p.fire('poll');
+  p.status(playing);
+  assert.deepEqual([p.view.problem.kind, p.view.problem.body], ['notice', 'El tiempo está fuera de la duración de la película.']);
+  p.tap('dismissNotice');
+  assert.equal(p.view.problem, null);
+});
+
 test('the same backend error text with a new revision shows again; stable polls stay dismissed', () => {
   const failing = revision => ({...playing, action_error: 'La TV no respondió.', action_error_revision: revision});
   const p = panel(failing(1));
