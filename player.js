@@ -261,23 +261,12 @@ const Panel = (() => {
     const c = m.link.command;
     if (c.stage !== 'posting') return;
     c.ok = msg.ok;
-    if (!msg.ok && ownerLive(m, c)) m.ui.errors.local = commandError(msg);
+    const live = OWNERS[c.owner]?.live ?? (() => true);
+    if (!msg.ok && live(m, c)) m.ui.errors.local = commandError(msg);
     c.stage = 'confirming';
     c.afterSeq = linkRequestPoll(m, fx);
   }
-  /** A cancelled owner flow reports no failure: its draft is gone and a message would be about nothing. */
-  function ownerLive(m, c) {
-    if (c.owner === 'start') return m.plan.start?.ticket === c.ticket;
-    if (c.owner === 'captions') return m.remote.captions.apply?.ticket === c.ticket;
-    return true;
-  }
-  function onCommandDone(m, c) {
-    if (c.owner === 'start') planOnCommandDone(m, c);
-    else if (c.owner === 'seek') seekOnCommandDone(m, c);
-    else if (c.owner === 'captions') capOnCommandDone(m, c);
-    else if (c.owner === 'volume') m.remote.volumePreview = null;
-    else if (c.owner === 'stop' && !c.ok) m.ui.stopIssued = false;
-  }
+  const onCommandDone = (m, c) => OWNERS[c.owner]?.done(m, c);
 
   // ───────── plan: movie, catalogue, subtitle decision, Start
   /** THE cancellation point: any change to the plan kills a pending Start and an open replacement consent. */
@@ -935,6 +924,18 @@ const Panel = (() => {
   function uiScenario(m, fx, value, msg) {
     if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
   }
+
+  /**
+   * The flows that own a command. `live` says whether the flow still wants the reply: a cancelled flow reports no
+   * failure, because its draft is gone and a message would be about nothing. `done` runs once fresh status confirms it.
+   */
+  const OWNERS = {
+    start: {live: (m, c) => m.plan.start?.ticket === c.ticket, done: planOnCommandDone},
+    seek: {done: seekOnCommandDone},
+    captions: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
+    volume: {done: m => { m.remote.volumePreview = null; }},
+    stop: {done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
+  };
 
   // ───────── public: init / step
   const freshAddon = () => ({listing: null, listingKey: '', pull: {s: 'idle'}, language: '', offerId: '', correcting: false, op: null, message: null, lastHint: null, unreadable: []});
