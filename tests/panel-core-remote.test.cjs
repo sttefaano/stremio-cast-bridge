@@ -408,6 +408,33 @@ test('a later command voids an apply that was waiting for its verification poll'
   assert.equal(p.posts('subtitles').length, 0);
 });
 
+test('an apply waiting for its fresh poll survives a failed poll and applies once the link returns within the bound', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status(null, false);
+  assert.equal(p.view.sheet.apply.pending, true, 'a blip is not a failure');
+  p.fire('poll');
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  assert.equal(p.posted('subtitles').body.delay_ms, 300);
+});
+
+test('an apply that gets no status for 10 s is dropped, says so, keeps the draft and never fires late', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  assert.equal(p.effects('timer').find(t => t.name === 'pending').ms, 10000);
+  p.status(null, false);
+  p.fire('pending');
+  assert.equal(p.view.problem.body, 'No se pudo aplicar el cambio: sin conexión. Probá de nuevo. Tu ajuste sigue en borrador.');
+  p.fire('poll');
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  assert.equal(p.posts('subtitles').length, 0);
+  assert.deepEqual([p.view.sheet.apply.pending, p.view.sheet.unapplied], [false, true]);
+});
+
 // stop
 
 test('confirmed stop re-polls, re-checks the TV and the playback, and sends the captured playback_id', () => {
@@ -537,10 +564,10 @@ test('a confirmed Detener that gets no status for 10 s is dropped, says so, and 
   const p = panel(playing);
   p.tap('stop');
   p.tap('confirmAccept');
-  assert.equal(p.effects('timer').find(t => t.name === 'stop').ms, 10000);
+  assert.equal(p.effects('timer').find(t => t.name === 'pending').ms, 10000);
   p.status(null, false);
   assert.equal(p.view.mando.stop.label, 'Deteniendo…');
-  p.fire('stop');
+  p.fire('pending');
   assert.deepEqual([p.view.problem.kind, p.view.problem.body], ['offline', 'No se pudo detener: sin conexión. Probá de nuevo.']);
   assert.equal(p.view.mando.stop.label, 'Detener');
   p.fire('poll');
@@ -552,7 +579,7 @@ test('a confirmed Detener that gets no status for 10 s is dropped, says so, and 
   q.tap('stop');
   q.tap('confirmAccept');
   q.status(playing);
-  q.fire('stop');
+  q.fire('pending');
   assert.equal(q.posts('stop').length, 1);
   assert.equal(q.view.problem, null, 'a bound that fires after the stop went out says nothing');
 });
@@ -561,10 +588,10 @@ test('a Start that gets no status for 10 s is dropped and says so', () => {
   const p = panel(idle);
   choose(p);
   p.tap('start');
-  assert.equal(p.effects('timer').find(t => t.name === 'start').ms, 10000);
+  assert.equal(p.effects('timer').find(t => t.name === 'pending').ms, 10000);
   p.status(null, false);
   assert.equal(p.view.plan.primary.label, 'Iniciando…');
-  p.fire('start');
+  p.fire('pending');
   assert.equal(p.view.problem.body, 'No se pudo iniciar: sin conexión. Probá de nuevo.');
   p.fire('poll');
   p.status(idle);
@@ -576,7 +603,7 @@ test('a Start that gets no status for 10 s is dropped and says so', () => {
   q.tap('start');
   q.tap('confirmAccept');
   q.status(null, false);
-  q.fire('start');
+  q.fire('pending');
   assert.equal(q.view.plan.primary.label, 'Cambiar película en la TV', 'a confirmed replacement has the same bound');
 });
 

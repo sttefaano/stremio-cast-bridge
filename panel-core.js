@@ -10,6 +10,7 @@
 
 // ───────── model: four sub-states, one writer section each (link*, plan*, remote*, ui*)
 /** @typedef {number} Ticket  Unique per effect. A reply is honoured only by the slot that still holds its ticket. */
+/** @typedef {{afterSeq:number,deadline:Ticket}} Gate  waits for a status issued after it opened, for at most PENDING_MS */
 /**
  * @typedef {object} Link
  * @property {object} status    last APPLIED status, NO_STATUS before the first; kept while offline
@@ -32,7 +33,7 @@
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
  * @typedef {{s:'idle',filename:string,message:string}|{s:'busy',stage:'reading'|'posting',ticket:Ticket,filename:string,format:string}} Upload
  * @typedef {{sourceId:string,catalogueId:string,subtitleId:string|null,deviceId:string,deviceRevision:number}} StartSnap  captured at click
- * @typedef {{stage:'verifying',snap:StartSnap,consent:string|null,afterSeq:number,deadline:Ticket}|{stage:'posting',snap:StartSnap,ticket:Ticket}} Start
+ * @typedef {{stage:'verifying',snap:StartSnap,consent:string|null,gate:Gate}|{stage:'posting',snap:StartSnap,ticket:Ticket}} Start
  */
 /**
  * @typedef {object} Addon  Stremio state for one catalogue; holds no reference to its owner.
@@ -62,7 +63,7 @@
  * @typedef {{from:string,n:number}} Origin
  * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,origin:Origin|null}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
  * @typedef {{subtitleId:string|null,enabled:boolean,delayMs:number}} CaptionWant
- * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,afterSeq:number,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
+ * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,gate:Gate,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
  */
 /**
  * @typedef {object} Remote  Drafts bound to ONE playback identity; reconcile replaces it when the identity changes.
@@ -72,7 +73,8 @@
  * @property {number|null} volumePreview
  * @property {Catalogue|null} overlay  newer active catalogue learned from a lookup or download
  * @property {Addon} addon
- * @property {{afterSeq:number,deadline:Ticket}|null} stop  a confirmed Detener waiting for a status issued after the confirm
+ * @property {Gate|null} stop  a confirmed Detener waiting for a fresh status. Once posted it lives in link.inflight, because
+ *           the status that confirms it changes the playback key and remoteSync would wipe it here.
  */
 /**
  * @typedef {object} Ui
@@ -92,8 +94,8 @@
 /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
 // ───────── constants and pure helpers
-// One poll that hangs until the shell's 6 s fetch timeout, then one more try. Later than that, a confirmed Detener or
-// Iniciar could land on a TV the user has since resumed with its own remote.
+// One poll that hangs until the shell's 6 s fetch timeout, then one more try. Later than that, a confirmed Detener,
+// Iniciar or caption change could land on a TV the user has since resumed with its own remote.
 const PENDING_MS = 10000;
 const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024, MAX_READS = 6;
 const PLAYBACK_ACTIONS = ['start', 'pause', 'resume', 'seek', 'stop', 'volume', 'mute', 'subtitles'];
@@ -239,11 +241,12 @@ function linkCommand(m, fx, action, body, origin = null) {
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
   return ticket;
 }
-function pendingDeadline(m, fx, name) {
-  const ticket = ticketOf(m);
-  fx.push({fx: 'timer', name, ms: PENDING_MS, ticket});
-  return ticket;
+function linkGate(m, fx) {
+  const afterSeq = linkRequestPoll(m, fx), deadline = ticketOf(m);
+  fx.push({fx: 'timer', name: 'pending', ms: PENDING_MS, ticket: deadline});
+  return {afterSeq, deadline};
 }
+const gatePassed = (m, g) => m.link.statusSeq > g.afterSeq;
 function linkOnStatus(m, fx, msg) {
   const l = m.link;
   l.polling = false;
@@ -271,6 +274,13 @@ function advanceOnStatus(m, fx) {
   capAdvance(m, fx);
   stopAdvance(m, fx);
   seekOnStatus(m);
+}
+/** A gated flow with no fresh status in time is dropped: acting later could land on a TV the user has since changed. */
+function linkOnDeadline(m, msg) {
+  const st = m.plan.start, a = m.remote.captions.apply, held = g => g?.deadline === msg.ticket;
+  if (st?.stage === 'verifying' && held(st.gate)) { m.plan.start = null; m.ui.errors.local = 'No se pudo iniciar: sin conexión. Probá de nuevo.'; }
+  else if (held(m.remote.stop)) { m.remote.stop = null; m.ui.errors.local = 'No se pudo detener: sin conexión. Probá de nuevo.'; }
+  else if (a?.stage === 'verifying' && held(a.gate)) capFail(m, 'No se pudo aplicar el cambio: sin conexión. Probá de nuevo.');
 }
 function linkOnReply(m, fx, msg) {
   const c = m.link.inflight.find(x => x.ticket === msg.ticket);
@@ -457,18 +467,12 @@ function planStart(m, fx) {
   else planVerify(m, fx, snap, null);
 }
 function planVerify(m, fx, snap, consent) {
-  m.plan.start = {stage: 'verifying', snap, consent, afterSeq: linkRequestPoll(m, fx), deadline: pendingDeadline(m, fx, 'start')};
-}
-function planOnDeadline(m, msg) {
-  const st = m.plan.start;
-  if (st?.stage !== 'verifying' || st.deadline !== msg.ticket) return;
-  m.plan.start = null;
-  m.ui.errors.local = 'No se pudo iniciar: sin conexión. Probá de nuevo.';
+  m.plan.start = {stage: 'verifying', snap, consent, gate: linkGate(m, fx)};
 }
 /** After a poll issued since the click: the destination, the list and the replacement must still be what was agreed. */
 function startAdvance(m, fx) {
-  const p = m.plan, st = p.start, s = m.link.status, l = m.link;
-  if (st?.stage !== 'verifying' || l.statusSeq <= st.afterSeq) return;
+  const p = m.plan, st = p.start, s = m.link.status;
+  if (st?.stage !== 'verifying' || !gatePassed(m, st.gate)) return;
   const k = st.snap;
   p.start = null;
   if (s.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { m.ui.errors.local = 'El destino cambió. Revisá la TV y volvé a intentar.'; return; }
@@ -614,7 +618,7 @@ const capReset = m => capShift(m, () => 0);
 function capBegin(m, fx, kind, want, msg) {
   const s = m.link.status;
   m.remote.captions.apply = {
-    kind, stage: 'verifying', want, catalogueId: s.active_catalogue.id, afterSeq: linkRequestPoll(m, fx), ticket: null,
+    kind, stage: 'verifying', want, catalogueId: s.active_catalogue.id, gate: linkGate(m, fx), ticket: null,
     prevVisible: typeof s.subtitles_enabled === 'boolean' ? s.subtitles_enabled : null, errorAtStart: errorIdentity(s), reads: 0, origin: originOf(msg),
   };
 }
@@ -651,10 +655,10 @@ function capSettled(s, a) {
 }
 function capAdvance(m, fx) {
   const a = m.remote.captions.apply, l = m.link, s = l.status, c = caps(m);
-  if (!a) return;
-  if (!c.online || c.foreign || s.phase === 'error') return capFail(m, 'Se interrumpió el cambio. Revisá el estado de la TV.');
+  if (!a || !c.online) return;
+  if (c.foreign || s.phase === 'error') return capFail(m, 'Se interrumpió el cambio. Revisá el estado de la TV.');
   if (a.stage === 'verifying') {
-    if (l.statusSeq <= a.afterSeq) return;
+    if (!gatePassed(m, a.gate)) return;
     if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
     if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
     const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin);
@@ -701,14 +705,9 @@ function stopOnCommandDone(m, c, fx) {
   m.ui.stopIssued = false;
   if (stopOutranStart(c, c.error) && caps(m).stop) remoteStopNow(m, fx);
 }
-function stopOnDeadline(m, msg) {
-  if (m.remote.stop?.deadline !== msg.ticket) return;
-  m.remote.stop = null;
-  m.ui.errors.local = 'No se pudo detener: sin conexión. Probá de nuevo.';
-}
 function stopAdvance(m, fx) {
   const st = m.remote.stop;
-  if (!st || m.link.statusSeq <= st.afterSeq) return;
+  if (!st || !gatePassed(m, st)) return;
   m.remote.stop = null;
   if (caps(m).stop) remoteStopNow(m, fx);
 }
@@ -735,7 +734,7 @@ function uiConfirmAccept(m, fx) {
   m.ui.confirm = null;
   if (c?.kind === 'stop') {
     remoteCancelFlows(m);
-    m.remote.stop = {afterSeq: linkRequestPoll(m, fx), deadline: pendingDeadline(m, fx, 'stop')};
+    m.remote.stop = linkGate(m, fx);
   } else if (c?.kind === 'replace') {
     const k = c.snap;
     if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;

@@ -35,8 +35,7 @@ function onTimer(m, fx, msg) {
     if (!l.polling) linkIssuePoll(m, fx);
   } else if (msg.name === 'skip') seekOnTimer(m, fx, msg);
   else if (msg.name === 'clock' && msg.ticket === m.ui.clock) m.ui.clock = null;
-  else if (msg.name === 'stop') stopOnDeadline(m, msg);
-  else if (msg.name === 'start') planOnDeadline(m, msg);
+  else if (msg.name === 'pending') linkOnDeadline(m, msg);
 }
 /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
 function reconcile(m, fx) {
