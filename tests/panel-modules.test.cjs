@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const {PANEL_FILES} = require('./helpers/panel-source.cjs');
-const {dependsOn, crossings, read} = require('./helpers/panel-modules.cjs');
+const {dependsOn, codeOnly, crossings, read} = require('./helpers/panel-modules.cjs');
 const {fixture, playing} = require('./helpers/panel-harness.cjs');
 
 const GLOBALS = {TextDecoder, AbortController};
@@ -16,6 +16,14 @@ test('each panel file names only what its declared dependencies declare, and tho
 test('the check catches a core that reaches into the addon', () => {
   const planted = files.map(f => f.name === 'panel-core.js' ? {...f, src: `${f.src}\nfunction leak(cat) { return addonKey(cat); }\n`} : f);
   assert.deepEqual(crossings(planted, GLOBALS).out, ['panel-core.js names addonKey from panel-addon.js']);
+});
+
+test('the lexer rejects an unterminated literal instead of scanning forever', () => {
+  const lex = src => vm.runInNewContext('codeOnly(src)', {codeOnly, src}, {timeout: 1000});
+  for (const [src, at] of [["const r = /'/; const x = 1;", 11], ['/* open', 0], ["x = 'open", 4], ['x = `a ${b', 4]]) {
+    assert.throws(() => lex(src), {message: `unterminated literal at ${at}`}, src);
+  }
+  assert.equal(lex("a('b', `c${d}e`) /* f */ // g"), 'a( ,    d   )   ');
 });
 
 function withDependencies(name) {
