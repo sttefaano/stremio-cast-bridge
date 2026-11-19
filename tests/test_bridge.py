@@ -213,6 +213,32 @@ class RestartPolicyTest(unittest.TestCase):
             self.assertIs(bridge.active_plan, before)
             bridge.cast.media_controller.play_media.assert_not_called()
 
+    def delay_reload(self, folder, delay, file_track):
+        bridge = self.fixture(Path(folder))
+        bridge.state['playback_id'] = 'playback'
+        bridge.receiver_confirmed = True
+        receiver = bridge.cast.media_controller.status
+        receiver.content_id, receiver.adjusted_current_time = bridge.media_url, 10
+        self.subtitle_playlist(bridge, segments=5, ended=False)
+        if file_track:
+            (bridge.session / 'cues.json').write_text('[]')
+        bridge.mutate('subtitles', apply_data(bridge, delay=delay))
+        return bridge
+
+    def test_file_track_delay_change_is_not_held_back_by_unwritten_segments(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.delay_reload(folder, -30000, file_track=True)
+            self.assertEqual(bridge.cast.media_controller.play_media.call_args.kwargs['current_time'], 10)
+
+    def test_embedded_delay_change_is_refused_until_listed_windows_reach_the_playhead(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            with self.assertRaises(BridgeError) as refused:
+                self.delay_reload(folder, -20000, file_track=False)
+            self.assertEqual(refused.exception.code, 'subtitle_not_ready')
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.delay_reload(folder, -12000, file_track=False)
+            bridge.cast.media_controller.play_media.assert_called_once()
+
     def test_failed_delay_reload_keeps_the_previous_plan_and_url(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
             bridge = self.fixture(Path(folder))
@@ -529,6 +555,11 @@ class DelayedSubtitleViewTest(unittest.TestCase):
             self.session(Path(folder), ended=True)
             self.assertEqual(fetch('/session-view/d-6001/video_vtt.m3u8').read().decode(),
                              self.PLAYLIST + '#EXT-X-ENDLIST\n')
+
+    def test_negative_delay_lists_every_window_when_the_file_track_cues_are_known(self):
+        with tempfile.TemporaryDirectory() as folder, media_server(Path(folder)) as fetch:
+            (self.session(Path(folder)) / 'cues.json').write_text('[]')
+            self.assertEqual(fetch('/session-view/d-6001/video_vtt.m3u8').read().decode(), self.PLAYLIST)
 
     def test_video_passes_through_and_unknown_or_escaping_paths_are_refused(self):
         with tempfile.TemporaryDirectory() as folder, media_server(Path(folder)) as fetch:

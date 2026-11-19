@@ -80,7 +80,7 @@ def subtitle_view(root, path, delay_ms):
     with open_media(root, path.parent / SUBTITLE_PLAYLIST) as stream:
         playlist = stream.read().decode('utf-8', 'replace')
     if path.name == SUBTITLE_PLAYLIST:
-        body = delayed_playlist(playlist, delay_ms)
+        body = delayed_playlist(playlist, delay_ms, (path.parent / FILE_CUES).exists())
     else:
         body = delayed_segment(playlist, path.name, lambda windows: session_cues(root, path.parent, windows), delay_ms)
     return None if body is None else io.BytesIO(body.encode())
@@ -132,9 +132,9 @@ def subtitle_windows(playlist):
     return windows
 
 
-def delayed_playlist(playlist, delay_ms):
+def delayed_playlist(playlist, delay_ms, cues_known):
     windows = subtitle_windows(playlist)
-    if delay_ms >= 0 or '#EXT-X-ENDLIST' in playlist or not windows:
+    if delay_ms >= 0 or cues_known or '#EXT-X-ENDLIST' in playlist or not windows:
         return playlist
     covered = windows[-1].end
     return playlist[:playlist.index(windows[0].entry)] + ''.join(
@@ -1041,7 +1041,9 @@ class Bridge:
             if rebuild:
                 self.begin(target, plan=plan)
             elif reload:
-                if not subtitle_windows(delayed_playlist((self.session / SUBTITLE_PLAYLIST).read_text(), plan.delay_ms)):
+                windows = subtitle_windows(delayed_playlist((self.session / SUBTITLE_PLAYLIST).read_text(),
+                                                            plan.delay_ms, (self.session / FILE_CUES).exists()))
+                if not windows or windows[-1].end <= float(receiver.adjusted_current_time or 0) * 1000:
                     raise BridgeError('Todavía no hay subtítulos convertidos para ese ajuste. Probá en unos segundos.',
                                       409, 'subtitle_not_ready')
                 with self.state_lock:
@@ -1129,7 +1131,8 @@ class Bridge:
             raise BridgeError('Límite de almacenamiento alcanzado. Detenido para proteger el disco.')
         subtitle_manifest = self.session / SUBTITLE_PLAYLIST
         text_ready = not self.active_plan.subtitle or subtitle_manifest.exists() and bool(subtitle_windows(
-            delayed_playlist(subtitle_manifest.read_text(), self.active_plan.delay_ms)))
+            delayed_playlist(subtitle_manifest.read_text(), self.active_plan.delay_ms,
+                             (self.session / FILE_CUES).exists())))
         ready = count >= 3 and text_ready and (self.session / 'master.m3u8').exists()
         if not alive and self.process.returncode != 0:
             raise BridgeError(f'FFmpeg terminó con código {self.process.returncode}. Fuente o códec no disponible.')
