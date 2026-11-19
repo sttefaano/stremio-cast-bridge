@@ -23,7 +23,10 @@
  * @property {Ticket|null} pollTimer
  * @property {Command[]} inflight  at most one command, plus a stop that may join it; each reply routes to its own entry
  */
-/** @typedef {{ticket:Ticket,action:string}&({stage:'posting'}|{stage:'confirming',ok:boolean,error:string|null,afterSeq:number})} Command */
+/**
+ * @typedef {{text:string,code:string|null}} CommandError
+ * @typedef {{ticket:Ticket,action:string,joins:string|null}&({stage:'posting'}|{stage:'confirming',ok:boolean,error:CommandError|null,afterSeq:number})} Command  joins: the action in flight when this stop went out
+ */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
@@ -230,7 +233,7 @@ function linkCommand(m, fx, action, body, origin = null) {
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
-  l.inflight.push({ticket, action, stage: 'posting'});
+  l.inflight.push({ticket, action, joins: l.inflight[0]?.action ?? null, stage: 'posting'});
   m.ui.errors.local = null;
   if (origin?.from) m.ui.focus = {ref: origin.from, n: origin.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
@@ -261,7 +264,7 @@ function advanceOnStatus(m, fx) {
   const settled = l.inflight.filter(c => c.stage === 'confirming' && l.statusSeq > c.afterSeq);
   l.inflight = l.inflight.filter(c => !settled.includes(c));
   for (const c of settled) {
-    OWNERS[c.action]?.done(m, c);
+    OWNERS[c.action]?.done(m, c, fx);
     uiSettleFocus(m, fx, c);
   }
   startAdvance(m, fx);
@@ -273,8 +276,8 @@ function linkOnReply(m, fx, msg) {
   const c = m.link.inflight.find(x => x.ticket === msg.ticket);
   if (!c) return false;
   if (c.stage !== 'posting') return true;
-  const error = msg.ok ? null : commandError(msg);
-  if (error && (OWNERS[c.action]?.live?.(m, c) ?? true)) m.ui.errors.local = error;
+  const error = msg.ok ? null : {text: commandError(msg), code: msg.code ?? null};
+  if (error && !OWNERS[c.action]?.quiet?.(m, c, error)) m.ui.errors.local = error.text;
   Object.assign(c, {stage: 'confirming', ok: msg.ok, error, afterSeq: linkRequestPoll(m, fx)});
   return true;
 }
@@ -670,7 +673,7 @@ function capAdvance(m, fx) {
 function capOnCommandDone(m, c) {
   const a = m.remote.captions.apply;
   if (a?.ticket !== c.ticket) return;
-  if (c.ok) a.stage = 'reading'; else capFail(m, c.error);
+  if (c.ok) a.stage = 'reading'; else capFail(m, c.error.text);
 }
 
 function remoteStop(m, fx, msg) {
@@ -690,6 +693,13 @@ function remoteStopNow(m, fx, origin = null) {
   u.confirm = null;
   u.sheet = null;
   if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin)) u.stopIssued = true;
+}
+/** A Start swaps the playback a little after the bridge accepts it, so a Detener that joined it can name the old one. */
+const stopOutranStart = (c, error) => c.joins === 'start' && error?.code === 'stale_playback';
+function stopOnCommandDone(m, c, fx) {
+  if (c.ok) return;
+  m.ui.stopIssued = false;
+  if (stopOutranStart(c, c.error) && caps(m).stop) remoteStopNow(m, fx);
 }
 function stopOnDeadline(m, msg) {
   if (m.remote.stop?.deadline !== msg.ticket) return;
@@ -794,9 +804,9 @@ function uiScenario(m, fx, value, msg) {
 const OWNERS = {
   start: {done: planOnCommandDone},
   seek: {done: seekOnCommandDone},
-  subtitles: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
+  subtitles: {quiet: (m, c) => m.remote.captions.apply?.ticket !== c.ticket, done: capOnCommandDone},
   volume: {done: m => { m.remote.volumePreview = null; }},
-  stop: {done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
+  stop: {quiet: (m, c, error) => stopOutranStart(c, error), done: stopOnCommandDone},
 };
 
 // ───────── fresh sub-states

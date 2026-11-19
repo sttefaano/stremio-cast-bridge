@@ -642,6 +642,30 @@ test('a stop that joins an in-flight command still reports that command and sett
   assert.equal(q.view.mando.volume.percent, 30, 'the preview gives way to what the TV reports');
 });
 
+test('a Detener that joins a Cambiar película stops the new movie once the bridge has swapped the playback', () => {
+  const p = panel(playing);
+  p.tap('openChange');
+  choose(p, 'b');
+  p.tap('start');
+  p.tap('confirmAccept');
+  p.status(playing);
+  p.reply(p.posted('start'));
+  p.tap('dismiss');
+  p.tap('stop');
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'}, 'before the swap the old playback is still the one to stop');
+  p.reply(p.posted('stop'), {ok: false, code: 'stale_playback', message: 'La reproducción cambió. Revisá la película activa.'});
+  assert.equal(p.view.problem, null);
+  const swapped = {...playing, phase: 'preparing', pending: true, source_id: 'b', title: 'Beta', playback_id: 'play-b'};
+  p.status(swapped);
+  p.status(swapped);
+  assert.equal(p.view.problem, null);
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-b'});
+  p.reply(p.posted('stop'), {ok: false, code: 'stale_playback', message: 'La reproducción cambió. Revisá la película activa.'});
+  p.status({...swapped, playback_id: 'play-c'});
+  assert.equal(p.posts('stop').length, 0, 'only the stop that joined the Start is sent again');
+  assert.equal(p.view.problem.body, 'La reproducción cambió. Revisá la película activa.');
+});
+
 test('focus goes back only when the command that asked for it settles', () => {
   const p = panel(playing);
   p.tap('toggle', undefined, 'toggle', 1);
