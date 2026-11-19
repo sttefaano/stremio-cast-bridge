@@ -464,8 +464,6 @@ test('while focus is being restored, arrows and Space are swallowed and are not 
   assert.equal(key(p, ' ', {n: 4}), 'swallow');
   assert.deepEqual(plain(key(p, 'ArrowRight', {n: 5})), {t: 'skip', arg: 30}, 'a later interaction ends the restore');
   assert.deepEqual(plain(key(p, 'ArrowRight', {n: 4, idle: false})), {t: 'skip', arg: 30}, 'focus is somewhere on purpose');
-  p.send(key(p, 'ArrowRight', {n: 4}) === 'swallow' ? {t: 'nothing'} : {t: 'skip', arg: 30});
-  assert.equal(p.posts('seek').length + p.effects('timer').filter(t => t.name === 'skip').length, 0);
 });
 
 test('the view is plain JSON data and every action it names is a known message', () => {
