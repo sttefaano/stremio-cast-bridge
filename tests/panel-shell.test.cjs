@@ -160,16 +160,17 @@ test('every reference in the markup resolves', () => {
   }
 });
 
-test('every data-act, data-change, data-input and data-submit names a message the core handles', () => {
-  const {Panel} = load(), doc = parse(HTML), acts = Object.keys(Panel.ACTS);
-  const seen = [];
+test('the page and ACTS agree: every message the page can send has a handler, and every handler can be sent', () => {
+  const {Panel} = load(), doc = parse(HTML), sent = new Set();
   for (const n of [...doc.all, ...doc.all.filter(x => x.content).flatMap(x => x.content.querySelectorAll('[data-act]'))]) {
-    for (const k of ['data-act', 'data-change', 'data-input', 'data-submit']) {
-      const v = n.getAttribute(k);
-      if (v !== null) { seen.push(v); assert.ok(acts.includes(v), `${k}="${v}" is not a key of Panel.ACTS`); }
-    }
+    for (const k of ['data-act', 'data-change', 'data-input', 'data-submit']) if (n.hasAttribute(k)) sent.add(n.getAttribute(k));
   }
-  assert.ok(seen.length > 30);
+  const source = name => fs.readFileSync(name, 'utf8');
+  for (const [, t] of source('panel-shell.js').matchAll(/dispatch\(\{t: '(\w+)'/g)) sent.add(t);
+  for (const [, t] of source('panel.js').slice(source('panel.js').indexOf('function keyMsg')).matchAll(/\{t: '(\w+)'/g)) sent.add(t);
+  for (const [, act] of source('panel-core.js').matchAll(/\{act: '(\w+)'/g)) sent.add(act);
+  for (const step of ['status', 'reply', 'timer', 'file']) sent.delete(step);
+  assert.deepEqual([...sent].sort(), Object.keys(Panel.ACTS).sort());
 });
 
 test('the token placeholder appears once, as the global the server fills in', () => {

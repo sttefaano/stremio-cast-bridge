@@ -335,13 +335,17 @@ test('an Aplicar or a visibility toggle that finds the TV busy says so, sends no
 });
 
 test('a partial failure names the visibility change and keeps the draft', () => {
-  const p = panel({...subsOk('text-a', 0, false), ...withTracks});
+  const hidden = {...subsOk('text-a', 0, false), ...withTracks};
+  const p = panel(hidden);
   p.tap('openSubs');
   p.tap('capTrack', 'text2-a');
+  p.tap('capNudge', 400);
   p.tap('capApply');
-  p.status(subsOk('text-a', 0, false));
+  p.status(hidden);
   p.reply(p.posted('subtitles'), {ok: false, message: 'La TV rechazó el cambio.'});
-  p.status(subsOk('text-a', 0, true));
+  p.status({...subsOk('text-a', 0, true), ...withTracks});
+  assert.equal(p.view.problem.host, 'sheet');
+  assert.equal(p.view.problem.body, 'La visibilidad ya cambió; la sincronía sigue sin confirmar. La TV rechazó el cambio. Tu ajuste sigue en borrador.');
   assert.equal(p.view.sheet.apply.pending, false);
   assert.equal(p.view.sheet.unapplied, true, 'the draft is kept for a retry');
   assert.equal(p.view.sheet.apply.enabled, true);

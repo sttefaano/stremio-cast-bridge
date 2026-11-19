@@ -151,6 +151,7 @@ test('a destination change during the deferred start refuses with El destino cam
   p.tap('start');
   p.status({...idle, selected_device: {...destination.selected_device, id: 'tv-b'}});
   assert.equal(p.posts('start').length, 0);
+  assert.equal(p.view.problem.body, 'El destino cambió. Revisá la TV y volvé a intentar.');
   const q = panel(idle);
   choose(q);
   q.tap('start');

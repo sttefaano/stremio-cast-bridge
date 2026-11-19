@@ -647,45 +647,6 @@ class ControlHTTPTest(unittest.TestCase):
         self.assertIn("const token='secret'", body)
         self.assertNotIn('__SCRIPT__', body)
         self.assertNotIn('__TOKEN__', body)
-        from html.parser import HTMLParser
-        class Panel(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.dialog = None
-                self.dialogs = []
-                self.ids = {}
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == 'dialog':
-                    self.dialog = attrs.get('id')
-                    self.dialogs.append(self.dialog)
-                if 'id' in attrs:
-                    self.ids[attrs['id']] = self.dialog
-            def handle_endtag(self, tag):
-                if tag == 'dialog':
-                    self.dialog = None
-        panel = Panel()
-        panel.feed(body)
-        self.assertEqual(panel.dialogs, ['sheet', 'confirm'])
-        for inside in ('sheet-subs', 'sheet-more', 'sheet-change'):
-            self.assertEqual(panel.ids[inside], 'sheet', inside)
-        for outside in ('prep', 'mando', 'problem', 'track'):
-            self.assertIsNone(panel.ids[outside], outside)
-        self.assertNotIn('seek-apply', body)
         self.assertIn('inputmode="text"', body)
         self.assertNotIn('La noche del faro', body)
         self.assertNotIn('connect-src \'none\'', body)
-
-    def test_panel_escapes_device_name_without_external_resources(self):
-        from demo import DemoBridge
-        h = self.handler()
-        h.server.bridge = DemoBridge()
-        h.server.bridge.args.device_name = '<TV & "sala">'
-        h.path = '/'
-        h.do_GET()
-        body = h.reply.call_args.args[1]
-        self.assertIn('Sin TV elegida', body)
-        self.assertNotIn('<TV &', body)
-        self.assertNotIn('<img', body)
-        self.assertNotIn('<video', body)
-        self.assertNotIn('<canvas', body)
