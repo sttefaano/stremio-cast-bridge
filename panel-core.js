@@ -191,7 +191,7 @@ function caps(m) {
     online, busy, stopping, foreign, owned, transport,
     sheets: {subs: {open: online && subs, keep: subs}, more: {open: owned, keep: owned}, change: {open: online && change && !stopping, keep: change}},
     captions: transport && !!s.playback_id && !!s.active_catalogue && !m.remote.captions.apply,
-    stop: online && !stopping && (s.can_change_device === false || busy || live || WAITING.includes(s.phase) || foreign || s.phase === 'error'),
+    stop: online && !stopping && (s.can_change_device === false || busy || live || foreign || s.phase === 'error'),
     stopNeedsConfirm: live && !busy,
     changeDevice: online && s.can_change_device === true && !busy,
     start: online && !busy && !foreign && s.selected_device?.available === true && s.device_discovery !== 'error' && s.source_discovery !== 'error',
