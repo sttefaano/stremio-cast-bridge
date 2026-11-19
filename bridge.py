@@ -38,6 +38,7 @@ MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': '
 
 DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
+FILE_CUES = 'cues.json'
 CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)')
 
 
@@ -81,8 +82,16 @@ def subtitle_view(root, path, delay_ms):
     if path.name == SUBTITLE_PLAYLIST:
         body = delayed_playlist(playlist, delay_ms)
     else:
-        body = delayed_segment(playlist, path.name, lambda name: segment_cues(root, path.parent / name), delay_ms)
+        body = delayed_segment(playlist, path.name, lambda windows: session_cues(root, path.parent, windows), delay_ms)
     return None if body is None else io.BytesIO(body.encode())
+
+
+def session_cues(root, session, windows):
+    try:
+        return segment_cues(root, session / FILE_CUES)
+    except FileNotFoundError:
+        # FFmpeg can write a cue into a later segment than its start (seen two windows late), so use every listed one.
+        return {cue for window in windows for cue in segment_cues(root, session / window.name)}
 
 
 def segment_cues(root, path):
@@ -93,7 +102,18 @@ def segment_cues(root, path):
 @functools.lru_cache(maxsize=8192)
 def file_cues(root, path, *identity):
     with open_media(root, path) as stream:
+        if path.name == FILE_CUES:
+            return tuple(map(tuple, json.load(stream)))
         return tuple(parse_cues(stream.read().decode('utf-8', 'replace')))
+
+
+def write_file_cues(session, plan, origin):
+    """FFmpeg drops a file track's cues from before the seek; keep them so a positive delay can show them."""
+    if plan.subtitle and plan.subtitle.path:
+        offset = round(origin * 1000)
+        cues = parse_cues(plan.subtitle.path.read_text(encoding='utf-8'))
+        (session / FILE_CUES).write_text(json.dumps([(start - offset, end - offset, settings, text)
+                                                     for start, end, settings, text in cues]))
 
 
 class SubtitleWindow(NamedTuple):
@@ -126,10 +146,8 @@ def delayed_segment(playlist, name, cues_of, delay_ms):
     window = next((window for window in windows if window.name == name), None)
     if window is None:
         return None
-    # FFmpeg can write a cue into a later segment than its start (seen two windows late), so use every listed one.
-    cues = {cue for listed in windows for cue in cues_of(listed.name)}
     shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text)
-                   for start, end, settings, text in cues
+                   for start, end, settings, text in cues_of(windows)
                    if end + delay_ms > window.start and max(0, start + delay_ms) < window.end)
     return 'WEBVTT\n' + ''.join(f'\n{timestamp(start)} --> {timestamp(end)}{settings}\n{text}\n'
                                 for start, end, settings, text in shown)
@@ -157,10 +175,8 @@ def timestamp(ms):
     return f'{ms // 3600000:02}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}'
 
 
-CLIP_SEEK_PREROLL = ("noise=amount=0:drop='lte(pts+duration,0)',"
-                   "setts=pts='max(PTS,0)':dts='max(DTS,0)':duration='max(0,DURATION+min(0,PTS))'")
-# setts holds each packet until the next one arrives, so a sparse embedded track would write a cue
-# segments after its window. A stored file is read ahead and is not delayed, so it keeps the clip.
+# Clipping the cue in progress at the seek needs setts, which holds each packet until the next one arrives,
+# so a sparse embedded track would write a cue segments after its window. A file track keeps it in FILE_CUES.
 DROP_SEEK_PREROLL = "noise=amount=0:drop='lt(pts,0)'"
 
 
@@ -186,7 +202,7 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
     mapping = 'v:0,a:0'
     if subtitle:
         language = subtitle.language or 'und'
-        captions = ['-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL if subtitle.path else DROP_SEEK_PREROLL,
+        captions = ['-c:s', 'webvtt', '-bsf:s', DROP_SEEK_PREROLL,
                     '-metadata:s:s:0', f'language={language}']
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
@@ -949,6 +965,7 @@ class Bridge:
         check_cancelled()
         self.session = self.sessions / ('session-' + secrets.token_hex(8))
         self.session.mkdir()
+        write_file_cues(self.session, self.active_plan, self.origin)
         command = ffmpeg_command(self.selected['url'], self.session, self.active_plan,
                                  origin=self.origin, duration=self.duration - self.origin, readrate=self.args.readrate)
         # Never persist raw arguments or producer stderr (both may contain private URLs).

@@ -7,7 +7,7 @@ import time
 from unittest.mock import patch
 from pathlib import Path
 
-from bridge import FFMPEG, probe, ffmpeg_command
+from bridge import FFMPEG, probe, ffmpeg_command, write_file_cues
 from bridge import Bridge, arguments
 from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, normalize_subtitles
 from backend_fixtures import media_server, served_cues
@@ -685,6 +685,7 @@ class GenericProducerTest(unittest.TestCase):
                     plan = store.resolve('source', catalogue['id'], upload['entry']['id'], 0, True)
                     session = sessions / f'session-{format}'
                     session.mkdir()
+                    write_file_cues(session, plan, 10)
                     result = subprocess.run(ffmpeg_command(str(source), session, plan,
                         origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())

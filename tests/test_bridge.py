@@ -16,9 +16,9 @@ from uuid import UUID
 from pychromecast import Chromecast
 from pychromecast.models import CastInfo
 
-from bridge import (main, Bridge, safe_media_path, CLIP_SEEK_PREROLL, FFMPEG, playback_position, public_status,
+from bridge import (main, Bridge, safe_media_path, DROP_SEEK_PREROLL, FFMPEG, playback_position, public_status,
                     ffmpeg_command, probe, parse_cues, subtitle_windows, BridgeError)
-from media import Catalogue, PlaybackPlan
+from media import Catalogue, PlaybackPlan, Subtitle
 from backend_fixtures import install_media, apply_data, media_server, served_cues
 
 
@@ -54,6 +54,26 @@ class RestartPolicyTest(unittest.TestCase):
             content_id='http://unrelated/movie', player_state='PLAYING',
             adjusted_current_time=5, current_subtitle_tracks=[], subtitle_tracks=[])
         return bridge
+
+    def test_a_seek_keeps_file_cues_from_before_the_seek_point_for_a_positive_delay(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            root = Path(folder)
+            bridge = self.fixture(root)
+            upload = root / 'upload.vtt'
+            upload.write_text('WEBVTT\n\n00:00:55.000 --> 00:00:57.000\nGone\n\n'
+                              '00:00:57.000 --> 00:00:59.000\nBefore\n\n00:00:59.000 --> 00:01:02.000\nCrossing\n\n'
+                              '00:01:01.000 --> 00:01:02.000\nAfter\n')
+            bridge.active_plan = replace(bridge.active_plan, subtitle=Subtitle('file', 'upload', 'File', path=upload))
+            with patch('bridge.subprocess.Popen', return_value=Mock(pid=123)), \
+                 patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
+                bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
+            self.subtitle_playlist(bridge, segments=2)
+            for index in range(2):
+                (bridge.session / f'video{index}.vtt').write_text('WEBVTT\n')
+            with media_server(root) as fetch:
+                self.assertEqual(served_cues(fetch, bridge.session.name, 0), {'Crossing': (0, 2), 'After': (1, 2)})
+                self.assertEqual(served_cues(fetch, bridge.session.name, 3000),
+                                 {'Before': (0, 2), 'Crossing': (2, 5), 'After': (4, 5)})
 
     def test_buffered_seek_restarts_and_waits_for_matching_receiver(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
@@ -448,7 +468,7 @@ class SubtitleTimingTest(unittest.TestCase):
             source = Path(folder) / 'seek.srt'
             source.write_text('1\n00:01:02,355 --> 00:01:04,000\nHola\n')
             result = subprocess.run([FFMPEG, '-v', 'error', '-ss', '60', '-i', str(source),
-                '-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL, '-f', 'webvtt', '-'],
+                '-c:s', 'webvtt', '-bsf:s', DROP_SEEK_PREROLL, '-f', 'webvtt', '-'],
                 capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertIn(b'00:02.355 --> 00:04.000', result.stdout)
