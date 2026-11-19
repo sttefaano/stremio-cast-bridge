@@ -90,7 +90,7 @@ def session_cues(root, session, windows):
     try:
         return segment_cues(root, session / FILE_CUES)
     except FileNotFoundError:
-        # FFmpeg can write a cue into a later segment than its start (seen two windows late), so use every listed one.
+        # A delay moves cues across window boundaries, so a window's view can need cues stored in any listed one.
         return {cue for window in windows for cue in segment_cues(root, session / window.name)}
 
 
