@@ -384,16 +384,26 @@ test('closing a sheet whose opener is gone puts focus on the page', async () => 
   assert.equal(s.doc.activeElement?.id, 'mando');
 });
 
+const chooseAlpha = async (s, cat = catalogue('a')) => {
+  s.doc.dispatchEvent({type: 'click', target: s.$('source-list').children.find(n => n.tagName === 'BUTTON')});
+  await s.answer('/api/catalogue', 200, {catalogue: cat});
+};
+// Like a browser: clearing a file input's value also empties its file list.
+function pickFile(input, file) {
+  let value = '';
+  Object.defineProperty(input, 'value', {configurable: true, get: () => value, set: v => { value = v; if (v === '') input.files = []; }});
+  input.files = [file];
+  value = 'C:\\fakepath\\' + file.name;
+  input.document.dispatchEvent({type: 'change', target: input});
+}
+
 test('a subtitle file is read with arrayBuffer, never file.text', async () => {
   const s = await shell(idle);
-  const row = s.$('source-list').children.find(n => n.tagName === 'BUTTON');
-  s.doc.dispatchEvent({type: 'click', target: row});
-  await s.answer('/api/catalogue', 200, {catalogue: catalogue('a')});
+  await chooseAlpha(s);
   s.click('branch-upload');
   const input = s.$('upload-input');
   let textCalled = false;
-  input.files = [{name: 'sub.srt', size: 12, text() { textCalled = true; throw new Error('file.text must not be used'); }, arrayBuffer: async () => new TextEncoder().encode('1\n00:00:01,000 --> 00:00:02,000\nHola\n').buffer}];
-  s.doc.dispatchEvent({type: 'change', target: input});
+  pickFile(input, {name: 'sub.srt', size: 12, text() { textCalled = true; throw new Error('file.text must not be used'); }, arrayBuffer: async () => new TextEncoder().encode('1\n00:00:01,000 --> 00:00:02,000\nHola\n').buffer});
   await flush();
   const upload = s.pending('subtitle_upload')[0];
   assert.ok(upload, 'the decoded bytes are posted');
@@ -401,6 +411,29 @@ test('a subtitle file is read with arrayBuffer, never file.text', async () => {
   assert.match(upload.body.text, /Hola/);
   assert.equal(upload.body.format, 'srt');
   assert.equal(input.value, '', 'the input is cleared so the same file can be picked again');
+});
+
+test('a refused pick clears the file input too, so picking the same file again is a new change', async () => {
+  const s = await shell(idle);
+  await chooseAlpha(s);
+  s.click('branch-upload');
+  const input = s.$('upload-input');
+  pickFile(input, {name: 'sub.txt', size: 3});
+  assert.equal(s.$('subs-status').textContent, 'Elegí un archivo .srt o .vtt en UTF-8.');
+  assert.equal(input.value, '');
+});
+
+test('a successful Stremio search clears the title the user typed', async () => {
+  const addon = {state: 'ready', revision: 1, match: {label: 'Alpha (2020)', confidence: 'high'}, message: null, count: 1};
+  const s = await shell({...idle, catalogues: {a: {state: 'ready', catalogue: catalogue('a', addon)}}});
+  await chooseAlpha(s, catalogue('a', addon));
+  s.click('branch-stremio');
+  await s.answer('/api/subtitle_offers', 200, {revision: 1, offers: [{id: 'o1', language: 'spa', language_name: 'Español', label: 'Alpha.es.srt'}], alternatives: []});
+  s.click('stremio-wrong');
+  s.$('stremio-hint').value = 'Alpha 2020';
+  s.doc.dispatchEvent({type: 'submit', target: s.$('stremio-form')});
+  await s.answer('/api/subtitle_lookup', 200, {catalogue: catalogue('a', {...addon, revision: 2})});
+  assert.equal(s.$('stremio-hint').value, '');
 });
 
 test('focus returns to the control once its command settles, only if the user has not touched anything since', async () => {

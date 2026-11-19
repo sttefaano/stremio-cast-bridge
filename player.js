@@ -570,13 +570,14 @@ const Panel = (() => {
     if (hint.length > 200) { addonSay(x.addon, x.catalogue, 'Escribí un título de hasta 200 caracteres.'); return; }
     addonLookup(m, fx, scope, hint);
   }
-  function addonOnReply(m, scope, msg) {
+  function addonOnReply(m, fx, scope, msg) {
     const x = addonCtx(m, scope), a = x.addon, op = a.op;
     a.op = null;
     if (op.kind === 'lookup') {
       if (!msg.ok) return addonSay(a, x.catalogue, addonFailure(msg));
       x.accept(msg.body?.catalogue, null);
       a.correcting = false;
+      fx.push({fx: 'clearSearch'});
     } else if (!msg.ok) {
       if (msg.code === 'invalid_subtitle' && !a.unreadable.includes(op.offerId)) a.unreadable.push(op.offerId);
       addonSay(a, x.catalogue, addonFailure(msg));
@@ -615,7 +616,7 @@ const Panel = (() => {
     }
     for (const [scope, a] of [['plan', p.addon], ['remote', m.remote.addon]]) {
       if (a.pull.s === 'pulling' && a.pull.ticket === t) return addonOnPull(m, scope, msg);
-      if (a.op?.ticket === t) return addonOnReply(m, scope, msg);
+      if (a.op?.ticket === t) return addonOnReply(m, fx, scope, msg);
     }
   }
 
@@ -1696,12 +1697,13 @@ function boot(doc, env) {
       r => dispatch({t: 'reply', ticket: f.ticket, ok: r.ok, body: r.body, code: r.body?.code, message: r.body?.message, timeout: !!r.timeout})),
     timer: f => { env.setTimeout(() => dispatch({t: 'timer', name: f.name, ticket: f.ticket}), f.ms); },
     read: async f => {
-      const input = byId(doc, 'upload-input'), file = input.files?.[0];
+      const file = picked;
+      picked = null;
       let bytes = null;
       try { bytes = file ? await file.arrayBuffer() : null; } catch (_) { /* reported by the core as unreadable */ }
-      input.value = '';
       dispatch({t: 'file', ticket: f.ticket, bytes});
     },
+    clearSearch: () => { byId(doc, 'stremio-hint').value = ''; },
     store: f => { try { env.storage?.setItem(f.key, f.value); } catch (_) { /* private mode */ } },
     focus: f => {
       const el = doc.getElementById(f.ref), a = doc.activeElement, dialog = el?.closest('dialog');
@@ -1733,11 +1735,14 @@ function boot(doc, env) {
     const el = t.closest('[data-act]');
     if (el && !el.disabled) dispatch({t: el.getAttribute('data-act'), arg: el.getAttribute('data-arg') ?? undefined, from: el.id});
   });
+  /** The file the user last picked. The input is emptied at once, so picking the same file again is a change. */
+  let picked = null;
   doc.addEventListener('change', e => {
     const el = e.target.closest('[data-change]');
     if (!el || (seekIgnored && el.id === 'track')) return;
-    const arg = el.getAttribute('type') === 'file' ? (el.files?.[0] ? {name: el.files[0].name, size: el.files[0].size} : null)
-      : el.getAttribute('type') === 'checkbox' ? el.checked : el.value;
+    const type = el.getAttribute('type');
+    if (type === 'file') { picked = el.files?.[0] ?? null; el.value = ''; }
+    const arg = type === 'file' ? (picked ? {name: picked.name, size: picked.size} : null) : type === 'checkbox' ? el.checked : el.value;
     dispatch({t: el.getAttribute('data-change'), arg, from: el.id});
   });
   doc.addEventListener('input', e => {
