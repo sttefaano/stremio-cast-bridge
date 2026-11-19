@@ -65,8 +65,7 @@ function reconcile(m, fx) {
     m.prefs.autoSelectTried = true;
     planPickDevice(m, fx, m.prefs.lastDeviceId);
   }
-  const info = m.plan.catalogue?.addon;
-  if (m.plan.choice.branch === 'stremio' && (!info || info.state === 'off')) m.plan.choice = {branch: 'none', entryId: null};
+  planValidChoice(m);
   addonReconcile(m, fx, 'plan');
   addonReconcile(m, fx, 'remote');
 }

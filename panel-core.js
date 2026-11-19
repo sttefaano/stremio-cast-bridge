@@ -131,6 +131,7 @@ const playbackKey = s => JSON.stringify([...playbackTuple(s), s.active_catalogue
 const replacementIdentity = s => LIVE.includes(s.phase) ? JSON.stringify([...playbackTuple(s), s.session ?? null, s.subtitle_choice ?? null]) : null;
 const parseStatus = raw => raw && typeof raw === 'object' && typeof raw.phase === 'string' && Array.isArray(raw.sources) ? raw : null;
 const addonRevision = c => c?.addon?.revision ?? 0;
+const addonOff = cat => !cat?.addon || cat.addon.state === 'off';
 const notOlder = (a, b) => !!a && !!b && a.id === b.id && a.entries.length >= b.entries.length && addonRevision(a) >= addonRevision(b);
 function decodeSubtitle(bytes) {
   if (!bytes || bytes.byteLength > MAX_UPLOAD) return {ok: false, message: 'El archivo supera 1 MiB.'};
@@ -390,12 +391,16 @@ function planOnCatalogueReply(m, msg) {
 }
 
 function planSubsBranch(m, branch) {
-  const p = m.plan, info = p.catalogue?.addon;
+  const p = m.plan;
   if (!p.catalogue || p.load.s !== 'idle' || !(branch === 'none' || branch in KIND_OF_BRANCH)) return;
-  if (branch === 'stremio' && (!info || info.state === 'off')) return;
+  if (branch === 'stremio' && addonOff(p.catalogue)) return;
   planEdit(m);
   const keep = branch !== 'none' && entryOf(p.catalogue, p.choice.entryId)?.kind === KIND_OF_BRANCH[branch];
   p.choice = branch === 'none' ? {branch} : {branch, entryId: keep ? p.choice.entryId : null};
+}
+/** A Stremio choice cannot outlive the addon that offered it. */
+function planValidChoice(m) {
+  if (m.plan.choice.branch === 'stremio' && addonOff(m.plan.catalogue)) m.plan.choice = {branch: 'none', entryId: null};
 }
 function planPickEntry(m, id) {
   const p = m.plan, e = entryOf(p.catalogue, id);

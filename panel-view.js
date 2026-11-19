@@ -42,7 +42,7 @@ const SUBS_BRANCHES = [['none', 'Sin'], ['file', 'Del archivo'], ['stremio', 'St
 
 function viewStremio(m, scope) {
   const x = addonCtx(m, scope), a = x.addon, cat = x.catalogue, info = cat?.addon;
-  if (!info || info.state === 'off') return null;
+  if (addonOff(cat)) return null;
   const eff = addonOffers(a, cat), key = addonKey(cat), listable = info.state === 'ready' || info.state === 'unidentified';
   const enabled = x.canAct && !a.op, pullFailed = listable && a.pull.s === 'failed' && a.pull.key === key;
   const picking = info.state === 'ready' && eff.versions.length > 0, unidentified = info.state === 'unidentified';
@@ -84,7 +84,7 @@ function viewPlan(m) {
   const s = m.link.status, p = m.plan, c = caps(m), cat = p.catalogue, sel = s.selected_device;
   const can = planCanStart(m), same = samePlan(m), online = c.online, idleLoad = p.load.s === 'idle';
   const sourceError = p.refresh.discover.error || (s.source_discovery === 'error' ? s.source_error || 'Reintentá la búsqueda.' : '');
-  const info = cat?.addon, stremioOff = !!cat && (!info || info.state === 'off');
+  const stremioOff = !!cat && addonOff(cat);
   const branchOk = online && !!p.sourceId && !!cat && idleLoad;
   const uploadFree = branchOk && p.upload.s === 'idle' && p.addon.op?.kind !== 'fetch';
   const picked = entryOf(cat, p.choice.entryId), stremio = viewStremio(m, 'plan');
