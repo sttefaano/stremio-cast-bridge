@@ -136,14 +136,15 @@ def segment_action(index, complete, run, caller='arrival', yields=False, reach=R
     return 'restart'
 
 
-def exit_outcome(start, limit, position, count, short, quiet, stall_seconds=STALL_SECONDS):
+def exit_outcome(start, limit, position, count, short, quiet, returncode, stall_seconds=STALL_SECONDS):
     """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
     short says its last segment came out shorter than its window, as a stall finalizes the one it was
     writing, so even a run that reached its bound may have left it short. quiet is how long it ran after
-    its previous segment (or its launch) until its last one, not counting time suspended."""
+    its previous segment (or its launch) until its last one, not counting time suspended. Only a clean
+    exit can be the source's end."""
     if position == limit and not short:
         return 'complete'
-    if limit == count and position >= count - END_SLACK and quiet < stall_seconds:
+    if limit == count and position >= count - END_SLACK and quiet < stall_seconds and returncode == 0:
         return 'end'
     return 'stalled'
 
@@ -213,7 +214,7 @@ class Producer:
         quiet = until - since - sum(max(0, min(until, resumed) - max(since, stopped)) for stopped, resumed in self.pauses)
         short = self.position == self.start or self._short(self.position - 1)
         outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, short, quiet,
-                               self.stall_seconds)
+                               self.process.poll(), self.stall_seconds)
         if outcome == 'complete':
             self.failures = 0
         elif outcome == 'end':

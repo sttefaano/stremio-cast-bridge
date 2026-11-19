@@ -113,20 +113,21 @@ class ExitOutcomeTest(unittest.TestCase):
         # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15),
         # and it finalizes the segment it was writing short.
         cases = (
-            ('reached its bound', 10, 20, 20, False, 0, 'complete'),
-            ('reached its bound slowly with its last segment whole', 10, 20, 20, False, 60, 'complete'),
-            ('reached its bound by stalling in its last segment', 10, 20, 20, True, 60, 'stalled'),
-            ('reached the listed end promptly with a short tail', 10, 50, 50, True, 1, 'end'),
-            ('stopped promptly in the last two listed segments', 10, 50, 48, True, 1, 'end'),
-            ('stopped promptly having written nothing near the end', 49, 50, 49, True, 1, 'end'),
-            ('stopped in the last two after a silence', 10, 50, 48, True, 45, 'stalled'),
-            ('wrote nothing near the end after a silence', 49, 50, 49, True, 45, 'stalled'),
-            ('stopped promptly far from the end', 10, 50, 30, False, 1, 'stalled'),
-            ('stopped near the end of a run bounded before the list end', 10, 49, 48, False, 1, 'stalled'),
+            ('reached its bound', 10, 20, 20, False, 0, 0, 'complete'),
+            ('reached its bound slowly with its last segment whole', 10, 20, 20, False, 60, 0, 'complete'),
+            ('reached its bound by stalling in its last segment', 10, 20, 20, True, 60, 0, 'stalled'),
+            ('reached the listed end promptly with a short tail', 10, 50, 50, True, 1, 0, 'end'),
+            ('stopped promptly in the last two listed segments', 10, 50, 48, True, 1, 0, 'end'),
+            ('stopped promptly having written nothing near the end', 49, 50, 49, True, 1, 0, 'end'),
+            ('stopped in the last two after a silence', 10, 50, 48, True, 45, 0, 'stalled'),
+            ('wrote nothing near the end after a silence', 49, 50, 49, True, 45, 0, 'stalled'),
+            ('crashed promptly in the last two listed segments', 10, 50, 48, False, 1, 1, 'stalled'),
+            ('stopped promptly far from the end', 10, 50, 30, False, 1, 0, 'stalled'),
+            ('stopped near the end of a run bounded before the list end', 10, 49, 48, False, 1, 0, 'stalled'),
         )
-        for label, start, limit, position, short, quiet, expected in cases:
+        for label, start, limit, position, short, quiet, code, expected in cases:
             with self.subTest(label):
-                self.assertEqual(exit_outcome(start, limit, position, 50, short, quiet, stall_seconds=10), expected)
+                self.assertEqual(exit_outcome(start, limit, position, 50, short, quiet, code, stall_seconds=10), expected)
 
 
 class FakeProcess:
@@ -412,6 +413,16 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(producer.request(18), 'end')
                 self.assertEqual(producer.snapshot().end, 18)
                 self.assertEqual(len(self.launched), 1)
+
+    def test_a_crash_near_the_end_is_retried_not_taken_for_the_end(self):
+        self.layout = VodLayout(60.021)
+        producer = self.producer(backoff_seconds=0)
+        producer.cover(0)
+        self.write(*range(0, 8))
+        self.launched[0].code = 1
+        producer.cover(0)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 7, 10])
+        self.assertEqual(producer.snapshot().end, 10)
 
     def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
         self.layout = VodLayout(60.021)
