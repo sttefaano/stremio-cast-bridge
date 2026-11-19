@@ -1299,7 +1299,6 @@ FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
 
 
 def build_panel(root):
-    """The panel page and its fonts by URL. A font's URL names its bytes, so a cached copy is never stale."""
     html = (root / 'player.html').read_text().replace('__SCRIPT__', (root / 'player.js').read_text())
     fonts = {}
     for name in FONT_NAMES:

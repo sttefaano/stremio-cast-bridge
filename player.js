@@ -17,7 +17,7 @@ const Panel = (() => {
    * @property {number} statusAt       msg.at of the last applied status (display clock only)
    * @property {number} generation     bumped by every command; status replies of an older generation are dropped
    * @property {number} seq            seq of the last ISSUED poll
-   * @property {number} appliedSeq     seq of the last poll that brought a status
+   * @property {number} statusSeq
    * @property {boolean} polling       one poll in flight
    * @property {boolean} repoll        a poll issued after now is needed as soon as the one in flight returns
    * @property {Ticket|null} pollTimer
@@ -65,14 +65,13 @@ const Panel = (() => {
    * @property {Seek} seek
    * @property {{draft:{subtitleId:string|null,delayMs:number}|null,apply:CaptionApply|null}} captions
    * @property {number|null} volumePreview
-   * @property {null|{s:'asking'}|{s:'confirmed',afterSeq:number}} stop  asking is the open confirm; confirmed waits for fresh status
    * @property {Catalogue|null} overlay  newer active catalogue learned from a lookup or download
    * @property {Addon} addon
    */
   /**
    * @typedef {object} Ui
    * @property {null|'subs'|'more'|'change'} sheet
-   * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}} confirm  the stop confirm lives in Remote.stop
+   * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}} confirm
    * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
    * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
    * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
@@ -107,7 +106,6 @@ const Panel = (() => {
     if (parts.slice(1).some(n => n >= 60)) return null;
     return parts.reduce((a, n) => a * 60 + n, 0);
   }
-  /** '0,4' for 400 or −400 ms: es-AR decimal comma, one decimal. */
   const decimalSeconds = ms => (Math.abs(ms) / 1000).toFixed(1).replace('.', ',');
   /** '+0,4 s' with U+2212 for negatives; '—' when unknown. */
   function signedSeconds(ms) {
@@ -124,15 +122,12 @@ const Panel = (() => {
   }
   const errorIdentity = s => s?.action_error ? `${s.action_error_revision || 0}:${s.action_error}` : null;
   const playbackTuple = s => [s?.selected_device?.id ?? null, s?.device_revision ?? null, s?.source_id ?? null, s?.playback_id ?? null];
-  /** The playback the remote's drafts and a stop consent belong to. */
   const playbackKey = s => JSON.stringify([...playbackTuple(s), s?.active_catalogue?.id ?? null]);
   /** null unless a movie is on the TV; else what a replacement consent was given for. */
   const replacementIdentity = s => LIVE.includes(s.phase) ? JSON.stringify([...playbackTuple(s), s.session ?? null, s.subtitle_choice ?? null]) : null;
   const parseStatus = raw => raw && typeof raw === 'object' && typeof raw.phase === 'string' && Array.isArray(raw.sources) ? raw : null;
   const addonRevision = c => c?.addon?.revision ?? 0;
-  /** `a` may replace `b`: the same catalogue id with no fewer entries and no older addon revision. */
   const notOlder = (a, b) => !!a && !!b && a.id === b.id && a.entries.length >= b.entries.length && addonRevision(a) >= addonRevision(b);
-  /** {ok:true,text} | {ok:false,message}. Decodes the bytes strictly, so a non-UTF-8 file is refused instead of turned into U+FFFD. */
   function decodeSubtitle(bytes) {
     if (!bytes || bytes.byteLength > MAX_UPLOAD) return {ok: false, message: 'El archivo supera 1 MiB.'};
     try { return {ok: true, text: new TextDecoder('utf-8', {fatal: true}).decode(bytes)}; }
@@ -174,8 +169,8 @@ const Panel = (() => {
    * @property {boolean} stop
    * @property {boolean} stopNeedsConfirm
    * @property {boolean} changeDevice
-   * @property {boolean} start  the TV can take a Start now; planCanStart says whether the plan is complete
-   * @property {Record<'subs'|'more'|'change',{open:boolean,keep:boolean}>} sheets  open: may open now; keep: an open one stays (offline keeps it)
+   * @property {boolean} start
+   * @property {Record<'subs'|'more'|'change',{open:boolean,keep:boolean}>} sheets
    */
   /** @param {Model} m @returns {Caps} */
   function caps(m) {
@@ -215,7 +210,6 @@ const Panel = (() => {
     fx.push({fx: 'poll', gen: l.generation, seq: ++l.seq});
   }
   /**
-   * Send the one command. Refused when offline or when one is in flight, except Stop, which preempts.
    * Playback commands carry the device identity; explicit fields in `body` win (start sends its click-time snapshot).
    * @returns {Ticket|null}
    */
@@ -236,7 +230,7 @@ const Panel = (() => {
     l.polling = false;
     if (msg.gen === l.generation) {
       const s = msg.ok ? parseStatus(msg.raw) : null;
-      if (s) { l.status = s; l.online = true; l.statusAt = msg.at; l.appliedSeq = msg.seq; } else l.online = false;
+      if (s) { l.status = s; l.online = true; l.statusAt = msg.at; l.statusSeq = msg.seq; } else l.online = false;
       advanceOnStatus(m, fx);
     }
     if (l.repoll) linkIssuePoll(m, fx);
@@ -248,7 +242,7 @@ const Panel = (() => {
     remoteSync(m);
     uiObserveError(m);
     planAdoptSnapshot(m);
-    if (l.command?.stage === 'confirming' && l.appliedSeq > l.command.afterSeq) {
+    if (l.command?.stage === 'confirming' && l.statusSeq > l.command.afterSeq) {
       const done = l.command;
       l.command = null;
       onCommandDone(m, done);
@@ -263,15 +257,13 @@ const Panel = (() => {
     const c = m.link.command;
     if (c.stage !== 'posting') return;
     c.ok = msg.ok;
-    const live = OWNERS[c.owner]?.live ?? (() => true);
-    if (!msg.ok && live(m, c)) m.ui.errors.local = commandError(msg);
+    if (!msg.ok && (OWNERS[c.owner]?.live(m, c) ?? true)) m.ui.errors.local = commandError(msg);
     c.stage = 'confirming';
     c.afterSeq = linkRequestPoll(m, fx);
   }
   const onCommandDone = (m, c) => OWNERS[c.owner]?.done(m, c);
 
   // ───────── plan: movie, catalogue, subtitle decision, Start
-  /** THE cancellation point: any change to the plan kills a pending Start and an open replacement consent. */
   function planTouch(m) {
     m.plan.start = null;
     m.ui.confirm = null;
@@ -292,7 +284,6 @@ const Panel = (() => {
   const entryOf = (cat, id) => cat?.entries.find(e => e.id === id) || null;
   const sourceTitle = (s, id) => s.sources.find(x => x.id === id)?.title || 'la película elegida';
 
-  /** The plan is complete enough to start, with the names of what is still missing for the stub. */
   function planCanStart(m) {
     const s = m.link.status || NO_STATUS, p = m.plan, missing = [];
     if (!p.sourceId || !s.sources.some(x => x.id === p.sourceId)) missing.push('PELÍCULA');
@@ -326,10 +317,7 @@ const Panel = (() => {
     p.load = {s: 'loading', ticket, analysisId: null, previousId: p.catalogue?.id ?? null};
     fx.push({fx: 'post', ticket, action: 'catalogue', body: {source_id: p.sourceId, refresh}});
   }
-  /**
-   * Monotonic merge: never fewer entries or a lower addon revision for the same id; a new id starts the
-   * plan over. Returns whether the plan took it.
-   */
+  /** Returns whether the plan took a new or richer catalogue. */
   function planAcceptCatalogue(m, cat) {
     const p = m.plan, cur = p.catalogue;
     if (!cat || cat.source_id !== p.sourceId) return false;
@@ -415,7 +403,6 @@ const Panel = (() => {
     p.upload = {s: 'idle', filename: u.filename, message: `Archivo listo: ${u.filename}. Se usará solo al iniciar.`};
   }
 
-  /** pickDevice never casts: it only selects. */
   function planPickDevice(m, fx, id, msg) {
     const s = m.link.status;
     if (!caps(m).changeDevice || !s.devices?.some(d => d.id === id) || s.selected_device?.id === id) return;
@@ -430,7 +417,6 @@ const Panel = (() => {
     fx.push({fx: 'post', ticket: r.ticket, action: kind, body: {}});
   }
 
-  /** Nothing is sent from the click itself: a fresh poll must confirm the TV, the list and any replacement first. */
   function planStart(m, fx) {
     const p = m.plan, s = m.link.status;
     if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || confirmOf(m)) return;
@@ -442,7 +428,7 @@ const Panel = (() => {
   /** After a poll issued since the click: the destination, the list and the replacement must still be what was agreed. */
   function startAdvance(m, fx) {
     const p = m.plan, st = p.start, s = m.link.status, l = m.link;
-    if (st?.stage !== 'verifying' || l.appliedSeq <= st.afterSeq) return;
+    if (st?.stage !== 'verifying' || l.statusSeq <= st.afterSeq) return;
     const k = st.snap;
     p.start = null;
     if (s?.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { m.ui.errors.local = 'El destino cambió. Revisá la TV y volvé a intentar.'; return; }
@@ -674,7 +660,6 @@ const Panel = (() => {
       fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
     } else m.remote.seek = {s: 'idle'};
   }
-  /** A sent seek stays on screen until the TV is usable and either was seen busy or reached the target. */
   function seekOnStatus(m) {
     const k = m.remote.seek, s = m.link.status, c = caps(m);
     if (k.s === 'dragging' && !c.transport) m.remote.seek = {s: 'idle'};
@@ -770,13 +755,12 @@ const Panel = (() => {
       && (!finite(s.subtitle_delay_ms) || s.subtitle_delay_ms === w.delayMs)
       && (typeof s.subtitles_enabled !== 'boolean' || s.subtitles_enabled === w.enabled);
   }
-  /** Runs on every applied status. A playback identity change dropped the apply already, in remoteSync. */
   function capAdvance(m, fx) {
     const a = m.remote.captions.apply, l = m.link, s = l.status, c = caps(m);
     if (!a) return;
     if (!c.online || c.foreign || s.phase === 'error') return capFail(m, 'Se interrumpió el cambio. Revisá el estado de la TV.');
     if (a.stage === 'verifying') {
-      if (l.appliedSeq <= a.afterSeq) return;
+      if (l.statusSeq <= a.afterSeq) return;
       if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
       if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
       const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, {owner: 'captions', from: a.from, n: a.n});
@@ -798,14 +782,12 @@ const Panel = (() => {
     if (c.ok) a.stage = 'reading'; else capFail(m, m.ui.errors.local || 'No se pudo aplicar el cambio.');
   }
 
-  /** Confirm only while playing or paused; anything else stops at once and interrupts. */
   function remoteStop(m, fx, msg) {
     const c = caps(m), s = m.link.status;
     if (!c.stop) return;
     if (c.stopNeedsConfirm) m.remote.stop = {s: 'asking'};
     else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
   }
-  /** A stop, asked or sent, outranks every flow that was waiting to act on the TV. */
   function remoteCancelFlows(m) {
     planTouch(m);
     m.remote.captions.apply = null;
@@ -819,10 +801,9 @@ const Panel = (() => {
     u.sheet = null;
     if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
   }
-  /** After a status polled since the click. remoteSync drops the consent, with a message, if the playback changed. */
   function stopAdvance(m, fx) {
     const st = m.remote.stop, s = m.link.status;
-    if (st?.s !== 'confirmed' || m.link.appliedSeq <= st.afterSeq) return;
+    if (st?.s !== 'confirmed' || m.link.statusSeq <= st.afterSeq) return;
     m.remote.stop = null;
     if (caps(m).stop) remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {});
   }
@@ -858,7 +839,6 @@ const Panel = (() => {
       m.remote.stop = {s: 'confirmed', afterSeq: linkRequestPoll(m, fx)};
     }
   }
-  /** A new backend error identity is the latest word: it replaces a local message and ends a seek wait. */
   function uiObserveError(m) {
     const e = m.ui.errors, id = errorIdentity(m.link.status);
     if (!id || id === e.observed) return;
@@ -909,22 +889,17 @@ const Panel = (() => {
     else if (e.local !== null) e.local = null;
     else e.dismissed = errorIdentity(m.link.status);
   }
-  /** Demo scenarios exist only when the server says it is the demo. */
   function uiScenario(m, fx, value, msg) {
     if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
   }
 
-  /**
-   * The flows that own a command. `done` runs once fresh status confirms it. `live` says whether a failure is still
-   * news: a dropped caption apply belonged to a draft that is gone. A sent Start has no `live`, because the plan is
-   * also reset by the server (the TV left Mando, a foreign receiver) and the user still pressed Iniciar.
-   */
+  const always = () => true;
   const OWNERS = {
-    start: {done: planOnCommandDone},
-    seek: {done: seekOnCommandDone},
+    start: {live: always, done: planOnCommandDone},
+    seek: {live: always, done: seekOnCommandDone},
     captions: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
-    volume: {done: m => { m.remote.volumePreview = null; }},
-    stop: {done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
+    volume: {live: always, done: m => { m.remote.volumePreview = null; }},
+    stop: {live: always, done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
   };
 
   // ───────── public: init / step
@@ -944,7 +919,7 @@ const Panel = (() => {
   function init(boot = {}) {
     const m = {
       nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
-      link: {status: null, online: false, statusAt: 0, generation: 0, seq: 0, appliedSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
+      link: {status: null, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
       plan: freshPlan(null), remote: freshRemote(playbackKey(null)), ui: freshUi(),
     };
     const fx = [];
@@ -983,10 +958,8 @@ const Panel = (() => {
   /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
   function reconcile(m, fx) {
     const l = m.link, s = l.status, u = m.ui, c = caps(m);
-    // remember what we owned, to label the stopped notice and re-seed Preparar
     if (s && c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
     uiValidLayers(m);
-    // back in Preparar after an owned playback: movie and TV stay chosen, the subtitle decision starts over
     if (s) {
       const mode = modeOf(m);
       if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
@@ -1003,7 +976,6 @@ const Panel = (() => {
       u.clock = ticketOf(m);
       fx.push({fx: 'timer', name: 'clock', ms: CLOCK_MS, ticket: u.clock});
     }
-    // remember the TV the server confirmed; pre-select it when nothing is selected (never casts)
     if (s?.selected_device && s.selected_device.id !== m.prefs.lastDeviceId) {
       m.prefs.lastDeviceId = s.selected_device.id;
       fx.push({fx: 'store', key: 'cast.lastDevice', value: s.selected_device.id});
@@ -1013,7 +985,6 @@ const Panel = (() => {
       m.prefs.autoSelectTried = true;
       planPickDevice(m, fx, m.prefs.lastDeviceId);
     }
-    // Stremio offers follow the block that shows them; the branch vanishes when the addon is off
     const info = m.plan.catalogue?.addon;
     if (m.plan.choice.branch === 'stremio' && (!info || info.state === 'off')) m.plan.choice = {branch: 'none', entryId: null};
     addonReconcile(m, fx, 'plan');
@@ -1735,7 +1706,7 @@ function boot(doc, env) {
     const el = t.closest('[data-act]');
     if (el && !el.disabled) dispatch({t: el.getAttribute('data-act'), arg: el.getAttribute('data-arg') ?? undefined, from: el.id});
   });
-  /** The file the user last picked. The input is emptied at once, so picking the same file again is a change. */
+  /** A file input fires no change for the same file twice, so it is emptied at once and the pick kept here. */
   let picked = null;
   doc.addEventListener('change', e => {
     const el = e.target.closest('[data-change]');
