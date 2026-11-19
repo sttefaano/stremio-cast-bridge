@@ -702,7 +702,7 @@ function stopOnCommandDone(m, c, fx) {
   const k = caps(m);
   if (!stopOutranStart(c) || !k.stop) return;
   if (replyFresh(m, c)) remoteStopNow(m, fx);
-  else if (k.stopNeedsConfirm) remoteStop(m, fx);
+  else if (k.stopNeedsConfirm) m.ui.confirm ??= {kind: 'stop', key: m.remote.key};
   else uiSay(m, c.error.text);
 }
 function stopAdvance(m, fx) {
