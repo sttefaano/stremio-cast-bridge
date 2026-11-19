@@ -1327,7 +1327,8 @@ class MediaHandler(BaseHTTPRequestHandler):
             with stream:
                 size = stream.seek(0, os.SEEK_END)
                 start, end = 0, size - 1
-                value = self.headers.get('Range')
+                # An empty segment past the source's end has no range to satisfy; answer it whole.
+                value = size and self.headers.get('Range')
                 if value:
                     match = re.fullmatch(r'bytes=(\d+)-(\d*)', value)
                     if not match:
