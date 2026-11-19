@@ -9,8 +9,9 @@ from pathlib import Path
 
 from bridge import FFMPEG, probe, ffmpeg_command, write_file_cues
 from bridge import Bridge, arguments
-from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, normalize_subtitles
-from backend_fixtures import media_server, served_cues
+from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, analyse, normalize_subtitles
+from vod import VodLayout
+from backend_fixtures import media_server, served_cues, finished_producer, produce, running_producer
 import re
 import os
 import sys
@@ -235,12 +236,16 @@ class CatalogueTest(unittest.TestCase):
                 bridge.mutate('subtitles', apply_data(bridge, subtitle_id=uploaded['entry']['id'], delay=250))
                 path = bridge.active_plan.subtitle.path
                 self.assertIn(str(path), launch.call_args.args[0])
-                self.assertEqual(bridge.origin, 65)
+                self.assertEqual(bridge.load_time, 65)
                 self.assertTrue(bridge.paused)
                 bridge.catalogue.request(dict(bridge.active_plan.catalogue.source), refresh=True)
                 self.assertEqual(bridge.catalogue.snapshot()[source_id]['state'], 'loading')
+                bridge.loaded = True
+                bridge.media_url = bridge.cast.media_controller.status.content_id = 'http://tv/new-session'
                 bridge.mutate('seek', dict(device_id='fixture-device', device_revision=1, position=75))
-                self.assertEqual(bridge.origin, 75)
+                self.assertEqual(bridge.cast.media_controller._send_command.call_args.args[0],
+                                 {'type': 'SEEK', 'currentTime': 75, 'resumeState': 'PLAYBACK_PAUSE'})
+                launch.assert_called_once()
                 self.assertTrue(bridge.paused)
                 self.assertTrue(path.exists())
                 self.assertEqual(bridge.state['playback_id'], identity)
@@ -310,10 +315,8 @@ class CatalogueTest(unittest.TestCase):
             bridge.active_plan = replace(bridge.active_plan, subtitle=None, delay_ms=0, enabled=False)
             bridge.loaded = False
             bridge.started_at = time.monotonic()
-            bridge.process = unittest.mock.Mock()
-            bridge.process.poll.return_value = None
-            bridge.last_playing_segments = None
-            (bridge.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
+            running_producer(bridge)
+            produce(bridge.session, 0, 1, 2)
             (bridge.session / 'master.m3u8').write_text('#EXTM3U')
             bridge.tick()
             bridge.cast.media_controller.play_media.assert_called_once()
@@ -447,17 +450,16 @@ class CatalogueTest(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as folder:
             bridge = RestartPolicyTest().fixture(Path(folder))
-            RestartPolicyTest().subtitle_playlist(bridge)
             bridge.cast.media_controller.status.content_id = bridge.media_url
             bridge.cast.media_controller.status.player_state = 'PAUSED'
             bridge.cast.media_controller.status.subtitle_tracks = [dict(type='TEXT', trackId=7)]
             bridge.begin = Mock(wraps=bridge.begin)
-            producer = bridge.process
+            producer = bridge.producer
             identity = bridge.state['playback_id']
             session = bridge.session
             bridge.mutate('subtitles', apply_data(bridge, enabled=False))
             bridge.begin.assert_not_called()
-            self.assertIs(bridge.process, producer)
+            self.assertIs(bridge.producer, producer)
             self.assertEqual(bridge.session, session)
             self.assertFalse(bridge.state['subtitle_choice']['enabled'])
             self.assertTrue(bridge.paused)
@@ -476,7 +478,7 @@ class CatalogueTest(unittest.TestCase):
             self.assertTrue(bridge.jobs.empty())
             bridge.mutate('subtitles', apply_data(bridge, enabled=True, delay=750))
             bridge.begin.assert_not_called()
-            self.assertIs(bridge.process, producer)
+            self.assertIs(bridge.producer, producer)
             load = bridge.cast.media_controller.play_media.call_args
             self.assertEqual(load.args[0], bridge.media_url)
             self.assertTrue(bridge.media_url.endswith('/old/d750/master.m3u8'))
@@ -653,11 +655,11 @@ class CatalogueTest(unittest.TestCase):
 class GenericProducerTest(unittest.TestCase):
     def synthetic(self, root):
         srt = root / 'boundary.srt'
-        srt.write_text('1\n00:00:05,000 --> 00:00:09,000\nPast\n\n'
-                       '2\n00:00:09,000 --> 00:00:13,000\nCrossing\n\n'
-                       '3\n00:00:10,200 --> 00:00:10,400\nEarly\n\n'
-                       '4\n00:00:11,000 --> 00:00:15,000\nFuture\n\n'
-                       '5\n00:00:27,000 --> 00:00:31,000\nLater\n')
+        srt.write_text('1\n00:00:07,000 --> 00:00:11,000\nPast\n\n'
+                       '2\n00:00:11,000 --> 00:00:15,000\nCrossing\n\n'
+                       '3\n00:00:12,200 --> 00:00:12,400\nEarly\n\n'
+                       '4\n00:00:13,000 --> 00:00:17,000\nFuture\n\n'
+                       '5\n00:00:29,000 --> 00:00:33,000\nLater\n')
         source = root / 'english.mkv'
         fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i',
             'color=c=black:s=160x90:r=24:d=40', '-f', 'lavfi', '-i',
@@ -685,14 +687,16 @@ class GenericProducerTest(unittest.TestCase):
                     plan = store.resolve('source', catalogue['id'], upload['entry']['id'], 0, True)
                     session = sessions / f'session-{format}'
                     session.mkdir()
-                    write_file_cues(session, plan, 10)
+                    write_file_cues(session, plan)
                     result = subprocess.run(ffmpeg_command(str(source), session, plan,
-                        origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
+                        start_index=2, duration=12, readrate=1000), capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
-                    for delay, expected in [(500, {'Crossing': (0, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
-                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)}),
-                                            (2000, {'Past': (0, 1), 'Crossing': (1, 5), 'Early': (2.2, 2.4), 'Future': (3, 7)})]:
-                        with self.subTest(format=format, delay=delay), media_server(sessions) as fetch:
+                    # The restart at 12 s drops Crossing; the served cues come from the track itself, at movie time.
+                    for delay, expected in [(500, {'Past': (7.5, 11.5), 'Crossing': (11.5, 15.5), 'Early': (12.7, 12.9), 'Future': (13.5, 17.5)}),
+                                            (-500, {'Past': (6.5, 10.5), 'Crossing': (10.5, 14.5), 'Early': (11.7, 11.9), 'Future': (12.5, 16.5)}),
+                                            (2000, {'Past': (9, 13), 'Crossing': (13, 17), 'Early': (14.2, 14.4), 'Future': (15, 19)})]:
+                        with self.subTest(format=format, delay=delay), \
+                                media_server(sessions, finished_producer(session, 24)) as fetch:
                             cues = served_cues(fetch, session.name, delay)
                             self.assertEqual(set(cues), set(expected))
                             for label, (start, end) in expected.items():
@@ -700,6 +704,39 @@ class GenericProducerTest(unittest.TestCase):
                                 self.assertAlmostEqual(cues[label][1], end, delta=.1)
             finally:
                 store.close()
+
+    def test_the_movie_ends_with_its_video_when_audio_runs_longer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'long-audio.mkv'
+            fixture = subprocess.run([FFMPEG, '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=160x90:r=24:d=20.5',
+                '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo:d=25', '-map', '0:v', '-map', '1:a',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', str(source)], capture_output=True, timeout=15)
+            self.assertEqual(fixture.returncode, 0, fixture.stderr.decode())
+            analysis = probe(str(source))
+            self.assertAlmostEqual(analysis.duration, 20.5, delta=.1)
+            session = root / 'session'
+            session.mkdir()
+            plan = PlaybackPlan(Catalogue('c', dict(id='s', url=str(source)), analysis), None, 0, False)
+            result = subprocess.run(ffmpeg_command(str(source), session, plan, duration=analysis.duration, readrate=1000),
+                                    capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            written = sorted(p.name for p in session.glob('segment-*.ts'))
+            layout = VodLayout(analysis.duration)
+            self.assertEqual(written, [layout.segment_name(i) for i in range(layout.count)])
+
+    def test_analysis_reads_the_video_length_from_the_stream_or_its_tag(self):
+        def probed(video, format_duration='25.000000'):
+            return {'format': {'duration': format_duration},
+                    'streams': [dict(index=0, codec_type='video', **video), dict(index=1, codec_type='audio')]}
+        for label, video, expected in (('mp4 stream', {'duration': '20.500000'}, 20.5),
+                                       ('mkv tag', {'tags': {'DURATION': '00:00:20.500000000'}}, 20.5),
+                                       ('mkv language tag', {'tags': {'DURATION-eng': '00:00:20.500'}}, 20.5),
+                                       ('unknown', {}, 25), ('garbage tag', {'tags': {'DURATION': 'soon'}}, 25),
+                                       ('longer than the file', {'duration': '30'}, 25),
+                                       ('zero', {'duration': '0'}, 25)):
+            with self.subTest(label):
+                self.assertEqual(analyse(probed(video)).duration, expected)
 
     def test_all_four_plans_grow_before_producer_exit(self):
         with tempfile.TemporaryDirectory() as folder:

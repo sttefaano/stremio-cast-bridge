@@ -9,7 +9,6 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import NamedTuple
 import queue
 import re
 import secrets
@@ -28,6 +27,7 @@ from urllib.request import urlopen
 from dataclasses import replace
 from addons import StremioAddon
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
+from vod import PLAYLIST_NAME, READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
@@ -38,25 +38,27 @@ MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': '
 
 DELAY_PART = re.compile(r'd(0|-?[1-9][0-9]{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
+# The receiver keeps asking for the target segment for about 45 s before it gives up on a seek.
+SEEK_CONFIRM_SECONDS = 45
+# Cues that start this many segments before a window can still be on screen in it.
+CUE_LOOKBACK = 2
+DUPLICATE_MS = 100
 FILE_CUES = 'cues.json'
 CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)')
 
 
-def safe_media_path(root, request_path):
+def media_request(request_path):
+    """'/<session>/d<delay>/<name>' as (session, delay_ms, name); names are checked against the layout."""
     try:
         parts = unquote(urlsplit(request_path).path).lstrip('/').split('/')
-        if len(parts) != 3 or any(p in ('', '.', '..') or '\\' in p or '\x00' in p for p in parts):
-            return None
-        delay = DELAY_PART.fullmatch(parts[1])
-        if not delay or abs(int(delay[1])) > 30000:
-            return None
-        session = Path(root) / parts[0]
-        path = session / parts[2]
-        if session.is_symlink() or path.is_symlink() or path.suffix not in MIME or not path.is_file():
-            return None
-        return path, int(delay[1])
-    except (ValueError, OSError):
+    except ValueError:
         return None
+    if len(parts) != 3 or any(p in ('', '.', '..') or '\\' in p or '\x00' in p for p in parts):
+        return None
+    delay = DELAY_PART.fullmatch(parts[1])
+    if not delay or abs(int(delay[1])) > 30000:
+        return None
+    return parts[0], int(delay[1]), parts[2]
 
 
 def open_media(root, path):
@@ -76,22 +78,40 @@ def open_media(root, path):
     return os.fdopen(media_fd, 'rb')
 
 
-def subtitle_view(root, path, delay_ms):
-    with open_media(root, path.parent / SUBTITLE_PLAYLIST) as stream:
-        playlist = stream.read().decode('utf-8', 'replace')
-    if path.name == SUBTITLE_PLAYLIST:
-        body = delayed_playlist(playlist, delay_ms, (path.parent / FILE_CUES).exists())
-    else:
-        body = delayed_segment(playlist, path.name, lambda windows: session_cues(root, path.parent, windows), delay_ms)
-    return None if body is None else io.BytesIO(body.encode())
-
-
-def session_cues(root, session, windows):
+def subtitle_segment(root, producer, index, delay_ms):
+    """Window index of the layout, after the delay: a file track's own cues, else the cues FFmpeg wrote."""
+    window = producer.layout.window(index)
     try:
-        return segment_cues(root, session / FILE_CUES)
+        cues = segment_cues(root, producer.directory / FILE_CUES)
     except FileNotFoundError:
-        # A delay moves cues across window boundaries, so a window's view can need cues stored in any listed one.
-        return {cue for window in windows for cue in segment_cues(root, session / window.name)}
+        cues = produced_cues(root, producer, index, window, delay_ms)
+    return io.BytesIO(shifted_cues(cues, window, delay_ms).encode())
+
+
+def produced_cues(root, producer, index, window, delay_ms):
+    """Every cue from the source segments whose cues can land in the window after the delay."""
+    layout = producer.layout
+    # A negative delay pulls cues from later segments, so wait for those while the producer is making them.
+    # Out of its reach the window is answered at once from what is on disk, never with a 404.
+    last = max(index, layout.index_at((window[1] - 1 - delay_ms) / 1000))
+    first = max(0, layout.index_at((window[0] - delay_ms) / 1000) - CUE_LOOKBACK)
+    producer.request(index, extra=range(index + 1, last + 1), cue=True)
+    cues = []
+    for source in range(first, last + 1):
+        # A .vtt is written in place; it is final only once its .ts segment exists.
+        if producer.complete(source):
+            try:
+                cues += segment_cues(root, producer.directory / layout.cue_name(source))
+            except OSError:
+                pass
+    # Two runs' segments can both hold a cue, with timestamps tens of milliseconds apart; show it once.
+    kept = []
+    for cue in sorted(cues, key=lambda cue: (cue[3], cue[2], cue[1])):
+        if kept and kept[-1][2:] == cue[2:] and cue[1] - kept[-1][1] <= DUPLICATE_MS:
+            kept[-1] = min(kept[-1], cue)
+        else:
+            kept.append(cue)
+    return kept
 
 
 def segment_cues(root, path):
@@ -107,48 +127,16 @@ def file_cues(root, path, *identity):
         return tuple(parse_cues(stream.read().decode('utf-8', 'replace')))
 
 
-def write_file_cues(session, plan, origin):
-    """FFmpeg drops a file track's cues from before the seek; keep them so a positive delay can show them."""
+def write_file_cues(session, plan):
+    """FFmpeg drops a file track's cues from before each restart; keep them all, at movie time."""
     if plan.subtitle and plan.subtitle.path:
-        offset = round(origin * 1000)
         cues = parse_cues(plan.subtitle.path.read_text(encoding='utf-8'))
-        (session / FILE_CUES).write_text(json.dumps([(start - offset, end - offset, settings, text)
-                                                     for start, end, settings, text in cues]))
+        (session / FILE_CUES).write_text(json.dumps(cues))
 
 
-class SubtitleWindow(NamedTuple):
-    name: str
-    start: int
-    end: int
-    entry: str
-
-
-def subtitle_windows(playlist):
-    windows, total = [], 0.0
-    for entry in re.finditer(r'#EXTINF:([0-9.]+),[^\n]*\n([\w-]+\.vtt)\n?', playlist):
-        start = round(total * 1000)
-        total += float(entry[1])
-        windows.append(SubtitleWindow(entry[2], start, round(total * 1000), entry[0]))
-    return windows
-
-
-def delayed_playlist(playlist, delay_ms, cues_known):
-    windows = subtitle_windows(playlist)
-    if delay_ms >= 0 or cues_known or '#EXT-X-ENDLIST' in playlist or not windows:
-        return playlist
-    covered = windows[-1].end
-    return playlist[:playlist.index(windows[0].entry)] + ''.join(
-        window.entry for window in windows if window.end - delay_ms <= covered)
-
-
-def delayed_segment(playlist, name, cues_of, delay_ms):
-    windows = subtitle_windows(playlist)
-    window = next((window for window in windows if window.name == name), None)
-    if window is None:
-        return None
-    shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text)
-                   for start, end, settings, text in cues_of(windows)
-                   if end + delay_ms > window.start and max(0, start + delay_ms) < window.end)
+def shifted_cues(cues, window, delay_ms):
+    shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text) for start, end, settings, text in cues
+                   if end + delay_ms > window[0] and max(0, start + delay_ms) < window[1])
     return 'WEBVTT\n' + ''.join(f'\n{timestamp(start)} --> {timestamp(end)}{settings}\n{text}\n'
                                 for start, end, settings, text in shown)
 
@@ -180,18 +168,16 @@ def timestamp(ms):
 DROP_SEEK_PREROLL = "noise=amount=0:drop='lt(pts,0)'"
 
 
-def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1):
+def ffmpeg_command(source, session, plan, start_index=0, duration=None, readrate=1.1):
+    """Segment start_index onward; a later start keeps absolute segment numbers and timestamps."""
     analysis = plan.catalogue.analysis
     subtitle = plan.subtitle
+    seek = ['-ss', str(start_index * SEGMENT_SECONDS)] if start_index else []
     command = [FFMPEG, '-hide_banner', '-loglevel', 'error', '-nostdin',
-               '-rw_timeout', '15000000', '-readrate', str(readrate), '-readrate_initial_burst', '30']
-    if origin:
-        command += ['-ss', str(origin)]
-    command += ['-i', source]
+               '-rw_timeout', str(READ_TIMEOUT_SECONDS * 10**6), '-readrate', str(readrate), '-readrate_initial_burst', '30']
+    command += seek + ['-i', source]
     if subtitle and subtitle.path:
-        if origin:
-            command += ['-itsoffset', str(-origin)]
-        command += ['-i', str(subtitle.path)]
+        command += seek + ['-i', str(subtitle.path)]
     if duration is not None:
         command += ['-t', str(duration)]
     for index in (analysis.video, analysis.audio):
@@ -207,24 +193,20 @@ def ffmpeg_command(source, session, plan, origin=0, duration=None, readrate=1.1)
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
         '-crf', '24', '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '3.1',
-        '-g', '144', '-sc_threshold', '0', '-force_key_frames', 'expr:gte(t,n_forced*6)',
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2'] + captions + [
-        '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0',
+        '-g', '144', '-sc_threshold', '0', '-force_key_frames', f'expr:gte(t,n_forced*{SEGMENT_SECONDS})',
+        '-c:a', 'aac', '-b:a', '128k', '-ac', '2'] + captions + (
+        ['-output_ts_offset', str(start_index * SEGMENT_SECONDS), '-start_number', str(start_index)] if start_index else []) + [
+        '-f', 'hls', '-hls_time', str(SEGMENT_SECONDS), '-hls_list_size', '0',
         '-hls_flags', 'independent_segments+temp_file', '-hls_playlist_type', 'event',
         '-master_pl_name', 'master.m3u8', '-var_stream_map', mapping,
-        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / 'video.m3u8')]
+        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / PLAYLIST_NAME)]
 
 
-def playback_position(origin, relative, duration):
-    return min(duration, max(0, origin) + max(0, relative))
-
-
-STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'origin', 'absolute_time',
+STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'absolute_time',
                'source_discovery', 'source_error', 'catalogues', 'active_catalogue', 'subtitle_choice', 'playback_id',
                'devices', 'selected_device', 'device_discovery', 'device_error', 'device_revision', 'can_change_device',
                'receiver_state', 'active_subtitle_track_ids', 'subtitle_delay_ms',
-               'session', 'ffmpeg_pid', 'ffmpeg_alive', 'producer_suspended',
-               'segment_count', 'playlist_duration', 'generated_while_playing',
+               'session', 'ffmpeg_pid', 'ffmpeg_alive', 'producer_suspended', 'segment_count',
                'generation_complete', 'sources', 'pending', 'storage_bytes',
                'volume', 'muted', 'subtitles_enabled', 'action_error', 'command_pending', 'demo',
                'action_error_revision', 'source_id', 'buffer_ahead_seconds', 'buffered_start', 'buffered_end'}
@@ -233,15 +215,27 @@ STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'origin', 'absolute_time
 def public_status(state):
     result = {key: value for key, value in state.items() if key in STATUS_KEYS}
     result.update(buffer_ahead_seconds=None, buffered_start=None, buffered_end=None)
-    values = [state.get(k) for k in ('origin', 'playlist_duration', 'absolute_time', 'duration')]
+    values = [state.get(k) for k in ('buffered_start', 'buffered_end', 'absolute_time', 'duration')]
     if (state.get('phase') in ('buffering', 'loading', 'playing', 'paused')
             and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in values)):
-        origin, generated, position, duration = values
-        if duration > 0 and origin <= duration:
-            end = min(duration, origin + generated)
-            result.update(buffered_start=origin, buffered_end=end,
-                          buffer_ahead_seconds=max(0, end - max(origin, position)))
+        start, end, position, duration = values
+        if 0 < duration and start <= end:
+            end = min(duration, end)
+            result.update(buffered_start=min(start, end), buffered_end=end,
+                          buffer_ahead_seconds=max(0, end - max(start, position)))
     return result
+
+
+def buffered_run(layout, completed, index):
+    """The contiguous segments on disk around index, in movie seconds."""
+    if index not in completed:
+        return None, None
+    first = last = index
+    while first - 1 in completed:
+        first -= 1
+    while last + 1 in completed:
+        last += 1
+    return layout.start(first), layout.start(last) + layout.length(last)
 
 
 class BridgeError(MediaError):
@@ -380,6 +374,8 @@ def lookup_hint(hint):
 
 class Bridge:
     """A single mutation worker; status reads never wait for probe or discovery."""
+    seek_target = None
+
     def __init__(self, args, lan_ip=None):
         self.args, self.lan_ip = args, lan_ip
         self.sessions = ROOT / '.local' / 'sessions'
@@ -397,13 +393,12 @@ class Bridge:
         self.state.update(devices=[], selected_device=None, device_discovery='idle', device_error=None, device_revision=0)
         self.selected = None
         self.active_plan = None
-        self.cast = self.browser = self.process = self.session = None
+        self.cast = self.browser = self.producer = self.session = None
         self.media_server = None
         self.media_url = None
         self.receiver_confirmed = False
-        self.suspended = self.loaded = self.paused = False
-        self.origin = self.duration = self.total_duration = 0
-        self.last_playing_segments = None
+        self.loaded = self.paused = False
+        self.load_time = self.duration = 0
         self.jobs = queue.Queue(maxsize=16)
         self.cancel_generation = 0
         self.active_generation = 0
@@ -592,7 +587,7 @@ class Bridge:
     def _destination_busy(self):
         return (getattr(self, 'destination_locked', False) or getattr(self, 'cleanup_active', False)
                 or self.state.get('command_pending', False) or self.state.get('pending', False)
-                or bool(getattr(self, 'cast', None) or getattr(self, 'process', None)
+                or bool(getattr(self, 'cast', None) or getattr(self, 'producer', None)
                         or getattr(self, 'session', None) or getattr(self, 'media_url', None)
                         or getattr(self, 'connection_generation', None) is not None))
 
@@ -841,16 +836,8 @@ class Bridge:
         self.media_server, self.lan_ip = server, address
 
     def stop_process(self):
-        if self.process and self.process.poll() is None:
-            if self.suspended:
-                self.process.send_signal(signal.SIGCONT)
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=2)
-        self.suspended = False
+        if self.producer:
+            self.producer.close()
         self.update(ffmpeg_alive=False, producer_suspended=False)
         if self.session:
             self.record_session()
@@ -909,7 +896,7 @@ class Bridge:
                     producer_suspended=False, receiver_state='IDLE', active_subtitle_track_ids=[], volume=None, muted=None)
         self.record_session()
         self.session = None
-        self.process = None
+        self.producer = None
         with self.state_lock:
             if self.active_plan:
                 self.catalogue.unpin(self.active_plan.catalogue.id)
@@ -922,7 +909,11 @@ class Bridge:
         return sum(p.stat().st_size for p in self.sessions.glob('*/*')
                    if p.is_file() and not p.is_symlink())
 
-    def begin(self, origin=0, plan=None, new_playback=False):
+    def media_producer(self, name):
+        producer = self.producer
+        return producer if producer and producer.directory.name == name else None
+
+    def begin(self, position=0, plan=None, new_playback=False):
         revision = getattr(self, 'active_generation', getattr(self, 'cancel_generation', 0))
         def check_cancelled():
             if self.quit.is_set() or revision != getattr(self, 'cancel_generation', 0):
@@ -937,6 +928,7 @@ class Bridge:
             self.receiver_confirmed = False
             self.media_url = None
             self.session = None
+            self.seek_target = None
             if plan is not None:
                 previous = self.active_plan
                 if previous is None or previous.catalogue.id != plan.catalogue.id:
@@ -951,34 +943,35 @@ class Bridge:
                     self.state['playback_id'] = secrets.token_hex(16)
                     self.paused = False
             self.state.update(phase='preparing', pending=True, source_id=self.selected.get('id'),
-                              title=self.selected['title'], duration=None, origin=None, absolute_time=0,
-                              playlist_duration=0, buffer_ahead_seconds=None, buffered_start=None, buffered_end=None,
+                              title=self.selected['title'], duration=None, absolute_time=0,
+                              buffer_ahead_seconds=None, buffered_start=None, buffered_end=None,
                               subtitles_enabled=None, message='Preparando la película para la TV…')
-        self.total_duration = self.active_plan.catalogue.analysis.duration
+        total = self.active_plan.catalogue.analysis.duration
         check_cancelled()
-        self.duration = min(self.total_duration, self.args.max_duration or self.total_duration)
-        self.origin = min(max(0, float(origin)), max(0, self.duration - 0.1))
+        self.duration = min(total, self.args.max_duration or total)
+        self.load_time = min(max(0, float(position)), max(0, self.duration - 0.1))
         if shutil.disk_usage(self.sessions).free < 1024**3 or self.storage() >= 6 * 1024**3:
             raise BridgeError('Espacio insuficiente: requiere 1 GB libre y menos de 6 GB de sesiones.')
         check_cancelled()
         self.connect(revision)
         check_cancelled()
-        self.session = self.sessions / ('session-' + secrets.token_hex(8))
-        self.session.mkdir()
-        write_file_cues(self.session, self.active_plan, self.origin)
-        command = ffmpeg_command(self.selected['url'], self.session, self.active_plan,
-                                 origin=self.origin, duration=self.duration - self.origin, readrate=self.args.readrate)
+        self.session = session = self.sessions / ('session-' + secrets.token_hex(8))
+        session.mkdir()
+        write_file_cues(session, self.active_plan)
+        layout = VodLayout(self.duration, subtitles=self.active_plan.subtitle is not None)
+        source, playback, readrate = self.selected['url'], self.active_plan, self.args.readrate
         # Never persist raw arguments or producer stderr (both may contain private URLs).
+        producer = Producer(session, layout, lambda start, limit: ffmpeg_command(
+            source, session, playback, start_index=start, readrate=readrate,
+            duration=min(layout.duration, layout.start(limit)) - layout.start(start)))
         with self.state_lock:
             check_cancelled()
-            self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.last_playing_segments = None
+            self.producer = producer
+            producer.cover(layout.index_at(self.load_time))
         self.started_at = time.monotonic()
-        self.update(title=self.selected['title'], duration=self.duration, origin=self.origin,
-                    absolute_time=self.origin, phase='buffering', session=self.session.name,
-                    ffmpeg_pid=self.process.pid, ffmpeg_alive=True, segment_count=0,
-                    playlist_duration=0, generated_while_playing=False, generation_complete=False)
+        self.update(title=self.selected['title'], duration=self.duration, absolute_time=self.load_time,
+                    phase='buffering', session=session.name, ffmpeg_pid=producer.snapshot().pid, ffmpeg_alive=True,
+                    segment_count=0, generation_complete=False)
 
     def mutate(self, action, data):
         if action in ('start', 'pause', 'resume', 'seek', 'volume', 'mute', 'subtitles'):
@@ -1035,22 +1028,17 @@ class Bridge:
                     self.cast.media_controller.enable_subtitle(track)
                 else:
                     self.cast.media_controller.disable_subtitle()
-            target = self.status().get('absolute_time', self.origin)
+            target = self.status().get('absolute_time', self.load_time)
             receiver = self.cast.media_controller.status
             self.paused = receiver.player_state == 'PAUSED'
             if rebuild:
                 self.begin(target, plan=plan)
             elif reload:
-                windows = subtitle_windows(delayed_playlist((self.session / SUBTITLE_PLAYLIST).read_text(),
-                                                            plan.delay_ms, (self.session / FILE_CUES).exists()))
-                if not windows or windows[-1].end <= float(receiver.adjusted_current_time or 0) * 1000:
-                    raise BridgeError('Todavía no hay subtítulos convertidos para ese ajuste. Probá en unos segundos.',
-                                      409, 'subtitle_not_ready')
                 with self.state_lock:
                     current, url = receiver.adjusted_current_time, self.media_url
                     self.active_plan = plan
                     try:
-                        self.load_media(max(0, float(current) if current is not None else target - self.origin))
+                        self.load_media(max(0, float(current) if current is not None else target))
                     except Exception:
                         self.active_plan, self.media_url = previous, url
                         raise BridgeError('No se pudo cambiar la sincronización en la TV. Reintentá.') from None
@@ -1085,14 +1073,26 @@ class Bridge:
             self.paused = action == 'pause'
             (self.cast.media_controller.pause if self.paused else self.cast.media_controller.play)()
         elif action == 'seek':
-            if not self.session:
-                raise BridgeError('Primero iniciá una fuente.')
-            status = self.status()
-            target = float(data['position']) if 'position' in data else status['absolute_time'] + float(data['delta'])
-            if not math.isfinite(target):
-                raise BridgeError('La posición debe ser finita.')
+            receiver = self.cast.media_controller.status if self.cast else None
+            # A tap while the TV still buffers the previous seek retargets it instead of being lost.
+            if (not (self._owns_playback() or self.loaded and self.media_url and receiver.player_state == 'BUFFERING'
+                     and receiver.content_id == self.media_url and self.cast.socket_client.is_connected is not False)
+                    or receiver.media_session_id is None):
+                raise BridgeError('Esperá a que el receptor confirme esta película.', 409, 'receiver_not_ready')
+            value = data.get('position', data.get('delta'))
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise BridgeError('La posición debe ser un número finito.')
+            target = value if 'position' in data else self.status()['absolute_time'] + value
             target = min(max(0, target), max(0, self.duration - 0.1))
-            self.begin(target)
+            paused = self.paused if receiver.player_state == 'BUFFERING' else receiver.player_state == 'PAUSED'
+            self.producer.seek(self.producer.layout.index_at(target))
+            # pychromecast's seek() always resumes playback; a raw SEEK keeps a paused TV paused.
+            self.cast.media_controller._send_command(
+                {'type': 'SEEK', 'currentTime': target,
+                 'resumeState': 'PLAYBACK_PAUSE' if paused else 'PLAYBACK_START'}, None)
+            self.paused = paused
+            self.seek_target = target, time.monotonic() + SEEK_CONFIRM_SECONDS
+            self.update(absolute_time=target)
         else:
             raise BridgeError('Acción desconocida.')
 
@@ -1101,7 +1101,7 @@ class Bridge:
                           f'/d{self.active_plan.delay_ms}/master.m3u8')
         self.cast.media_controller.play_media(self.media_url, 'application/x-mpegURL', title=self.selected['title'],
             current_time=current_time, autoplay=not self.paused, stream_type='BUFFERED',
-            media_info={'duration': self.duration - self.origin})
+            media_info={'duration': self.duration})
         self.loaded = True
 
     def _tv_shows_session(self):
@@ -1120,31 +1120,27 @@ class Bridge:
     def tick(self):
         if not self.session:
             return
-        manifest = self.session / 'video.m3u8'
-        text = manifest.read_text() if manifest.exists() else ''
-        durations = [float(v) for v in re.findall(r'#EXTINF:([0-9.]+)', text)]
-        generated, count = sum(durations), len(durations)
-        alive = self.process.poll() is None
-        complete = '#EXT-X-ENDLIST' in text
+        producer = self.producer
+        layout = producer.layout
         storage = self.storage()
         if storage >= 6 * 1024**3 or shutil.disk_usage(self.sessions).free < 512 * 1024**2:
             raise BridgeError('Límite de almacenamiento alcanzado. Detenido para proteger el disco.')
-        subtitle_manifest = self.session / SUBTITLE_PLAYLIST
-        text_ready = not self.active_plan.subtitle or subtitle_manifest.exists() and bool(subtitle_windows(
-            delayed_playlist(subtitle_manifest.read_text(), self.active_plan.delay_ms,
-                             (self.session / FILE_CUES).exists())))
-        ready = count >= 3 and text_ready and (self.session / 'master.m3u8').exists()
-        if not alive and self.process.returncode != 0:
-            raise BridgeError(f'FFmpeg terminó con código {self.process.returncode}. Fuente o códec no disponible.')
-        if not self.loaded and (ready or complete and count > 0 and text_ready and (self.session / 'master.m3u8').exists()):
+        produced = producer.snapshot()
+        if produced.failed:
+            raise BridgeError(f'FFmpeg terminó con código {produced.returncode}. Fuente o códec no disponible.'
+                              if produced.returncode else 'La fuente dejó de entregar datos. Reintentá cuando descargue.')
+        completed = producer.completed()
+        first = layout.index_at(self.load_time)
+        ready = (set(range(first, min(produced.end, first + 3))) <= completed
+                 and (self.session / 'master.m3u8').exists())
+        if not self.loaded and ready:
             with self.state_lock:
                 if (self.quit.is_set() or getattr(self, 'active_generation', 0)
                         != getattr(self, 'cancel_generation', 0)):
                     return
-                self.load_media(0)
+                self.load_media(self.load_time)
             self.update(phase='loading', message='Película preparada. Esperando la confirmación de la TV…')
-        absolute = self.status().get('absolute_time', self.origin)
-        relative, receiver = max(0, absolute - self.origin), 'PENDING'
+        absolute, receiver = self.status().get('absolute_time', self.load_time), 'PENDING'
         tracks = []
         if self.loaded:
             connected = self.cast.socket_client.is_connected is not False
@@ -1153,7 +1149,13 @@ class Bridge:
             status = self.cast.media_controller.status
             owns_status = connected and status.content_id == self.media_url
             if owns_status:
-                relative = max(0, float(status.adjusted_current_time or 0))
+                reported = min(self.duration, max(0, float(status.adjusted_current_time or 0)))
+                pending = self.seek_target
+                # Until the TV reports the jump, its old time would pull the producer back.
+                if pending and abs(reported - pending[0]) > SEGMENT_SECONDS and time.monotonic() < pending[1]:
+                    absolute = pending[0]
+                else:
+                    self.seek_target, absolute = None, reported
             receiver = status.player_state if owns_status else 'PENDING'
             observed_tracks = status.current_subtitle_tracks if owns_status else None
             tracks = list(observed_tracks) if observed_tracks is not None else []
@@ -1189,22 +1191,16 @@ class Bridge:
                 self.update(phase='ended', pending=False, message='Finalizó la reproducción.')
             elif receiver == 'IDLE' and status.idle_reason == 'ERROR':
                 raise BridgeError('El receptor informó un error al reproducir esta sesión HLS.')
-            if receiver == 'PLAYING' and alive:
-                if self.last_playing_segments is not None and count > self.last_playing_segments:
-                    self.update(generated_while_playing=True)
-                self.last_playing_segments = count
-        ahead = generated - relative
-        if alive and ahead > 60 and not self.suspended:
-            self.process.send_signal(signal.SIGSTOP)
-            self.suspended = True
-        elif alive and ahead < 45 and self.suspended:
-            self.process.send_signal(signal.SIGCONT)
-            self.suspended = False
-        self.update(absolute_time=playback_position(self.origin, relative, self.duration),
-                    receiver_state=receiver, active_subtitle_track_ids=tracks,
-                    ffmpeg_alive=alive, producer_suspended=self.suspended,
-                    segment_count=count, playlist_duration=generated, generation_complete=complete,
-                    storage_bytes=storage)
+        playing = layout.index_at(absolute)
+        # Before the TV loads, no request is held, so this is what retries a stalled first run.
+        producer.cover(playing if self.loaded else first, horizon=SUSPEND_AHEAD)
+        producer.throttle(absolute)
+        produced = producer.snapshot()
+        buffered_start, buffered_end = buffered_run(layout, completed, playing)
+        self.update(absolute_time=absolute, receiver_state=receiver, active_subtitle_track_ids=tracks,
+                    ffmpeg_pid=produced.pid, ffmpeg_alive=produced.alive, producer_suspended=produced.suspended,
+                    segment_count=len(completed), generation_complete=set(range(produced.end)) <= completed,
+                    buffered_start=buffered_start, buffered_end=buffered_end, storage_bytes=storage)
         self.record_session()
         if not self.loaded and time.monotonic() - self.started_at > 180:
             raise BridgeError('La fuente no produjo segmentos suficientes en 3 minutos. Reintentá cuando descargue.')
@@ -1242,7 +1238,7 @@ class Bridge:
                 if can_tick and not self.quit.is_set():
                     self.tick()
             except Exception as error:
-                message = str(error) if isinstance(error, BridgeError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
+                message = str(error) if isinstance(error, MediaError) else 'No se pudo ejecutar la acción. Revisá la fuente y el receptor.'
                 with self.state_lock:
                     self.cleanup_active = True
                     self.state['command_pending'] = True
@@ -1335,16 +1331,10 @@ class MediaHandler(BaseHTTPRequestHandler):
 
     def serve_media(self, head):
         root = self.server.bridge.sessions
-        resolved = safe_media_path(root, self.path)
-        if resolved is None:
-            self.send_error(404)
-            return
-        path, delay_ms = resolved
+        request = media_request(self.path)
+        producer = request and self.server.bridge.media_producer(request[0])
         try:
-            if path.name == SUBTITLE_PLAYLIST or path.suffix == '.vtt':
-                stream = subtitle_view(root, path, delay_ms)
-            else:
-                stream = open_media(root, path)
+            stream = producer and self.media_stream(root, producer, request[2], request[1])
         except OSError:
             stream = None
         try:
@@ -1354,7 +1344,8 @@ class MediaHandler(BaseHTTPRequestHandler):
             with stream:
                 size = stream.seek(0, os.SEEK_END)
                 start, end = 0, size - 1
-                value = self.headers.get('Range')
+                # An empty segment past the source's end has no range to satisfy; answer it whole.
+                value = size and self.headers.get('Range')
                 if value:
                     match = re.fullmatch(r'bytes=(\d+)-(\d*)', value)
                     if not match:
@@ -1366,7 +1357,7 @@ class MediaHandler(BaseHTTPRequestHandler):
                         self.send_error(416)
                         return
                 self.send_response(206 if value else 200)
-                self.send_header('Content-Type', MIME[path.suffix])
+                self.send_header('Content-Type', MIME[Path(request[2]).suffix])
                 self.send_header('Content-Length', str(end - start + 1))
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Access-Control-Expose-Headers', 'Content-Length, Content-Range')
@@ -1386,6 +1377,25 @@ class MediaHandler(BaseHTTPRequestHandler):
                         remaining -= len(block)
         except (OSError, ConnectionError):
             pass
+
+    @staticmethod
+    def media_stream(root, producer, name, delay_ms):
+        layout = producer.layout
+        if name == 'master.m3u8':
+            return open_media(root, producer.directory / name)
+        if name == 'video.m3u8':
+            return io.BytesIO(layout.media_playlist().encode())
+        if name == SUBTITLE_PLAYLIST and layout.subtitles:
+            return io.BytesIO(layout.subtitle_playlist().encode())
+        kind, index = layout.parse(name) or (None, None)
+        if kind == 'segment':
+            outcome = producer.request(index)
+            # Past the source's real end: an empty segment rather than an error.
+            return open_media(root, producer.directory / name) if outcome == 'serve' else (
+                io.BytesIO() if outcome == 'end' else None)
+        if kind == 'cue':
+            return subtitle_segment(root, producer, index, delay_ms)
+        return None
 
     def log_message(self, *_):
         pass

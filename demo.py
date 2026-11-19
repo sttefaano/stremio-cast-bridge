@@ -11,6 +11,7 @@ from addons import (FETCH_FAILED, LISTING_ERROR, UNIDENTIFIED, Candidate, Listin
                     parse_offers, parse_release, subtitle_language)
 from bridge import BridgeError, ControlHandler, lookup_hint, public_status, subtitle_ids, validate_stop_identity
 from media import MediaError, normalize_subtitles, validate_choice, upload_label, MAX_STORAGE
+from vod import SEGMENT_SECONDS
 
 DEMO_OFFERS = dict(subtitles=[
     dict(lang=code, url=f'https://subs5.strem.io/demo/{n}', subtitleFileName=name, releaseGroup=group)
@@ -48,7 +49,7 @@ class DemoBridge:
                           subtitles_enabled=None, volume=None, muted=None, playback_id=None,
                           catalogues={}, active_catalogue=None, subtitle_choice=None,
                           source_discovery='ready', source_error=None,
-                          source_id=None, origin=None, playlist_duration=None, scenario='ready',
+                          source_id=None, buffered_start=None, buffered_end=None, scenario='ready',
                           action_error_revision=0, devices=[], selected_device=None, device_revision=0,
                           device_discovery='ready', device_error=None, can_change_device=True)
         self.state['devices'] = self.devices
@@ -237,7 +238,7 @@ class DemoBridge:
                 if value not in ('empty', 'loading', 'error', 'foreign', 'disconnect', 'ready'):
                     raise BridgeError('Estado de prueba desconocido.')
                 s.update(action_error=None, pending=False, volume=None, muted=None, scenario=value,
-                         origin=None, playlist_duration=None)
+                         buffered_start=None, buffered_end=None)
                 if value in ('empty', 'ready'):
                     s.update(phase='idle', can_change_device=True, sources=[] if value == 'empty' else self.sources,
                              title='', source_id=None, absolute_time=0,
@@ -293,13 +294,14 @@ class DemoBridge:
                 s.update(phase='playing', can_change_device=False, title=source['title'], absolute_time=0, volume=.35,
                          muted=False, subtitle_delay_ms=choice['delay_ms'], subtitle_choice=choice,
                          active_catalogue=catalogue, playback_id=secrets.token_hex(16), subtitles_enabled=choice['enabled'],
-                         source_id=self.selected, sources=self.sources, scenario='ready', origin=0, playlist_duration=60,
+                         source_id=self.selected, sources=self.sources, scenario='ready',
                          pending=False, action_error=None, message='Reproduciendo el ejemplo.')
+                self._convert_from(0)
                 return
             if action == 'stop':
                 validate_stop_identity(s, data)
                 s.update(phase='stopped', can_change_device=True, pending=False, scenario='ready' if s['sources'] else 'empty', message='Ejemplo detenido.', volume=None, muted=None,
-                          origin=None, playlist_duration=None, playback_id=None, subtitle_choice=None, active_catalogue=None, subtitles_enabled=None)
+                          buffered_start=None, buffered_end=None, playback_id=None, subtitle_choice=None, active_catalogue=None, subtitles_enabled=None)
                 return
             if s['phase'] not in ('playing', 'paused'):
                 raise BridgeError('La TV simulada no está reproduciendo esta película.')
@@ -310,7 +312,8 @@ class DemoBridge:
                 if type(position) not in (float, int) or not math.isfinite(position):
                     raise BridgeError('Posición inválida.')
                 s['absolute_time'] = min(s['duration'], max(0, position))
-                s.update(origin=s['absolute_time'], playlist_duration=60)
+                if not s['buffered_start'] <= s['absolute_time'] < s['buffered_end']:
+                    self._convert_from(s['absolute_time'])
             elif action == 'volume':
                 level = data.get('level')
                 if type(level) not in (int, float) or not math.isfinite(level) or not 0 <= level <= 1:
@@ -323,12 +326,18 @@ class DemoBridge:
             elif action == 'subtitles':
                 catalogue, choice = self._choice(action, data)
                 previous = s['subtitle_choice']
-                if (previous['subtitle_id'], previous['delay_ms']) != (choice['subtitle_id'], choice['delay_ms']):
-                    s.update(origin=s['absolute_time'], playlist_duration=60)
+                if previous['subtitle_id'] != choice['subtitle_id']:
+                    self._convert_from(s['absolute_time'])
                 s.update(subtitle_choice=choice, subtitle_delay_ms=choice['delay_ms'], subtitles_enabled=choice['enabled'])
             else:
                 raise BridgeError('Acción desconocida.')
             s['message'] = 'En pausa.' if s['phase'] == 'paused' else 'Reproduciendo el ejemplo.'
+
+
+    def _convert_from(self, position):
+        """The real TV jumps by itself; only a jump outside what is converted restarts conversion there."""
+        start = position // SEGMENT_SECONDS * SEGMENT_SECONDS
+        self.state.update(buffered_start=start, buffered_end=min(self.state['duration'], start + 60))
 
 
 def arguments(argv=None):

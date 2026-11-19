@@ -5,18 +5,47 @@ import queue
 import re
 import threading
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from bridge import MediaHandler
 from media import Analysis, Catalogue, PlaybackPlan, SetupCatalogue, Subtitle
+from vod import Producer, VodLayout
+
+
+def finished_producer(directory, duration, subtitles=True, hold_seconds=1):
+    """A session whose producer gave up: whatever is not on disk never will be."""
+    layout = VodLayout(duration, subtitles=subtitles)
+    def command(*_):
+        raise AssertionError('a finished fixture never starts FFmpeg')
+    producer = Producer(directory, layout, command, hold_seconds=hold_seconds, poll_seconds=.01, retries=0)
+    producer.process = Mock(pid=None, **{'poll.return_value': 0})
+    producer.limit = layout.count
+    return producer
+
+
+def running_producer(bridge, pid=123):
+    """An alive FFmpeg run that started at the playhead and has written nothing yet."""
+    producer = bridge.producer
+    producer.process = Mock(pid=pid, **{'poll.return_value': None})
+    producer.start = producer.position = producer.layout.index_at(bridge.state.get('absolute_time') or 0)
+    producer.limit = producer.layout.count
+    producer.settled = False
+    return producer.process
+
+
+def produce(directory, *indices):
+    for index in indices:
+        (directory / VodLayout.segment_name(index)).write_bytes(b'segment')
 
 
 @contextmanager
-def media_server(sessions):
+def media_server(sessions, *producers):
     server = ThreadingHTTPServer(('127.0.0.1', 0), MediaHandler)
-    server.bridge = SimpleNamespace(sessions=sessions)
+    served = {producer.directory.name: producer for producer in producers}
+    server.bridge = SimpleNamespace(sessions=sessions, media_producer=served.get)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     opener = build_opener(ProxyHandler({}))
     try:
@@ -36,7 +65,12 @@ def seconds(stamp):
 
 def served_cues(fetch, session, delay_ms):
     def get(name):
-        return fetch(f'/{session}/d{delay_ms}/{name}').read().decode()
+        try:
+            return fetch(f'/{session}/d{delay_ms}/{name}').read().decode()
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            return ''
     cues = {}
     for name in re.findall(r'^([\w-]+\.vtt)$', get('video_vtt.m3u8'), re.M):
         for start, end, label in re.findall(r'(\d+(?::\d+){1,2}\.\d+) --> (\d+(?::\d+){1,2}\.\d+)[^\n]*\n([^\n]+)', get(name)):
