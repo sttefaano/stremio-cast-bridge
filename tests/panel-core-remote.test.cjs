@@ -417,7 +417,7 @@ test('stop consent is void for a different playback, TV or revision', () => {
   }
 });
 
-test('a confirmed Detener survives a failed poll and stops once the link returns', () => {
+test('a confirmed Detener survives a failed poll and stops once the link returns within the bound', () => {
   const p = panel(playing);
   p.tap('stop');
   p.tap('confirmAccept');
@@ -493,7 +493,7 @@ test('every Detener says Deteniendo… while a stop is in flight', () => {
   assert.deepEqual([busy.view.sheet.stop.enabled, busy.view.sheet.stop.label], [false, 'Deteniendo…']);
 });
 
-test('a Start waiting for its fresh poll survives a failed poll and starts once the link returns', () => {
+test('a Start waiting for its fresh poll survives a failed poll and starts once the link returns within the bound', () => {
   const p = panel(idle);
   choose(p);
   p.tap('start');
@@ -516,6 +516,53 @@ test('the stop confirm survives a failed poll, like the replace confirm, and sti
   p.tap('confirmAccept');
   p.status(playing);
   assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+});
+
+test('a confirmed Detener that gets no status for 10 s is dropped, says so, and never fires late', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  assert.equal(p.effects('timer').find(t => t.name === 'stop').ms, 10000);
+  p.status(null, false);
+  assert.equal(p.view.mando.stop.label, 'Deteniendo…');
+  p.fire('stop');
+  assert.deepEqual([p.view.problem.kind, p.view.problem.body], ['offline', 'No se pudo detener: sin conexión. Probá de nuevo.']);
+  assert.equal(p.view.mando.stop.label, 'Detener');
+  p.fire('poll');
+  p.status(paused);
+  assert.equal(p.posts('stop').length, 0, 'the link came back after the bound: the user may have resumed with the TV remote');
+  assert.equal(p.view.problem.body, 'No se pudo detener: sin conexión. Probá de nuevo.');
+  assert.equal(p.view.mando.stop.enabled, true, 'Detener can be pressed again');
+  const q = panel(playing);
+  q.tap('stop');
+  q.tap('confirmAccept');
+  q.status(playing);
+  q.fire('stop');
+  assert.equal(q.posts('stop').length, 1);
+  assert.equal(q.view.problem, null, 'a bound that fires after the stop went out says nothing');
+});
+
+test('a Start that gets no status for 10 s is dropped and says so', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('start');
+  assert.equal(p.effects('timer').find(t => t.name === 'start').ms, 10000);
+  p.status(null, false);
+  assert.equal(p.view.plan.primary.label, 'Iniciando…');
+  p.fire('start');
+  assert.equal(p.view.problem.body, 'No se pudo iniciar: sin conexión. Probá de nuevo.');
+  p.fire('poll');
+  p.status(idle);
+  assert.equal(p.posts('start').length, 0);
+  assert.deepEqual([p.view.plan.primary.label, p.view.plan.primary.enabled], ['Iniciar en Sala (Chromecast)', true]);
+  const q = panel(playing);
+  q.tap('openChange');
+  choose(q, 'b');
+  q.tap('start');
+  q.tap('confirmAccept');
+  q.status(null, false);
+  q.fire('start');
+  assert.equal(q.view.plan.primary.label, 'Cambiar película en la TV', 'a confirmed replacement has the same bound');
 });
 
 test('stop with Seguir viendo or Escape sends nothing', () => {

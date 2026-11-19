@@ -30,7 +30,7 @@
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
  * @typedef {{s:'idle',filename:string,message:string}|{s:'busy',stage:'reading'|'posting',ticket:Ticket,filename:string,format:string}} Upload
  * @typedef {{sourceId:string,catalogueId:string,subtitleId:string|null,deviceId:string,deviceRevision:number}} StartSnap  captured at click
- * @typedef {{stage:'verifying',snap:StartSnap,consent:string|null,afterSeq:number}|{stage:'posting',snap:StartSnap,ticket:Ticket}} Start
+ * @typedef {{stage:'verifying',snap:StartSnap,consent:string|null,afterSeq:number,deadline:Ticket}|{stage:'posting',snap:StartSnap,ticket:Ticket}} Start
  */
 /**
  * @typedef {object} Addon  Stremio state for one catalogue; holds no reference to its owner.
@@ -69,7 +69,7 @@
  * @property {number|null} volumePreview
  * @property {Catalogue|null} overlay  newer active catalogue learned from a lookup or download
  * @property {Addon} addon
- * @property {{afterSeq:number}|null} stop  a confirmed Detener waiting for a status issued after the confirm
+ * @property {{afterSeq:number,deadline:Ticket}|null} stop  a confirmed Detener waiting for a status issued after the confirm
  */
 /**
  * @typedef {object} Ui
@@ -89,6 +89,10 @@
 /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
 // ───────── constants and pure helpers
+// A hung poll fails only when the shell's 6 s fetch timeout fires, and the retry follows at once, so 10 s covers one hung
+// poll and one more try. Past that a confirmed Detener or Iniciar is dropped rather than fired at a TV the user may have
+// resumed with its own remote.
+const PENDING_MS = 10000;
 const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024;
 const PLAYBACK_ACTIONS = ['start', 'pause', 'resume', 'seek', 'stop', 'volume', 'mute', 'subtitles'];
 const WAITING = ['preparing', 'buffering', 'loading'], LIVE = ['playing', 'paused'], FOREIGN = ['receiver_changed', 'disconnected'];
@@ -230,6 +234,12 @@ function linkCommand(m, fx, action, body, opts = {}) {
   m.ui.errors.local = null;
   if (opts.from) m.ui.focus = {ref: opts.from, n: opts.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
+  return ticket;
+}
+/** A timer that gives up on a confirmed wait; the waiting state keeps the ticket so a stale one is ignored. */
+function pendingDeadline(m, fx, name) {
+  const ticket = ticketOf(m);
+  fx.push({fx: 'timer', name, ms: PENDING_MS, ticket});
   return ticket;
 }
 function linkOnStatus(m, fx, msg) {
@@ -428,7 +438,16 @@ function planStart(m, fx) {
   const snap = {sourceId: p.sourceId, catalogueId: p.catalogue.id, subtitleId: planSubtitleId(p), deviceId: s.selected_device.id, deviceRevision: s.device_revision};
   const consent = replacementIdentity(s);
   if (consent) m.ui.confirm = {kind: 'replace', snap, consent, title: sourceTitle(s, p.sourceId)};
-  else p.start = {stage: 'verifying', snap, consent: null, afterSeq: linkRequestPoll(m, fx)};
+  else planVerify(m, fx, snap, null);
+}
+function planVerify(m, fx, snap, consent) {
+  m.plan.start = {stage: 'verifying', snap, consent, afterSeq: linkRequestPoll(m, fx), deadline: pendingDeadline(m, fx, 'start')};
+}
+function planOnDeadline(m, msg) {
+  const st = m.plan.start;
+  if (st?.stage !== 'verifying' || st.deadline !== msg.ticket) return;
+  m.plan.start = null;
+  m.ui.errors.local = 'No se pudo iniciar: sin conexión. Probá de nuevo.';
 }
 /** After a poll issued since the click: the destination, the list and the replacement must still be what was agreed. */
 function startAdvance(m, fx) {
@@ -649,6 +668,11 @@ function remoteStopNow(m, fx, body, msg) {
   u.sheet = null;
   if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
 }
+function stopOnDeadline(m, msg) {
+  if (m.remote.stop?.deadline !== msg.ticket) return;
+  m.remote.stop = null;
+  m.ui.errors.local = 'No se pudo detener: sin conexión. Probá de nuevo.';
+}
 function stopAdvance(m, fx) {
   const st = m.remote.stop, s = m.link.status;
   if (!st || m.link.statusSeq <= st.afterSeq) return;
@@ -678,11 +702,11 @@ function uiConfirmAccept(m, fx) {
   m.ui.confirm = null;
   if (c?.kind === 'stop') {
     remoteCancelFlows(m);
-    m.remote.stop = {afterSeq: linkRequestPoll(m, fx)};
+    m.remote.stop = {afterSeq: linkRequestPoll(m, fx), deadline: pendingDeadline(m, fx, 'stop')};
   } else if (c?.kind === 'replace') {
     const k = c.snap;
     if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;
-    p.start = {stage: 'verifying', snap: k, consent: c.consent, afterSeq: linkRequestPoll(m, fx)};
+    planVerify(m, fx, k, c.consent);
   }
 }
 function uiObserveError(m) {
@@ -717,7 +741,7 @@ function uiSettleFocus(m, fx, c) {
 function problemOf(m) {
   const s = m.link.status, c = caps(m), u = m.ui;
   const stopAction = label => ({act: 'stop', label: c.stopping ? STOPPING : label, enabled: c.stop});
-  if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
+  if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: u.errors.local ?? 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
   if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
   if (s.phase === 'receiver_changed') return {kind: 'foreign', title: 'Hay otro contenido en la TV', body: 'Este mando no lo controla. Detené para volver a elegir.', action: stopAction('Detener y volver a elegir')};
   if (s.phase === 'disconnected') return {kind: 'disconnected', title: 'TV no disponible', body: 'Se perdió la conexión con la TV. Detené para volver a elegir.', action: stopAction('Detener')};
@@ -806,6 +830,8 @@ function onTimer(m, fx, msg) {
     if (!l.polling) linkIssuePoll(m, fx);
   } else if (msg.name === 'skip') seekOnTimer(m, fx, msg);
   else if (msg.name === 'clock' && msg.ticket === m.ui.clock) m.ui.clock = null;
+  else if (msg.name === 'stop') stopOnDeadline(m, msg);
+  else if (msg.name === 'start') planOnDeadline(m, msg);
 }
 /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
 function reconcile(m, fx) {
