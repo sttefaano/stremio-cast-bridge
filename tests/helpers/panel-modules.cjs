@@ -8,7 +8,6 @@ function dependsOn(src) {
   return line[1] === 'none' ? [] : line[1].split(/,\s*/);
 }
 
-/** The source with strings, templates and comments blanked. Throws on a literal it cannot close, such as a quote inside a regex. */
 function codeOnly(src) {
   let out = '';
   const nest = [];

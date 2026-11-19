@@ -267,7 +267,6 @@ function advanceOnStatus(m, fx) {
   stopAdvance(m, fx);
   seekOnStatus(m);
 }
-/** A gated flow with no fresh status in time is dropped: acting later could land on a TV the user has since changed. */
 function linkOnDeadline(m, msg) {
   const st = m.plan.start, a = m.remote.captions.apply, held = g => g?.deadline === msg.ticket;
   if (st?.stage === 'verifying' && held(st.gate)) { m.plan.start = null; uiSay(m, 'No se pudo iniciar: sin conexión. Probá de nuevo.', true); }
@@ -398,7 +397,6 @@ function planSubsBranch(m, branch) {
   const keep = branch !== 'none' && entryOf(p.catalogue, p.choice.entryId)?.kind === KIND_OF_BRANCH[branch];
   p.choice = branch === 'none' ? {branch} : {branch, entryId: keep ? p.choice.entryId : null};
 }
-/** A Stremio choice cannot outlive the addon that offered it. */
 function planValidChoice(m) {
   if (m.plan.choice.branch === 'stremio' && addonOff(m.plan.catalogue)) m.plan.choice = {branch: 'none', entryId: null};
 }
@@ -694,7 +692,6 @@ function remoteStopNow(m, fx, origin = null) {
   u.sheet = null;
   if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin)) u.stopIssued = true;
 }
-/** A Start swaps the playback a little after the bridge accepts it, so a Detener that joined it can name the old one. */
 const stopOutranStart = c => c.joins === 'start' && c.error?.code === 'stale_playback';
 function stopOnCommandDone(m, c, fx) {
   if (c.ok) return;
@@ -769,7 +766,6 @@ function uiSettleFocus(m, fx, c) {
   if (f.n === m.n) fx.push({fx: 'focus', ref: f.ref, n: f.n});
 }
 /**
- * The one problem block's kind, or null, in priority order. The same rule decides what dismissNotice dismisses.
  * @returns {'offline'|'unknown'|'foreign'|'disconnected'|'failed'|'notice'|'stopped'|null}
  */
 function problemKind(m) {
