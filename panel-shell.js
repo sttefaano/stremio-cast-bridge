@@ -185,8 +185,8 @@ function paintMando(doc, v) {
   const badge = byId(doc, 'skip-badge'), side = byId(doc, m.badge?.startsWith('−') ? 'back' : 'forward').parentNode;
   put(badge, 'hidden', !m.badge); put(badge, 'textContent', m.badge ?? '');
   if (badge.parentNode !== side) side.appendChild(badge);
-  const toggle = byId(doc, 'toggle'), spinning = m.toggle.icon === 'spinner';
-  ctl(toggle, m.toggle); attr(toggle, 'aria-label', m.toggle.label);
+  const play = byId(doc, 'toggle'), spinning = m.toggle.icon === 'spinner';
+  ctl(play, m.toggle); attr(play, 'aria-label', m.toggle.label);
   attr(byId(doc, 'toggle-glyph'), 'hidden', spinning ? '' : null);
   put(byId(doc, 'toggle-spinner'), 'hidden', !spinning);
   attr(byId(doc, 'toggle-icon'), 'href', m.toggle.icon === 'play' ? '#i-play' : '#i-pause');
@@ -279,14 +279,18 @@ const isTyping = el => !!el && el.id !== 'track' && (/^(INPUT|SELECT|TEXTAREA)$/
 
 /** The whole runtime. env = {fetch, setTimeout, clearTimeout, storage, token, now, wakeLock}. */
 function boot(doc, env) {
-  let interaction = 0, view = null, lock = null, locking = false;
+  let interaction = 0, current = null, lock = null, locking = false;
+  /** A file input fires no change for the same file twice, so it is emptied at once and the pick kept here. */
+  let picked = null;
+  /** After Escape the pointer is still down: the rest of that drag is no gesture. Its final change arrives after pointerup, so the guard lifts one tick later or at the next pointerdown. */
+  let seekIgnored = false;
   const read = key => { try { return env.storage?.getItem(key) ?? null; } catch (_) { return null; } };
   const {model, fx} = Panel.init({lastDeviceId: read('cast.lastDevice')});
 
   const dispatch = msg => {
     const out = Panel.step(model, {at: env.now(), n: interaction, ...msg});
-    view = Panel.view(model);
-    paint(doc, view);
+    current = Panel.view(model);
+    paint(doc, current);
     syncWake();
     out.fx.forEach(run);
   };
@@ -329,11 +333,11 @@ function boot(doc, env) {
     locking = true;
     try {
       const l = await env.wakeLock.request('screen');
-      if (view?.wake) { lock = l; l.addEventListener?.('release', () => { if (lock === l) lock = null; }); } else l.release().catch(() => {});
+      if (current?.wake) { lock = l; l.addEventListener?.('release', () => { if (lock === l) lock = null; }); } else l.release().catch(() => {});
     } catch (_) { /* denied or unsupported */ } finally { locking = false; }
   };
   function syncWake() {
-    if (view?.wake) { if (!lock) acquire(); } else if (lock) { lock.release().catch(() => {}); lock = null; }
+    if (current?.wake) { if (!lock) acquire(); } else if (lock) { lock.release().catch(() => {}); lock = null; }
   }
 
   doc.addEventListener('click', e => {
@@ -346,8 +350,6 @@ function boot(doc, env) {
     const el = t.closest('[data-act]');
     if (el && !el.disabled) dispatch({t: el.getAttribute('data-act'), arg: el.getAttribute('data-arg') ?? undefined, from: el.id});
   });
-  /** A file input fires no change for the same file twice, so it is emptied at once and the pick kept here. */
-  let picked = null;
   doc.addEventListener('change', e => {
     const el = e.target.closest('[data-change]');
     if (!el || (seekIgnored && el.id === 'track')) return;
@@ -368,39 +370,37 @@ function boot(doc, env) {
   });
   for (const id of ['sheet', 'confirm']) byId(doc, id).addEventListener('cancel', e => { e.preventDefault(); dispatch({t: 'dismiss'}); });
   byId(doc, 'track').addEventListener('pointercancel', () => abandonSeek());
-  /** After Escape the pointer is still down: the rest of that drag is no gesture. Its final change arrives after pointerup, so the guard lifts one tick later or at the next pointerdown. */
-  let seekIgnored = false;
   byId(doc, 'track').addEventListener('pointerdown', () => { seekIgnored = false; });
   doc.addEventListener('pointerup', () => {
     if (!seekIgnored) return;
     env.setTimeout(() => {
       if (!seekIgnored) return;
       seekIgnored = false;
-      if (view?.mando) byId(doc, 'track').value = String(view.mando.track.value);
+      if (current?.mando) byId(doc, 'track').value = String(current.mando.track.value);
     }, 0);
   });
   function abandonSeek() {
-    if (view?.mando?.track.previewAt == null) return;
-    byId(doc, 'track').value = String(view.mando.track.value);
+    if (current?.mando?.track.previewAt == null) return;
+    byId(doc, 'track').value = String(current.mando.track.value);
     dispatch({t: 'seekAbandon'});
   }
   doc.addEventListener('keydown', e => {
     const target = e.target, facts = {key: e.key, mods: e.ctrlKey || e.metaKey || e.altKey, repeat: !!e.repeat, typing: isTyping(target),
       onButton: target?.tagName === 'BUTTON', idle: !doc.activeElement || doc.activeElement === doc.body, n: interaction};
-    const key = view ? Panel.keyMsg(view, facts) : null;
+    const key = current ? Panel.keyMsg(current, facts) : null;
     if (key === 'swallow') { e.preventDefault(); return; }
     interaction++;
-    if (e.key === 'Escape' && view?.mando?.track.previewAt != null) { seekIgnored = true; abandonSeek(); return; }
+    if (e.key === 'Escape' && current?.mando?.track.previewAt != null) { seekIgnored = true; abandonSeek(); return; }
     if (key) { e.preventDefault(); dispatch({...key, from: target?.id}); }
     else if (target?.id === 'track' && e.key.startsWith('Arrow')) e.preventDefault();
   });
   for (const type of ['pointerdown', 'focusin']) doc.addEventListener(type, () => { interaction++; });
   doc.addEventListener('visibilitychange', syncWake);
 
-  view = Panel.view(model);
-  paint(doc, view);
+  current = Panel.view(model);
+  paint(doc, current);
   fx.forEach(run);
-  return {dispatch, view: () => view};
+  return {dispatch, view: () => current};
 }
 
 if (typeof module !== 'undefined') module.exports = {Panel, boot};

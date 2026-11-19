@@ -1,10 +1,10 @@
 // ───────── Panel: init, step and the standing rules that tie the core, the addon and the view together; the shell's only entry.
 // Depends on: panel-core.js, panel-addon.js, panel-view.js.
 
-/** @param {{lastDeviceId?:string|null}} [boot] @returns {{model:Model,fx:object[]}} the first poll is in fx */
-function init(boot = {}) {
+/** @param {{lastDeviceId?:string|null}} [saved] @returns {{model:Model,fx:object[]}} the first poll is in fx */
+function init(saved = {}) {
   const m = {
-    nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
+    nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: saved.lastDeviceId ?? null, autoSelectTried: false},
     link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, inflight: []},
     plan: freshPlan(null), remote: freshRemote(playbackKey(NO_STATUS)), ui: freshUi(),
   };
