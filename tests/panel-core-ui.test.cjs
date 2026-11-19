@@ -397,7 +397,7 @@ test('standing rules are idempotent: a message that changes nothing produces no 
 test('the flap clock timer is armed once while playing and re-armed after each tick, never while paused', () => {
   const p = panel(playing);
   assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1);
-  p.send({t: 'timer', name: 'nothing', ticket: 0});
+  p.tick(1000);
   assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1, 'not armed twice');
   p.fire('clock');
   assert.equal(p.effects('timer').filter(t => t.name === 'clock').length, 1, 're-armed after the tick');

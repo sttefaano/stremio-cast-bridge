@@ -174,12 +174,12 @@ test('volume previews while dragging and sends one level on release; mute sends 
 
 test('the clock interpolates while playing, capped 2 s past the last status; the guards use the raw status', () => {
   const p = panel({...playing, absolute_time: 100});
-  p.send({t: 'timer', name: 'clock', ticket: 0, at: 1500});
+  p.tick(1500);
   assert.equal(p.view.mando.board.clock, '1:41', 'a second and a half after the status');
-  p.send({t: 'timer', name: 'clock', ticket: 0, at: 60000});
+  p.tick(60000);
   assert.equal(p.view.mando.board.clock, '1:42', 'a stalled poll never invents more than 2 s');
   const q = panel({...paused, absolute_time: 100});
-  q.send({t: 'timer', name: 'clock', ticket: 0, at: 1000});
+  q.tick(1000);
   assert.equal(q.view.mando.board.clock, '1:40', 'paused does not tick');
 });
 

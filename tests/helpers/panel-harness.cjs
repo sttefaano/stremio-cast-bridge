@@ -31,6 +31,8 @@ function panel(initial, boot = {lastDeviceId: null}) {
     fire: name => { const i = pending.findLastIndex(e => e.fx === 'timer' && e.name === name); assert.notEqual(i, -1, 'expected timer'); const [f] = pending.splice(i, 1); send({t: 'timer', name, ticket: f.ticket}); },
     file: bytes => { const f = take(e => e.fx === 'read'); send({t: 'file', ticket: f.ticket, bytes}); },
     effects: kind => pending.filter(e => e.fx === kind),
+    /** Move the clock to `to` with a message the core ignores. */
+    tick: to => { at = to - 10; send({t: 'tick'}); },
     // command round trip: HTTP reply, then the confirming poll carries the resulting status
     settle: (action, next, r) => { p.reply(p.posted(action), r); p.status(next); },
   };
