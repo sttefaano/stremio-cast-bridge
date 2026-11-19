@@ -279,8 +279,8 @@ function linkOnReply(m, fx, msg) {
   if (!c) return false;
   if (c.stage !== 'posting') return true;
   const error = msg.ok ? null : {text: commandError(msg), code: msg.code ?? null};
-  if (error && !OWNERS[c.action]?.quiet?.(m, c, error)) uiSay(m, error.text);
   Object.assign(c, {stage: 'confirming', ok: msg.ok, error, afterSeq: linkRequestPoll(m, fx)});
+  if (error && !OWNERS[c.action]?.quiet?.(m, c)) uiSay(m, error.text);
   return true;
 }
 
@@ -695,11 +695,11 @@ function remoteStopNow(m, fx, origin = null) {
   if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin)) u.stopIssued = true;
 }
 /** A Start swaps the playback a little after the bridge accepts it, so a Detener that joined it can name the old one. */
-const stopOutranStart = (c, error) => c.joins === 'start' && error?.code === 'stale_playback';
+const stopOutranStart = c => c.joins === 'start' && c.error?.code === 'stale_playback';
 function stopOnCommandDone(m, c, fx) {
   if (c.ok) return;
   m.ui.stopIssued = false;
-  if (stopOutranStart(c, c.error) && caps(m).stop) remoteStopNow(m, fx);
+  if (stopOutranStart(c) && caps(m).stop) remoteStopNow(m, fx);
 }
 function stopAdvance(m, fx) {
   const st = m.remote.stop;
@@ -803,7 +803,7 @@ const OWNERS = {
   seek: {done: seekOnCommandDone},
   subtitles: {quiet: (m, c) => m.remote.captions.apply?.ticket !== c.ticket, done: capOnCommandDone},
   volume: {done: m => { m.remote.volumePreview = null; }},
-  stop: {quiet: (m, c, error) => stopOutranStart(c, error), done: stopOnCommandDone},
+  stop: {quiet: (m, c) => stopOutranStart(c), done: stopOnCommandDone},
 };
 
 // ───────── fresh sub-states
