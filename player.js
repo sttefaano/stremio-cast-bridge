@@ -108,13 +108,15 @@ const Panel = (() => {
     if (parts.slice(1).some(n => n >= 60)) return null;
     return parts.reduce((a, n) => a * 60 + n, 0);
   }
+  /** '0,4' for 400 or −400 ms: es-AR decimal comma, one decimal. */
+  const decimalSeconds = ms => (Math.abs(ms) / 1000).toFixed(1).replace('.', ',');
   /** '+0,4 s' with U+2212 for negatives; '—' when unknown. */
   function signedSeconds(ms) {
-    return finite(ms) ? `${ms < 0 ? '−' : '+'}${(Math.abs(ms) / 1000).toFixed(1).replace('.', ',')} s` : '—';
+    return finite(ms) ? `${ms < 0 ? '−' : '+'}${decimalSeconds(ms)} s` : '—';
   }
   function delayMeaning(ms) {
     if (!ms) return 'Sincronizados con la voz';
-    return `Aparecen ${(Math.abs(ms) / 1000).toFixed(1).replace('.', ',')} s ${ms > 0 ? 'después que' : 'antes que'} la voz`;
+    return `Aparecen ${decimalSeconds(ms)} s ${ms > 0 ? 'después que' : 'antes que'} la voz`;
   }
   /** Always name + model so two "Sala" TVs differ. `paren` gives the button form 'Sala (Google TV)'. */
   function deviceLabel(d, paren = false) {
@@ -1050,6 +1052,7 @@ const Panel = (() => {
    * @property {Ctl} search
    * @property {string} status
    */
+  const trackLabel = e => [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ');
   const SUBS_BRANCHES = [['none', 'Sin'], ['file', 'Del archivo'], ['stremio', 'Stremio'], ['upload', 'Subir']];
 
   function viewStremio(m, scope) {
@@ -1114,7 +1117,7 @@ const Panel = (() => {
       branches: SUBS_BRANCHES.map(([id, label]) => ({id, label, selected: p.choice.branch === id, hidden: id === 'stremio' && stremioOff, enabled: branchOk})),
       subsStatus: subsStatusLine(m),
       fileEntries: (cat?.entries || []).filter(e => e.kind === 'embedded').map(e => ({
-        id: e.id, label: [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · '), selected: p.choice.entryId === e.id,
+        id: e.id, label: trackLabel(e), selected: p.choice.entryId === e.id,
         enabled: e.supported === true && branchOk, ...(e.supported === true ? {} : {reason: e.reason || 'Formato no compatible'})})),
       upload: {filename: p.upload.filename, busy: p.upload.s === 'busy', enabled: uploadFree, message: p.upload.message || '', chosen: p.choice.branch === 'upload' && picked ? picked.label : ''},
       stremio: viewStremio(m, 'plan'),
@@ -1253,7 +1256,7 @@ const Panel = (() => {
     const dirty = capDirty(m);
     return {
       kind: 'subs',
-      tracks: [row('', 'Sin subtítulos'), ...(cat?.entries || []).filter(e => e.supported === true).map(e => row(e.id, [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ')))],
+      tracks: [row('', 'Sin subtítulos'), ...(cat?.entries || []).filter(e => e.supported === true).map(e => row(e.id, trackLabel(e)))],
       visible: {enabled: c.captions && !!srv.subtitleId, checked: a?.kind === 'visibility' ? a.want.enabled : srv.enabled},
       delay: {text: signedSeconds(d.delayMs), meaning: d.subtitleId ? delayMeaning(d.delayMs) : 'Sin subtítulos no hay nada que sincronizar'},
       steps: {enabled: c.captions && !!d.subtitleId},
