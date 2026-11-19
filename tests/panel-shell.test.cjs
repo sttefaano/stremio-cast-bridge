@@ -34,10 +34,16 @@ test('the page and ACTS agree: every message the page can send has a handler, an
   for (const n of [...doc.all, ...doc.all.filter(x => x.content).flatMap(x => x.content.querySelectorAll('[data-act]'))]) {
     for (const k of ['data-act', 'data-change', 'data-input', 'data-submit']) if (n.hasAttribute(k)) sent.add(n.getAttribute(k));
   }
-  const source = name => fs.readFileSync(name, 'utf8');
-  for (const [, t] of source('panel-shell.js').matchAll(/dispatch\(\{t: '(\w+)'/g)) sent.add(t);
-  for (const [, t] of source('panel.js').slice(source('panel.js').indexOf('function keyMsg')).matchAll(/\{t: '(\w+)'/g)) sent.add(t);
-  for (const [, act] of source('panel-core.js').matchAll(/\{act: '(\w+)'/g)) sent.add(act);
+  for (const [, t] of fs.readFileSync('panel-shell.js', 'utf8').matchAll(/dispatch\(\{t: '(\w+)'/g)) sent.add(t);
+  const keys = [' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', 'Escape', ...'abcdefghijklmnopqrstuvwxyz'];
+  const remote = H.panel(H.playing), subs = H.panel(H.playing);
+  subs.tap('openSubs');
+  for (const p of [remote, subs]) for (const k of keys) { const msg = H.key(p, k); if (msg?.t) sent.add(msg.t); }
+  const problems = [null, {...H.playing, phase: 'warp'}, {...H.playing, phase: 'receiver_changed'}, {...H.playing, phase: 'disconnected'},
+    {...H.idle, phase: 'error', can_change_device: false}, {...H.playing, action_error: 'x', action_error_revision: 1}];
+  const stopped = H.panel(H.playing);
+  H.stopFromPlaying(stopped);
+  for (const p of [...problems.map(s => H.panel(s)), stopped]) if (p.view.problem?.action) sent.add(p.view.problem.action.act);
   for (const step of ['status', 'reply', 'timer', 'file']) sent.delete(step);
   assert.deepEqual([...sent].sort(), Object.keys(Panel.ACTS).sort());
 });
