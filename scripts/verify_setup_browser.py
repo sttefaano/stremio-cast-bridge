@@ -82,11 +82,11 @@ def by_id(element_id):
 
 
 def drag(value, release):
-    """Move the timeline thumb. `release` also fires the change event a pointer-up would."""
+    """Press the timeline thumb and move it, as a pointer does. `release` lets go: pointerup, then the change it brings."""
     fire = 't.dispatchEvent(new Event("input",{bubbles:true}));'
     if release:
-        fire += 't.dispatchEvent(new Event("change",{bubbles:true}));'
-    return ('(() => {const t=document.getElementById("track"); '
+        fire += 't.dispatchEvent(new PointerEvent("pointerup",{bubbles:true})); t.dispatchEvent(new Event("change",{bubbles:true}));'
+    return ('(() => {const t=document.getElementById("track"); t.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true})); '
             f'Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(t,{value}); {fire} return true;}})()')
 
 
