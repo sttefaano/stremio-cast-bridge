@@ -140,7 +140,7 @@ def exit_outcome(start, limit, position, count, short, quiet, stall_seconds=STAL
     """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
     short says its last segment came out shorter than its window, as a stall finalizes the one it was
     writing, so even a run that reached its bound may have left it short. quiet is how long it ran after
-    its previous segment (or its launch) until it exited."""
+    its previous segment (or its launch) until its last one, not counting time suspended."""
     if position == limit and not short:
         return 'complete'
     if limit == count and position >= count - END_SLACK and quiet < stall_seconds:
@@ -175,6 +175,7 @@ class Producer:
         self.process = None
         self.start = self.limit = self.position = 0
         self.suspended = self.closed = False
+        self.pauses = []  # (stopped, resumed) wall-clock spans of the current run, to compare with mtimes
         self.holds = {}  # arrival number -> (index, cue), for every request held right now
         self.arrivals = self.seek_arrival = 0  # holds that arrived before the last seek were left behind by it
         self.first_seen = {}  # (index, cue) -> when the receiver first asked, across its retries
@@ -207,13 +208,11 @@ class Producer:
     def _settle(self):
         """Judge a run that exited by itself, once: complete, the source's end, or a failure to retry."""
         self.settled = True
-        try:
-            since = (os.stat(self.directory / self.layout.segment_name(self.position - 2)).st_mtime
-                     if self.position - 2 >= self.start else self.launched_at)
-        except OSError:
-            since = self.launched_at
+        since = self._written_at(self.position - 2, self.launched_at)
+        until = self._written_at(self.position - 1, time.time())
+        quiet = until - since - sum(max(0, min(until, resumed) - max(since, stopped)) for stopped, resumed in self.pauses)
         short = self.position == self.start or self._short(self.position - 1)
-        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, short, time.time() - since,
+        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, short, quiet,
                                self.stall_seconds)
         if outcome == 'complete':
             self.failures = 0
@@ -226,6 +225,12 @@ class Producer:
                 (self.directory / self.layout.segment_name(self.position)).unlink(missing_ok=True)
             self.failures = 0 if self.position > self.start else self.failures + 1
             self.retry_at = time.monotonic() + self.backoff_seconds
+
+    def _written_at(self, index, fallback):
+        try:
+            return os.stat(self.directory / self.layout.segment_name(index)).st_mtime if index >= self.start else fallback
+        except OSError:
+            return fallback
 
     def _short(self, index):
         try:
@@ -251,7 +256,7 @@ class Producer:
             raise MediaError('No se pudo iniciar FFmpeg.', 500, 'producer_failed') from None
         self.launched_at = time.time()
         self.start, self.limit, self.position, self.settled = index, limit, index, False
-        self.suspended = False
+        self.suspended, self.pauses = False, []
         self.first_seen.clear()
 
     def _kill(self):
@@ -268,6 +273,7 @@ class Producer:
     def _resume(self):
         if self.suspended and self.process and self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
+            self.pauses.append((self.stopped_at, time.time()))
         self.suspended = False
 
     def cover(self, index, horizon=None):
@@ -373,7 +379,7 @@ class Producer:
             ahead = self.layout.start(self._run().position) - playhead
             if not self.suspended and not self.holds and ahead > SUSPEND_AHEAD:
                 self.process.send_signal(signal.SIGSTOP)
-                self.suspended = True
+                self.suspended, self.stopped_at = True, time.time()
             elif self.suspended and (self.holds or ahead < RESUME_AHEAD):
                 self._resume()
 

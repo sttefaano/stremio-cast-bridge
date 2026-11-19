@@ -390,6 +390,29 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.request(6), 'serve')
         self.assertEqual([p.command for p in self.launched], [['ffmpeg', 6, 7]])
 
+    def test_only_time_ffmpeg_spent_writing_counts_toward_a_stall_near_the_end(self):
+        self.layout = VodLayout(120.021)
+        for case in ('settled late', 'suspended'):
+            with self.subTest(case):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                self.launched.clear()
+                producer = self.producer(hold_seconds=.3, stall_seconds=.1)
+                producer.cover(0)
+                self.write(*range(0, 17))
+                if case == 'suspended':
+                    producer.throttle(40)
+                    time.sleep(.15)
+                    producer.throttle(70)
+                    self.assertEqual(self.launched[0].signals, [signal.SIGSTOP, signal.SIGCONT])
+                self.write(17)
+                self.launched[0].code = 0
+                if case == 'settled late':
+                    time.sleep(.15)
+                self.assertEqual(producer.request(18), 'end')
+                self.assertEqual(producer.snapshot().end, 18)
+                self.assertEqual(len(self.launched), 1)
+
     def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
         self.layout = VodLayout(60.021)
         producer = self.producer(stall_seconds=5)
