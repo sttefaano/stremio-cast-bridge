@@ -7,9 +7,10 @@ import time
 from unittest.mock import patch
 from pathlib import Path
 
-from bridge import FFMPEG, probe, ffmpeg_command
+from bridge import FFMPEG, probe, ffmpeg_command, write_file_cues
 from bridge import Bridge, arguments
 from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, normalize_subtitles
+from backend_fixtures import media_server, served_cues
 import re
 import os
 import sys
@@ -446,6 +447,7 @@ class CatalogueTest(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as folder:
             bridge = RestartPolicyTest().fixture(Path(folder))
+            RestartPolicyTest().subtitle_playlist(bridge)
             bridge.cast.media_controller.status.content_id = bridge.media_url
             bridge.cast.media_controller.status.player_state = 'PAUSED'
             bridge.cast.media_controller.status.subtitle_tracks = [dict(type='TEXT', trackId=7)]
@@ -472,9 +474,13 @@ class CatalogueTest(unittest.TestCase):
             with self.assertRaises(MediaError):
                 bridge.submit('subtitles', malformed)
             self.assertTrue(bridge.jobs.empty())
-            with patch('bridge.subprocess.Popen', return_value=Mock(pid=123)):
-                bridge.mutate('subtitles', apply_data(bridge, enabled=True, delay=750))
-            bridge.begin.assert_called_once_with(65, plan=bridge.active_plan)
+            bridge.mutate('subtitles', apply_data(bridge, enabled=True, delay=750))
+            bridge.begin.assert_not_called()
+            self.assertIs(bridge.process, producer)
+            load = bridge.cast.media_controller.play_media.call_args
+            self.assertEqual(load.args[0], bridge.media_url)
+            self.assertTrue(bridge.media_url.endswith('/old/d750/master.m3u8'))
+            self.assertFalse(load.kwargs['autoplay'])
             self.assertTrue(bridge.paused)
             self.assertEqual(bridge.state['playback_id'], identity)
             bridge.begin.reset_mock()
@@ -662,23 +668,7 @@ class GenericProducerTest(unittest.TestCase):
         self.assertEqual(fixture.returncode, 0, fixture.stderr.decode())
         return source, srt
 
-    def cues(self, session):
-        cues = {}
-        for path in session.glob('*.vtt'):
-            for start, end, label in re.findall(r'(\d+(?::\d+){1,2}\.\d+) --> (\d+(?::\d+){1,2}\.\d+)[^\n]*\n([^\n]+)', path.read_text()):
-                def seconds(stamp):
-                    value = 0
-                    for part in stamp.split(':'):
-                        value = value * 60 + float(part)
-                    return value
-                times = seconds(start), seconds(end)
-                self.assertGreater(times[1], times[0])
-                if label in cues:
-                    self.assertEqual(cues[label], times)
-                cues[label] = times
-        return cues
-
-    def test_uploaded_srt_and_vtt_crossing_seek_cues_apply_delay_once(self):
+    def test_uploaded_srt_and_vtt_crossing_seek_cues_are_served_shifted_once(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source, srt = self.synthetic(root)
@@ -688,19 +678,22 @@ class GenericProducerTest(unittest.TestCase):
             try:
                 store.request(dict(id='source', url=str(source)))
                 catalogue = wait_ready(store)
+                sessions = root / 'sessions'
+                sessions.mkdir()
                 for format, text in [('srt', srt.read_text()), ('vtt', normalize_subtitles('srt', srt.read_text()).decode())]:
                     upload = store.upload('source', catalogue['id'], 'synthetic.' + format, format, text)
+                    plan = store.resolve('source', catalogue['id'], upload['entry']['id'], 0, True)
+                    session = sessions / f'session-{format}'
+                    session.mkdir()
+                    write_file_cues(session, plan, 10)
+                    result = subprocess.run(ffmpeg_command(str(source), session, plan,
+                        origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode())
                     for delay, expected in [(500, {'Crossing': (0, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
                                             (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)}),
                                             (2000, {'Past': (0, 1), 'Crossing': (1, 5), 'Early': (2.2, 2.4), 'Future': (3, 7)})]:
-                        with self.subTest(format=format, delay=delay):
-                            plan = store.resolve('source', catalogue['id'], upload['entry']['id'], delay, True)
-                            session = root / f'{format}-{delay}'
-                            session.mkdir()
-                            result = subprocess.run(ffmpeg_command(str(source), session, plan,
-                                origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
-                            self.assertEqual(result.returncode, 0, result.stderr.decode())
-                            cues = self.cues(session)
+                        with self.subTest(format=format, delay=delay), media_server(sessions) as fetch:
+                            cues = served_cues(fetch, session.name, delay)
                             self.assertEqual(set(cues), set(expected))
                             for label, (start, end) in expected.items():
                                 self.assertAlmostEqual(cues[label][0], start, delta=.1)
