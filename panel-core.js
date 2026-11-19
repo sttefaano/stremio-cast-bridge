@@ -57,9 +57,10 @@
  * @property {Record<'discover'|'discover_devices',{ticket:Ticket|null,error:string}>} refresh
  */
 /**
- * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,from?:string,n?:number}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
+ * @typedef {{from:string,n:number}} Origin  the control and interaction that asked; focus returns there once the command settles
+ * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,origin:Origin|null}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
  * @typedef {{subtitleId:string|null,enabled:boolean,delayMs:number}} CaptionWant
- * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,afterSeq:number,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,from?:string,n?:number}} CaptionApply
+ * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,afterSeq:number,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
  */
 /**
  * @typedef {object} Remote  Drafts bound to ONE playback identity; reconcile replaces it when the identity changes.
@@ -93,7 +94,7 @@
 // poll and one more try. Past that a confirmed Detener or Iniciar is dropped rather than fired at a TV the user may have
 // resumed with its own remote.
 const PENDING_MS = 10000;
-const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024;
+const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024, MAX_READS = 6;
 const PLAYBACK_ACTIONS = ['start', 'pause', 'resume', 'seek', 'stop', 'volume', 'mute', 'subtitles'];
 const WAITING = ['preparing', 'buffering', 'loading'], LIVE = ['playing', 'paused'], FOREIGN = ['receiver_changed', 'disconnected'];
 const KNOWN = new Set(['idle', 'stopped', 'ended', 'error', ...WAITING, ...LIVE, ...FOREIGN]);
@@ -151,6 +152,7 @@ function verifiedEntry(body, catalogue) {
 const commandError = msg => msg.timeout ? 'La acción tardó demasiado. Revisá el estado antes de reintentar.'
   : typeof msg.message === 'string' && msg.message ? msg.message : 'No se pudo completar la acción. Revisá el estado y reintentá.';
 const ticketOf = m => ++m.nextTicket;
+const originOf = msg => msg?.from ? {from: msg.from, n: msg.n} : null;
 /** What the TV says about captions right now, from the server's own fields. */
 function capServer(s) {
   const c = s.subtitle_choice;
@@ -222,17 +224,17 @@ function linkIssuePoll(m, fx) {
 }
 /**
  * Playback commands carry the device identity; explicit fields in `body` win (start sends its click-time snapshot).
- * @returns {Ticket|null}
+ * @param {{from?:string,n?:number}|null} [origin] @param {string|null} [owner] @returns {Ticket|null}
  */
-function linkCommand(m, fx, action, body, opts = {}) {
+function linkCommand(m, fx, action, body, origin = null, owner = null) {
   const l = m.link, s = l.status;
   if (!l.online || l.inflight.some(c => action !== 'stop' || c.action === 'stop')) return null;
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
-  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null, owner: opts.owner ?? null});
+  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null, owner});
   m.ui.errors.local = null;
-  if (opts.from) m.ui.focus = {ref: opts.from, n: opts.n, ticket};
+  if (origin?.from) m.ui.focus = {ref: origin.from, n: origin.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
   return ticket;
 }
@@ -421,7 +423,7 @@ function planOnUploadReply(m, msg) {
 function planPickDevice(m, fx, id, msg) {
   const s = m.link.status;
   if (!caps(m).changeDevice || !s.devices?.some(d => d.id === id) || s.selected_device?.id === id) return;
-  linkCommand(m, fx, 'select_device', {device_id: id, device_revision: s.device_revision}, {from: msg?.from, n: msg?.n});
+  linkCommand(m, fx, 'select_device', {device_id: id, device_revision: s.device_revision}, msg);
 }
 /** discover / discover_devices: independent of commands, one in flight per kind. */
 function planRefresh(m, fx, kind) {
@@ -464,7 +466,7 @@ function startAdvance(m, fx) {
   }
   const now = replacementIdentity(s);
   if (now && now !== st.consent) { m.ui.confirm = {kind: 'replace', snap: k, consent: now, title: sourceTitle(s, k.sourceId)}; return; }
-  const ticket = linkCommand(m, fx, 'start', {source_id: k.sourceId, catalogue_id: k.catalogueId, subtitle_id: k.subtitleId, delay_ms: 0, device_id: k.deviceId, device_revision: k.deviceRevision}, {owner: 'start'});
+  const ticket = linkCommand(m, fx, 'start', {source_id: k.sourceId, catalogue_id: k.catalogueId, subtitle_id: k.subtitleId, delay_ms: 0, device_id: k.deviceId, device_revision: k.deviceRevision}, null, 'start');
   if (ticket) p.start = {stage: 'posting', snap: k, ticket};
 }
 /** The Start command settled. A start cancelled meanwhile leaves the draft and the sheet alone. */
@@ -495,8 +497,8 @@ function seekDrag(m, pos) {
 function seekAbandon(m) {
   if (m.remote.seek.s === 'dragging') m.remote.seek = {s: 'idle'};
 }
-function seekSend(m, fx, body, target, msg) {
-  const ticket = linkCommand(m, fx, 'seek', body, {owner: 'seek', from: msg?.from, n: msg?.n});
+function seekSend(m, fx, body, target, origin) {
+  const ticket = linkCommand(m, fx, 'seek', body, origin, 'seek');
   m.remote.seek = ticket ? {s: 'sent', target, ticket, sawBusy: false} : {s: 'idle'};
 }
 /** Release commits: one seek {position}. */
@@ -515,14 +517,14 @@ function seekSkip(m, fx, delta, msg) {
   const s = m.link.status, d = durationOf(s), k = m.remote.seek;
   if (!caps(m).transport || !d || !finite(s.absolute_time) || !finite(delta)) return;
   const sum = (k.s === 'skipping' ? k.delta : 0) + delta, ticket = ticketOf(m);
-  m.remote.seek = {s: 'skipping', delta: clamp(sum, -s.absolute_time, d - s.absolute_time), ticket, from: msg?.from ?? k.from, n: msg?.n ?? k.n};
+  m.remote.seek = {s: 'skipping', delta: clamp(sum, -s.absolute_time, d - s.absolute_time), ticket, origin: originOf(msg) ?? k.origin ?? null};
   fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
 }
 function seekOnTimer(m, fx, msg) {
   const k = m.remote.seek, s = m.link.status;
   if (k.s !== 'skipping' || k.ticket !== msg.ticket) return;
   if (k.delta === 0) m.remote.seek = {s: 'idle'};
-  else if (caps(m).transport) seekSend(m, fx, {delta: k.delta}, clamp(s.absolute_time + k.delta, 0, durationOf(s) ?? Infinity), k);
+  else if (caps(m).transport) seekSend(m, fx, {delta: k.delta}, clamp(s.absolute_time + k.delta, 0, durationOf(s) ?? Infinity), k.origin);
   else if (m.link.inflight.length) {
     const ticket = ticketOf(m);
     m.remote.seek = {...k, ticket};
@@ -556,40 +558,47 @@ function volumePreview(m, value) {
 }
 function volumeSet(m, fx, value, msg) {
   const ok = caps(m).transport && finite(m.link.status.volume) && finite(value);
-  if (!ok || !linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, {owner: 'volume', from: msg.from, n: msg.n})) m.remote.volumePreview = null;
+  if (!ok || !linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, msg, 'volume')) m.remote.volumePreview = null;
 }
 function muteToggle(m, fx, msg) {
   const s = m.link.status;
-  if (caps(m).transport && typeof s.muted === 'boolean') linkCommand(m, fx, 'mute', {muted: !s.muted}, {from: msg.from, n: msg.n});
+  if (caps(m).transport && typeof s.muted === 'boolean') linkCommand(m, fx, 'mute', {muted: !s.muted}, msg);
 }
 function toggle(m, fx, msg) {
   if (!caps(m).transport) return;
-  linkCommand(m, fx, m.link.status.phase === 'playing' ? 'pause' : 'resume', {}, {from: msg.from, n: msg.n});
+  linkCommand(m, fx, m.link.status.phase === 'playing' ? 'pause' : 'resume', {}, msg);
 }
 
 // captions: the draft is edited locally; Aplicar and the visibility toggle share one pipeline that waits for readback
-const MAX_READS = 6;
 const capSame = (a, b) => a.subtitleId === b.subtitleId && a.delayMs === b.delayMs;
 /** Derived, never stored: the draft differs from what the TV has. */
 const capDirty = m => !!m.remote.captions.draft && !capSame(m.remote.captions.draft, capServer(m.link.status));
-/** capTrack / capNudge / capReset. A draft equal to the server's is no draft. */
-function capEdit(m, kind, arg) {
-  if (!caps(m).captions) return;
-  const cur = capDraft(m);
-  let next;
-  if (kind === 'track') {
-    const id = arg === '' || arg == null ? null : String(arg);
-    if (id !== null && !entryOf(remoteCatalogue(m), id)?.supported) return;
-    next = {subtitleId: id, delayMs: id === null ? 0 : cur.delayMs};
-  } else if (!cur.subtitleId || (kind === 'nudge' && !finite(arg))) return;
-  else next = {subtitleId: cur.subtitleId, delayMs: kind === 'reset' ? 0 : clamp(Math.round((cur.delayMs + arg) / 100) * 100, -30000, 30000)};
+/** A draft equal to the server's is no draft. */
+function capSetDraft(m, next) {
   m.remote.captions.draft = capSame(next, capServer(m.link.status)) ? null : next;
 }
+function capTrack(m, arg) {
+  const id = arg === '' || arg == null ? null : String(arg);
+  if (!caps(m).captions || (id !== null && !entryOf(remoteCatalogue(m), id)?.supported)) return;
+  capSetDraft(m, {subtitleId: id, delayMs: id === null ? 0 : capDraft(m).delayMs});
+}
+function capShift(m, delayOf) {
+  const cur = capDraft(m);
+  if (caps(m).captions && cur.subtitleId) capSetDraft(m, {subtitleId: cur.subtitleId, delayMs: delayOf(cur.delayMs)});
+}
+/** A nudge from the remote (Z, X) opens the sheet it edits. Steps round to 0,1 s and stop at ±30 s. */
+function capNudge(m, fx, msg) {
+  const delta = Number(msg.arg);
+  if (!finite(delta)) return;
+  if (!m.ui.sheet) uiOpen(m, 'subs');
+  capShift(m, ms => clamp(Math.round((ms + delta) / 100) * 100, -30000, 30000));
+}
+const capReset = m => capShift(m, () => 0);
 function capBegin(m, fx, kind, want, msg) {
   const s = m.link.status;
   m.remote.captions.apply = {
     kind, stage: 'verifying', want, catalogueId: s.active_catalogue.id, afterSeq: linkRequestPoll(m, fx), ticket: null,
-    prevVisible: typeof s.subtitles_enabled === 'boolean' ? s.subtitles_enabled : null, errorAtStart: errorIdentity(s), reads: 0, from: msg?.from, n: msg?.n,
+    prevVisible: typeof s.subtitles_enabled === 'boolean' ? s.subtitles_enabled : null, errorAtStart: errorIdentity(s), reads: 0, origin: originOf(msg),
   };
 }
 /** Aplicar sends the draft. A new track shows itself; the same track keeps the visibility the TV has. */
@@ -631,7 +640,7 @@ function capAdvance(m, fx) {
     if (l.statusSeq <= a.afterSeq) return;
     if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
     if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
-    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, {owner: 'captions', from: a.from, n: a.n});
+    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin, 'captions');
     if (ticket) { a.stage = 'posting'; a.ticket = ticket; } else m.remote.captions.apply = null;
   } else if (a.stage === 'reading') {
     if (c.busy) return;
@@ -651,22 +660,23 @@ function capOnCommandDone(m, c) {
 }
 
 function remoteStop(m, fx, msg) {
-  const c = caps(m), s = m.link.status;
+  const c = caps(m);
   if (!c.stop || m.ui.confirm) return;
   if (c.stopNeedsConfirm) m.ui.confirm = {kind: 'stop', key: m.remote.key};
-  else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
+  else remoteStopNow(m, fx, msg);
 }
 function remoteCancelFlows(m) {
   planTouch(m);
   m.remote.captions.apply = null;
   m.remote.seek = {s: 'idle'};
 }
-function remoteStopNow(m, fx, body, msg) {
-  const u = m.ui;
+/** The stop names the playback it is for, when there is one, so the bridge refuses it for any other. */
+function remoteStopNow(m, fx, origin = null) {
+  const u = m.ui, id = m.link.status.playback_id;
   remoteCancelFlows(m);
   u.confirm = null;
   u.sheet = null;
-  if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
+  if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin, 'stop')) u.stopIssued = true;
 }
 function stopOnDeadline(m, msg) {
   if (m.remote.stop?.deadline !== msg.ticket) return;
@@ -674,10 +684,10 @@ function stopOnDeadline(m, msg) {
   m.ui.errors.local = 'No se pudo detener: sin conexión. Probá de nuevo.';
 }
 function stopAdvance(m, fx) {
-  const st = m.remote.stop, s = m.link.status;
+  const st = m.remote.stop;
   if (!st || m.link.statusSeq <= st.afterSeq) return;
   m.remote.stop = null;
-  if (caps(m).stop) remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {});
+  if (caps(m).stop) remoteStopNow(m, fx);
 }
 
 // ───────── ui: layers, errors
@@ -765,7 +775,7 @@ function uiDismissNotice(m) {
   else e.dismissed = errorIdentity(m.link.status);
 }
 function uiScenario(m, fx, value, msg) {
-  if (m.link.status.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
+  if (m.link.status.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, msg);
 }
 
 /** What settles each command when its confirming poll lands. `live` says whether a failed reply is still worth reporting; absent means always. */
@@ -896,9 +906,8 @@ const ACTS = Object.freeze({
   volumePreview: (m, fx, g) => volumePreview(m, Number(g.arg)),
   volume: (m, fx, g) => volumeSet(m, fx, Number(g.arg), g),
   mute: muteToggle,
-  capTrack: (m, fx, g) => capEdit(m, 'track', g.arg),
-  capNudge: (m, fx, g) => { if (!m.ui.sheet) uiOpen(m, 'subs'); capEdit(m, 'nudge', Number(g.arg)); },
-  capReset: m => capEdit(m, 'reset'),
+  capTrack: (m, fx, g) => capTrack(m, g.arg),
+  capNudge, capReset,
   capVisible: (m, fx, g) => capVisible(m, fx, g.arg === true || g.arg === 'true', g),
   capApply,
   capDiscard,
