@@ -565,6 +565,10 @@ const Panel = (() => {
     x.addon.op = {kind: 'lookup', ticket};
     fx.push({fx: 'post', ticket, action: 'subtitle_lookup', body: {source_id: x.catalogue.source_id, catalogue_id: x.catalogue.id, hint}});
   }
+  function addonRetry(m, fx, scope) {
+    const x = addonReady(m, scope);
+    if (x) addonLookup(m, fx, scope, x.addon.lastHint);
+  }
   function addonAlternative(m, fx, scope, index) {
     const x = addonReady(m, scope), alt = x && addonOffers(x.addon, x.catalogue).listing?.alternatives?.slice(0, 4)[index];
     if (alt) addonLookup(m, fx, scope, `${alt.id} ${alt.title} ${alt.year ?? ''}`.trim().slice(0, 200));
@@ -1338,7 +1342,7 @@ const Panel = (() => {
     stremioLanguage: (m, fx, g) => addonLanguage(m, stremioScope(m), g.arg),
     stremioVersion: (m, fx, g) => addonVersion(m, stremioScope(m), g.arg),
     stremioUse: (m, fx) => addonUse(m, fx, stremioScope(m)),
-    stremioRetry: (m, fx) => addonLookup(m, fx, stremioScope(m), (stremioScope(m) === 'plan' ? m.plan.addon : m.remote.addon).lastHint),
+    stremioRetry: (m, fx) => addonRetry(m, fx, stremioScope(m)),
     stremioWrong: m => addonWrong(m, stremioScope(m)),
     stremioAlt: (m, fx, g) => addonAlternative(m, fx, stremioScope(m), Number(g.arg)),
     stremioSearch: (m, fx, g) => addonSearch(m, fx, stremioScope(m), g.arg),
