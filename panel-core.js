@@ -272,12 +272,17 @@ function advanceOnStatus(m, fx) {
   stopAdvance(m, fx);
   seekOnStatus(m);
 }
-function linkOnCommandReply(m, fx, c, msg) {
-  if (c.stage !== 'posting') return;
-  c.ok = msg.ok;
-  if (!msg.ok && (OWNERS[c.owner]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
-  c.stage = 'confirming';
-  c.afterSeq = linkRequestPoll(m, fx);
+/** A reply for one of our commands; false for any other ticket. */
+function linkOnReply(m, fx, msg) {
+  const c = m.link.inflight.find(x => x.ticket === msg.ticket);
+  if (!c) return false;
+  if (c.stage === 'posting') {
+    c.ok = msg.ok;
+    if (!msg.ok && (OWNERS[c.owner]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
+    c.stage = 'confirming';
+    c.afterSeq = linkRequestPoll(m, fx);
+  }
+  return true;
 }
 
 // ───────── plan: movie, catalogue, subtitle decision, Start
@@ -365,6 +370,19 @@ function planAdoptSnapshot(m) {
   } else if (snap.state === 'error' && loading.s === 'loading' && loading.analysisId && loading.analysisId === snap.analysis_id) {
     p.load = {s: 'error', message: snap.message || 'No se pudo analizar la película. Actualizá las pistas.'};
   }
+}
+/** A reply for the plan's catalogue, upload or list refresh; false for any other ticket. */
+function planOnReply(m, fx, msg) {
+  const p = m.plan, t = msg.ticket;
+  if (p.load.s === 'loading' && p.load.ticket === t) planOnCatalogueReply(m, msg);
+  else if (p.upload.s === 'busy' && p.upload.ticket === t && p.upload.stage === 'posting') planOnUploadReply(m, msg);
+  else {
+    const r = Object.values(p.refresh).find(x => x.ticket === t);
+    if (!r) return false;
+    r.ticket = null;
+    if (msg.ok) linkRequestPoll(m, fx); else r.error = commandError(msg);
+  }
+  return true;
 }
 function planOnCatalogueReply(m, msg) {
   const p = m.plan;
@@ -477,6 +495,11 @@ function planOnCommandDone(m, c) {
 }
 
 // ───────── remote: seek, volume, captions, stop
+/** The newer of the server's active catalogue and what a lookup or download returned since. */
+function remoteCatalogue(m) {
+  const a = m.link.status.active_catalogue ?? null, o = m.remote.overlay;
+  return notOlder(o, a) ? o : a;
+}
 /** Drafts and flows belong to one playback identity. Runs before any flow advances, so none acts on a playback it was not made for. */
 function remoteSync(m) {
   const key = playbackKey(m.link.status);
@@ -828,10 +851,9 @@ function step(m, msg) {
   reconcile(m, fx);
   return {model: m, fx};
 }
+/** Each owner claims its own tickets. A ticket nobody holds is dropped: that is the fence. */
 function linkRouteReply(m, fx, msg) {
-  const c = m.link.inflight.find(x => x.ticket === msg.ticket);
-  if (c) linkOnCommandReply(m, fx, c, msg);
-  else planOnReply(m, fx, msg);
+  if (!linkOnReply(m, fx, msg) && !planOnReply(m, fx, msg)) addonRouteReply(m, fx, msg);
 }
 function onTimer(m, fx, msg) {
   const l = m.link;

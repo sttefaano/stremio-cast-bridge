@@ -5,11 +5,6 @@ const addonKey = cat => cat?.addon ? `${cat.id}:${cat.addon.revision}` : '';
 const addonSay = (a, cat, text) => { a.message = text ? {text, key: addonKey(cat)} : null; };
 const addonFailure = msg => msg.timeout ? 'La consulta tardó demasiado. Reintentá.' : commandError(msg);
 const stremioScope = m => m.ui.sheet === 'subs' ? 'remote' : 'plan';
-/** The newer of the server's active catalogue and what a lookup or download returned since. */
-function remoteCatalogue(m) {
-  const a = m.link.status.active_catalogue ?? null, o = m.remote.overlay;
-  return notOlder(o, a) ? o : a;
-}
 function addonCtx(m, scope) {
   const c = caps(m), s = m.link.status;
   if (scope === 'plan') {
@@ -135,21 +130,10 @@ function addonReconcile(m, fx, scope) {
   a.pull = {s: 'pulling', key, ticket};
   fx.push({fx: 'post', ticket, action: 'subtitle_offers', body: {source_id: cat.source_id, catalogue_id: cat.id}});
 }
-
-/** Reply for any ticket that is not the command slot. An unknown ticket is dropped: that is the fence. */
-function planOnReply(m, fx, msg) {
-  const p = m.plan, t = msg.ticket;
-  if (p.load.s === 'loading' && p.load.ticket === t) return planOnCatalogueReply(m, msg);
-  if (p.upload.s === 'busy' && p.upload.ticket === t && p.upload.stage === 'posting') return planOnUploadReply(m, msg);
-  for (const kind of ['discover', 'discover_devices']) {
-    const r = p.refresh[kind];
-    if (r.ticket !== t) continue;
-    r.ticket = null;
-    if (msg.ok) linkRequestPoll(m, fx); else r.error = commandError(msg);
-    return;
-  }
-  for (const [scope, a] of [['plan', p.addon], ['remote', m.remote.addon]]) {
-    if (a.pull.s === 'pulling' && a.pull.ticket === t) return addonOnPull(m, scope, msg);
-    if (a.op?.ticket === t) return addonOnReply(m, fx, scope, msg);
+/** A reply for an offers pull, a lookup or a download, in either scope. */
+function addonRouteReply(m, fx, msg) {
+  for (const [scope, a] of [['plan', m.plan.addon], ['remote', m.remote.addon]]) {
+    if (a.pull.s === 'pulling' && a.pull.ticket === msg.ticket) return addonOnPull(m, scope, msg);
+    if (a.op?.ticket === msg.ticket) return addonOnReply(m, fx, scope, msg);
   }
 }
