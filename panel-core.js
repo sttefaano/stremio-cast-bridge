@@ -23,7 +23,7 @@
  * @property {Ticket|null} pollTimer
  * @property {Command[]} inflight  at most one command, plus a stop that may join it; each reply routes to its own entry
  */
-/** @typedef {{ticket:Ticket,action:string,stage:'posting'|'confirming',afterSeq:number,ok:boolean|null,owner:string|null}} Command */
+/** @typedef {{ticket:Ticket,action:string,stage:'posting'|'confirming',afterSeq:number,ok:boolean|null}} Command */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
@@ -222,15 +222,15 @@ function linkIssuePoll(m, fx) {
 }
 /**
  * Playback commands carry the device identity; explicit fields in `body` win (start sends its click-time snapshot).
- * @param {{from?:string,n?:number}|null} [origin] @param {string|null} [owner] @returns {Ticket|null}
+ * @param {{from?:string,n?:number}|null} [origin] @returns {Ticket|null}
  */
-function linkCommand(m, fx, action, body, origin = null, owner = null) {
+function linkCommand(m, fx, action, body, origin = null) {
   const l = m.link, s = l.status;
   if (!l.online || l.inflight.some(c => action !== 'stop' || c.action === 'stop')) return null;
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
-  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null, owner});
+  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null});
   m.ui.errors.local = null;
   if (origin?.from) m.ui.focus = {ref: origin.from, n: origin.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
@@ -261,7 +261,7 @@ function advanceOnStatus(m, fx) {
   const settled = l.inflight.filter(c => c.stage === 'confirming' && l.statusSeq > c.afterSeq);
   l.inflight = l.inflight.filter(c => !settled.includes(c));
   for (const c of settled) {
-    OWNERS[c.owner]?.done(m, c);
+    OWNERS[c.action]?.done(m, c);
     uiSettleFocus(m, fx, c);
   }
   startAdvance(m, fx);
@@ -274,7 +274,7 @@ function linkOnReply(m, fx, msg) {
   if (!c) return false;
   if (c.stage === 'posting') {
     c.ok = msg.ok;
-    if (!msg.ok && (OWNERS[c.owner]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
+    if (!msg.ok && (OWNERS[c.action]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
     c.stage = 'confirming';
     c.afterSeq = linkRequestPoll(m, fx);
   }
@@ -479,7 +479,7 @@ function startAdvance(m, fx) {
   }
   const now = replacementIdentity(s);
   if (now && now !== st.consent) { m.ui.confirm = {kind: 'replace', snap: k, consent: now, title: sourceTitle(s, k.sourceId)}; return; }
-  const ticket = linkCommand(m, fx, 'start', {source_id: k.sourceId, catalogue_id: k.catalogueId, subtitle_id: k.subtitleId, delay_ms: 0, device_id: k.deviceId, device_revision: k.deviceRevision}, null, 'start');
+  const ticket = linkCommand(m, fx, 'start', {source_id: k.sourceId, catalogue_id: k.catalogueId, subtitle_id: k.subtitleId, delay_ms: 0, device_id: k.deviceId, device_revision: k.deviceRevision});
   if (ticket) p.start = {stage: 'posting', snap: k, ticket};
 }
 /** The Start command settled. A start cancelled meanwhile leaves the draft and the sheet alone. */
@@ -516,7 +516,7 @@ function seekAbandon(m) {
   if (m.remote.seek.s === 'dragging') m.remote.seek = {s: 'idle'};
 }
 function seekSend(m, fx, body, target, origin) {
-  const ticket = linkCommand(m, fx, 'seek', body, origin, 'seek');
+  const ticket = linkCommand(m, fx, 'seek', body, origin);
   m.remote.seek = ticket ? {s: 'sent', target, ticket, sawBusy: false} : {s: 'idle'};
 }
 /** Release commits: one seek {position}. */
@@ -576,7 +576,7 @@ function volumePreview(m, value) {
 }
 function volumeSet(m, fx, value, msg) {
   const ok = caps(m).transport && finite(m.link.status.volume) && finite(value);
-  if (!ok || !linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, msg, 'volume')) m.remote.volumePreview = null;
+  if (!ok || !linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, msg)) m.remote.volumePreview = null;
 }
 function muteToggle(m, fx, msg) {
   const s = m.link.status;
@@ -656,7 +656,7 @@ function capAdvance(m, fx) {
     if (l.statusSeq <= a.afterSeq) return;
     if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
     if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
-    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin, 'captions');
+    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin);
     if (ticket) { a.stage = 'posting'; a.ticket = ticket; } else m.remote.captions.apply = null;
   } else if (a.stage === 'reading') {
     if (c.busy) return;
@@ -691,7 +691,7 @@ function remoteStopNow(m, fx, origin = null) {
   remoteCancelFlows(m);
   u.confirm = null;
   u.sheet = null;
-  if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin, 'stop')) u.stopIssued = true;
+  if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin)) u.stopIssued = true;
 }
 function stopOnDeadline(m, msg) {
   if (m.remote.stop?.deadline !== msg.ticket) return;
@@ -796,7 +796,7 @@ function uiScenario(m, fx, value, msg) {
 const OWNERS = {
   start: {done: planOnCommandDone},
   seek: {done: seekOnCommandDone},
-  captions: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
+  subtitles: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
   volume: {done: m => { m.remote.volumePreview = null; }},
   stop: {done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
 };
