@@ -692,12 +692,16 @@ function remoteStopNow(m, fx, origin = null) {
   if (linkCommand(m, fx, 'stop', id ? {playback_id: id} : {}, origin)) u.stopIssued = true;
 }
 const stopOutranStart = c => c.joins === 'start' && c.error?.code === 'stale_playback';
+const replyFresh = (m, c) => {
+  const dt = m.now - c.repliedAt;
+  return dt >= 0 && dt <= PENDING_MS;
+};
 function stopOnCommandDone(m, c, fx) {
   if (!c.error) return;
   m.ui.stopIssued = false;
   const k = caps(m);
   if (!stopOutranStart(c) || !k.stop) return;
-  if (m.now - c.repliedAt <= PENDING_MS) remoteStopNow(m, fx);
+  if (replyFresh(m, c)) remoteStopNow(m, fx);
   else if (k.stopNeedsConfirm) remoteStop(m, fx);
   else uiSay(m, c.error.text);
 }

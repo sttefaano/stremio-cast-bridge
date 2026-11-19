@@ -723,7 +723,7 @@ test('a Detener that joins a Cambiar película stops the new movie once the brid
 
 test('a Detener that lost to a Cambiar película is not resent on its own after an outage', () => {
   const refused = {ok: false, code: 'stale_playback', message: 'La reproducción cambió. Revisá la película activa.'};
-  const lostStop = () => {
+  const lostStop = ({repliedAt = 0, settledAt = 70000} = {}) => {
     const p = panel(playing);
     p.tap('openChange');
     choose(p, 'b');
@@ -733,10 +733,11 @@ test('a Detener that lost to a Cambiar película is not resent on its own after 
     p.reply(p.posted('start'));
     p.tap('dismiss');
     p.tap('stop');
+    if (repliedAt) p.tick(repliedAt);
     p.reply(p.posted('stop'), refused);
     p.status(null, false);
     for (let i = 0; i < 40; i++) offline(p);
-    p.tick(70000);
+    p.tick(settledAt);
     p.fire('poll');
     return p;
   };
@@ -749,6 +750,11 @@ test('a Detener that lost to a Cambiar película is not resent on its own after 
   q.status({...beta, phase: 'preparing', pending: true});
   assert.equal(q.posts('stop').length, 0, 'still preparing: nothing goes out by itself either');
   assert.equal(q.view.problem.body, refused.message, 'the refusal shows so the user can stop again');
+  const hour = 3600e3;
+  const r = lostStop({repliedAt: 2 * hour, settledAt: hour + 60000});
+  r.status(beta);
+  assert.equal(r.posts('stop').length, 0, 'a wall clock stepped back during the outage sends nothing by itself');
+  assert.equal(r.view.confirm?.kind, 'stop', 'the user confirms the stop again after a clock step back');
 });
 
 test('focus goes back only when the command that asked for it settles', () => {
