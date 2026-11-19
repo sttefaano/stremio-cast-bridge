@@ -95,6 +95,7 @@ const WAITING = ['preparing', 'buffering', 'loading'], LIVE = ['playing', 'pause
 const KNOWN = new Set(['idle', 'stopped', 'ended', 'error', ...WAITING, ...LIVE, ...FOREIGN]);
 const NO_STATUS = Object.freeze({phase: 'idle', sources: []});
 const KIND_OF_BRANCH = {file: 'embedded', stremio: 'addon', upload: 'upload'};
+const STOPPING = 'Deteniendo…';
 const STOP_MOVED = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
 const finite = Number.isFinite;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -165,7 +166,8 @@ function capDraft(m) {
 /**
  * @typedef {object} Caps
  * @property {boolean} online
- * @property {boolean} busy  own command in flight, command_pending, pending or a waiting phase
+ * @property {boolean} busy  own command or stop pending, command_pending, pending or a waiting phase
+ * @property {boolean} stopping  our Detener is confirmed or in flight: no other flow may start until it settles
  * @property {boolean} foreign  receiver_changed, disconnected or a phase we do not know: only Stop is allowed
  * @property {boolean} owned    the page shows Mando
  * @property {boolean} transport  pause/resume/seek/skip/volume/mute
@@ -178,22 +180,23 @@ function capDraft(m) {
  */
 /** @param {Model} m @returns {Caps} */
 function caps(m) {
-  const l = m.link, s = l.status, online = l.online;
+  const l = m.link, s = l.status, online = l.online, stopping = stopPending(m);
   const unknown = !KNOWN.has(s.phase), foreign = FOREIGN.includes(s.phase) || unknown;
-  const busy = l.inflight.length > 0 || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
+  const busy = stopping || l.inflight.length > 0 || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
   const live = LIVE.includes(s.phase), owned = modeOf(m) === 'mando';
   const transport = online && live && !busy;
   const subs = !!s.playback_id && !!remoteCatalogue(m) && !foreign, change = owned && !foreign;
   return {
-    online, busy, foreign, owned, transport,
-    sheets: {subs: {open: online && subs, keep: subs}, more: {open: owned, keep: owned}, change: {open: online && change, keep: change}},
+    online, busy, stopping, foreign, owned, transport,
+    sheets: {subs: {open: online && subs, keep: subs}, more: {open: owned, keep: owned}, change: {open: online && change && !stopping, keep: change}},
     captions: transport && !!s.playback_id && !!s.active_catalogue && !m.remote.captions.apply,
-    stop: online && (s.can_change_device === false || busy || live || WAITING.includes(s.phase) || foreign || s.phase === 'error'),
+    stop: online && !stopping && (s.can_change_device === false || busy || live || WAITING.includes(s.phase) || foreign || s.phase === 'error'),
     stopNeedsConfirm: live && !busy,
     changeDevice: online && s.can_change_device === true && !busy,
     start: online && !busy && !foreign && s.selected_device?.available === true && s.device_discovery !== 'error' && s.source_discovery !== 'error',
   };
 }
+const stopPending = m => !!m.remote.stop || m.link.inflight.some(c => c.action === 'stop');
 /** 'mando' while a playback is ours or foreign-but-present; Preparar otherwise. Offline keeps the last status. */
 function modeOf(m) {
   const s = m.link.status;
@@ -713,7 +716,7 @@ function uiSettleFocus(m, fx, c) {
 /** What the one problem block says, or null. The same function decides what dismissNotice dismisses. */
 function problemOf(m) {
   const s = m.link.status, c = caps(m), u = m.ui;
-  const stopAction = label => ({act: 'stop', label, enabled: c.stop});
+  const stopAction = label => ({act: 'stop', label: c.stopping ? STOPPING : label, enabled: c.stop});
   if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
   if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
   if (s.phase === 'receiver_changed') return {kind: 'foreign', title: 'Hay otro contenido en la TV', body: 'Este mando no lo controla. Detené para volver a elegir.', action: stopAction('Detener y volver a elegir')};

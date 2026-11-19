@@ -274,6 +274,7 @@ test('stop sends device fields only when a TV is selected', async () => {
   const t = await shell({...bare, selected_device: base.selected_device});
   t.click('stop');
   assert.deepEqual(t.pending('stop')[0].body, {device_id: 'tv-a', device_revision: 1});
+  assert.deepEqual([t.$('stop').textContent, t.$('stop').disabled, t.$('waiting-cancel').textContent], ['Deteniendo…', true, 'Deteniendo…'], 'the stop in flight is on screen');
 });
 
 test('every canned view paints: a missing id would throw', async () => {

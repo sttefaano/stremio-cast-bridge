@@ -13,6 +13,7 @@ const attr = (node, name, value) => {
   if (node.getAttribute(name) !== text) node.setAttribute(name, text);
 };
 const ctl = (node, c) => put(node, 'disabled', !c.enabled);
+const paintStop = (node, c) => { ctl(node, c); put(node, 'hidden', !c.shown); put(node, 'textContent', c.label); };
 const pct = (x, max) => `${max > 0 ? Math.round(Math.min(max, Math.max(0, x)) / max * 1000) / 10 : 0}%`;
 
 /** One row: label, note and tag/reason into the [data-f] slots, selected into aria-pressed, enabled into disabled. */
@@ -137,8 +138,7 @@ function paintDestination(doc, v) {
   put(byId(doc, 'device-note'), 'textContent', d.note);
   put(byId(doc, 'device-status'), 'textContent', d.status);
   put(byId(doc, 'device-rule'), 'textContent', d.rule); put(byId(doc, 'device-rule'), 'hidden', !d.rule);
-  const stop = byId(doc, 'device-stop');
-  put(stop, 'hidden', !d.stop.shown); ctl(stop, d.stop);
+  paintStop(byId(doc, 'device-stop'), d.stop);
   ctl(byId(doc, 'refresh-devices'), d.refresh);
   put(byId(doc, 'device-host'), 'textContent', d.details);
   put(byId(doc, 'device-details'), 'hidden', !d.details);
@@ -191,7 +191,7 @@ function paintMando(doc, v) {
   attr(byId(doc, 'toggle-icon'), 'href', m.toggle.icon === 'play' ? '#i-play' : '#i-pause');
   const waiting = byId(doc, 'waiting');
   put(waiting, 'hidden', !m.waiting);
-  if (m.waiting) { put(byId(doc, 'waiting-text'), 'textContent', m.waiting.text); put(byId(doc, 'waiting-detail'), 'textContent', m.waiting.detail || ''); ctl(byId(doc, 'waiting-cancel'), m.waiting.cancel); }
+  if (m.waiting) { put(byId(doc, 'waiting-text'), 'textContent', m.waiting.text); put(byId(doc, 'waiting-detail'), 'textContent', m.waiting.detail || ''); const cancel = byId(doc, 'waiting-cancel'); ctl(cancel, m.waiting.cancel); put(cancel, 'textContent', m.waiting.cancel.label); }
   const volume = byId(doc, 'volume');
   ctl(volume, m.volume); put(volume, 'value', String(m.volume.percent ?? 0));
   volume.style.setProperty('--p', `${m.volume.percent ?? 0}%`);
@@ -203,7 +203,7 @@ function paintMando(doc, v) {
   ctl(chip, m.chip); attr(chip, 'data-unapplied', m.chip.unapplied);
   put(byId(doc, 'chip-kind'), 'textContent', m.chip.unapplied ? 'Sin aplicar' : 'Subtítulos');
   put(byId(doc, 'chip-value'), 'textContent', m.chip.label);
-  ctl(byId(doc, 'open-more'), m.more); ctl(byId(doc, 'open-change'), m.change); ctl(byId(doc, 'stop'), m.stop); put(byId(doc, 'stop'), 'hidden', !m.stop.shown);
+  ctl(byId(doc, 'open-more'), m.more); ctl(byId(doc, 'open-change'), m.change); paintStop(byId(doc, 'stop'), m.stop);
 }
 
 function paintSubsSheet(doc, s) {
@@ -231,7 +231,7 @@ function paintMoreSheet(doc, s) {
   put(byId(doc, 'detail-host'), 'textContent', s.details.host);
   put(byId(doc, 'detail-file'), 'textContent', s.details.file);
   put(byId(doc, 'detail-prepared'), 'textContent', s.details.prepared);
-  ctl(byId(doc, 'more-stop'), s.stop); put(byId(doc, 'more-stop'), 'hidden', !s.stop.shown);
+  paintStop(byId(doc, 'more-stop'), s.stop);
 }
 
 /** Open or close a native dialog to match the view. Returns true when it closed. */

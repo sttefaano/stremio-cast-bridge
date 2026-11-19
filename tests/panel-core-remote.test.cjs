@@ -428,15 +428,69 @@ test('a confirmed Detener survives a failed poll and stops once the link returns
   assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
 });
 
-test('our own command between the confirm and the fresh poll does not cancel a confirmed Detener', () => {
+test('a confirmed Detener holds the remote: nothing else goes out before or beside it', () => {
   const p = panel(playing);
   p.tap('stop');
   p.tap('confirmAccept');
-  p.tap('toggle');
+  const m = p.view.mando;
+  assert.deepEqual([m.toggle.enabled, m.back.enabled, m.track.enabled, m.volume.enabled, m.mute.enabled, m.change.enabled], new Array(6).fill(false));
+  for (const [act, arg] of [['toggle'], ['skip', 30], ['dropSeek', 200], ['volume', 80], ['mute'], ['openChange']]) p.tap(act, arg);
+  assert.equal(p.view.sheet, null, 'Cambiar película does not open while the stop waits');
   p.status(playing);
-  p.reply(p.posted('pause'));
-  p.status(paused);
-  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+  assert.deepEqual(p.posts().map(f => f.action), ['stop']);
+});
+
+test('a confirmed Detener and a Start are never both sent: the Start is refused while the stop waits', () => {
+  const p = panel(playing);
+  p.tap('openChange');
+  choose(p, 'b');
+  p.tap('stop');
+  p.tap('confirmAccept');
+  assert.equal(p.view.plan.primary.enabled, false);
+  p.tap('start');
+  p.tap('confirmAccept');
+  p.status(playing);
+  assert.deepEqual(p.posts().map(f => f.action), ['stop']);
+  assert.equal(p.view.sheet, null, 'the stop closes the sheet when it goes out');
+});
+
+test('Detener reads Deteniendo… and stays disabled from the confirm until the stop settles', () => {
+  const stopping = v => [v.mando.stop.enabled, v.mando.stop.label];
+  const p = panel(playing);
+  assert.deepEqual(stopping(p.view), [true, 'Detener']);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  assert.deepEqual(stopping(p.view), [false, 'Deteniendo…']);
+  p.tap('stop');
+  assert.equal(p.view.confirm, null, 'pressing again does not ask again or replace the confirmed stop');
+  p.status(playing);
+  assert.equal(p.posts('stop').length, 1);
+  assert.deepEqual(stopping(p.view), [false, 'Deteniendo…'], 'still stopping while the stop is in flight');
+  p.tap('stop');
+  assert.equal(p.posts('stop').length, 1);
+  p.settle('stop', paused, {ok: false, code: 'busy', message: 'Ocupado.'});
+  assert.deepEqual(stopping(p.view), [true, 'Detener'], 'a failed stop gives Detener back');
+});
+
+test('every Detener says Deteniendo… while a stop is in flight', () => {
+  const waiting = panel({...playing, phase: 'loading', pending: true});
+  waiting.tap('stop');
+  const w = waiting.view;
+  assert.deepEqual([w.mando.waiting.cancel.enabled, w.mando.waiting.cancel.label], [false, 'Deteniendo…']);
+  assert.deepEqual([w.destination.stop.enabled, w.destination.stop.label], [false, 'Deteniendo…']);
+  const foreign = panel({...playing, phase: 'receiver_changed'});
+  foreign.tap('stop');
+  assert.deepEqual([foreign.view.problem.action.enabled, foreign.view.problem.action.label], [false, 'Deteniendo…']);
+  const more = panel({...playing, phase: 'loading', pending: true});
+  more.tap('openMore');
+  more.tap('stop');
+  assert.equal(more.view.sheet, null, 'the stop closes the sheet');
+  const busy = panel(playing);
+  busy.tap('toggle');
+  busy.tap('openMore');
+  busy.tap('stop');
+  busy.tap('openMore');
+  assert.deepEqual([busy.view.sheet.stop.enabled, busy.view.sheet.stop.label], [false, 'Deteniendo…']);
 });
 
 test('a Start waiting for its fresh poll survives a failed poll and starts once the link returns', () => {
@@ -604,7 +658,7 @@ test('the board glyph follows the phase, not the copy: play, pause, spinner whil
 
 test('one Detener at a time: a problem block that offers it takes the header\'s place, in Mando and in the Más sheet', () => {
   const header = status => panel(status).view.mando.stop;
-  assert.deepEqual(header(playing), {enabled: true, shown: true});
+  assert.deepEqual(header(playing), {enabled: true, shown: true, label: 'Detener'});
   const error = {...playing, phase: 'error', can_change_device: false, message: 'Falló'};
   for (const status of [error, {...playing, phase: 'receiver_changed'}, {...playing, phase: 'disconnected'}, {...playing, phase: 'wat'}]) {
     const v = panel(status).view;

@@ -27,6 +27,7 @@
  * @property {string} status
  */
 const trackLabel = e => [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ');
+const stopLabel = (c, label) => c.stopping ? STOPPING : label;
 const SUBS_BRANCHES = [['none', 'Sin'], ['file', 'Del archivo'], ['stremio', 'Stremio'], ['upload', 'Subir']];
 
 function viewStremio(m, scope) {
@@ -112,7 +113,7 @@ function viewPlan(m) {
  * @property {Row[]} rows
  * @property {Ctl} refresh
  * @property {string} rule
- * @property {Ctl&{shown:boolean}} stop
+ * @property {Ctl&{shown:boolean,label:string}} stop
  * @property {string} details  host of the chosen TV, for the disclosure
  */
 function viewDestination(m) {
@@ -127,7 +128,7 @@ function viewDestination(m) {
     rows: devices.map(d => ({id: d.id, label: deviceLabel(d), selected: d.id === sel?.id, enabled: c.changeDevice, ...(d.id === last ? {tag: 'Última usada'} : {})})),
     refresh: {enabled: c.online && !busyList},
     rule: s.can_change_device === false ? 'Primero detené la película para cambiar de TV.' : '',
-    stop: {shown: s.can_change_device === false, enabled: c.stop},
+    stop: {shown: s.can_change_device === false, enabled: c.stop, label: stopLabel(c, 'Detener')},
     details: sel?.host || '',
   };
 }
@@ -170,13 +171,13 @@ const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(del
  * @property {Ctl} forward
  * @property {string|null} badge  accumulated skip, '+60 s'
  * @property {Ctl&{icon:'play'|'pause'|'spinner',label:string}} toggle
- * @property {null|{text:string,detail:string,cancel:Ctl}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
+ * @property {null|{text:string,detail:string,cancel:Ctl&{label:string}}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
  * @property {Ctl&{percent:number|null,text:string}} volume
  * @property {Ctl&{pressed:boolean,label:string}} mute
  * @property {Ctl&{label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
  * @property {Ctl} more
  * @property {Ctl} change
- * @property {Ctl&{shown:boolean}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
+ * @property {Ctl&{shown:boolean,label:string}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
  */
 function viewMando(m) {
   const s = m.link.status, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
@@ -199,14 +200,14 @@ function viewMando(m) {
     badge: k.s === 'skipping' && k.delta !== 0 ? signedSkip(k.delta) : null,
     toggle: {enabled: c.transport, icon: spinner ? 'spinner' : s.phase === 'playing' ? 'pause' : 'play',
       label: spinner ? 'Esperando' : s.phase === 'playing' ? 'Pausar' : 'Continuar'},
-    waiting: waiting ? {text: `Esperando a ${deviceLabel(sel) || 'la TV'}`, detail: s.message || WAITING_COPY[s.phase], cancel: {enabled: c.stop}} : null,
+    waiting: waiting ? {text: `Esperando a ${deviceLabel(sel) || 'la TV'}`, detail: s.message || WAITING_COPY[s.phase], cancel: {enabled: c.stop, label: stopLabel(c, 'Cancelar')}} : null,
     volume: {enabled: c.transport && finite(s.volume), percent: volume, text: volume === null ? '—' : `${volume}%`},
     mute: {enabled: c.transport && typeof s.muted === 'boolean', pressed: s.muted === true, label: s.muted ? 'Activar sonido' : 'Silenciar'},
     chip: {
       enabled: c.sheets.subs.open, unapplied: capDirty(m),
       label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
     },
-    more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: !problemOffersStop(m)},
+    more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: !problemOffersStop(m), label: stopLabel(c, 'Detener')},
   };
 }
 
@@ -241,7 +242,7 @@ function viewSubsSheet(m) {
     stremio: viewStremio(m, 'remote'),
   };
 }
-/** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl&{shown:boolean}}} MoreSheetView */
+/** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl&{shown:boolean,label:string}}} MoreSheetView */
 function viewMoreSheet(m) {
   const s = m.link.status, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
   return {
@@ -251,7 +252,7 @@ function viewMoreSheet(m) {
       tv: deviceLabel(sel), host: sel?.host || '', file: s.sources.find(x => x.id === s.source_id)?.filename || 'Nombre no disponible',
       prepared: b ? `De ${formatTime(b.start)} a ${formatTime(b.end)}` : 'Sin datos todavía',
     },
-    stop: {enabled: c.stop, shown: !problemOffersStop(m)},
+    stop: {enabled: c.stop, shown: !problemOffersStop(m), label: stopLabel(c, 'Detener')},
   };
 }
 function viewSheet(m) {
