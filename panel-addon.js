@@ -131,7 +131,6 @@ function addonReconcile(m, fx, scope) {
   a.pull = {s: 'pulling', key, ticket};
   fx.push({fx: 'post', ticket, action: 'subtitle_offers', body: {source_id: cat.source_id, catalogue_id: cat.id}});
 }
-/** A reply for an offers pull, a lookup or a download, in either scope. */
 function addonRouteReply(m, fx, msg) {
   for (const [scope, a] of [['plan', m.plan.addon], ['remote', m.remote.addon]]) {
     if (a.pull.s === 'pulling' && a.pull.ticket === msg.ticket) return addonOnPull(m, scope, msg);

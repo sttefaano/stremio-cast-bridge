@@ -18,7 +18,6 @@ test('the check catches a core that reaches into the addon', () => {
   assert.deepEqual(crossings(planted, GLOBALS).out, ['panel-core.js names addonKey from panel-addon.js']);
 });
 
-/** A file and everything it depends on, transitively, in load order. */
 function withDependencies(name) {
   const need = new Set([name]);
   for (let grew = true; grew;) {

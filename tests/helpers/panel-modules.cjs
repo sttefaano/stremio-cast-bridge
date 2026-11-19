@@ -8,7 +8,6 @@ function dependsOn(src) {
   return line[1] === 'none' ? [] : line[1].split(/,\s*/);
 }
 
-/** The code with comments, quoted strings and template text blanked out; `${}` expressions stay. */
 function codeOnly(src) {
   let out = '';
   const nest = [];
@@ -52,10 +51,6 @@ function names(src) {
   return found;
 }
 
-/**
- * For files in load order ({name, src}), what each declares at the top level (the names that become defined once it
- * runs) and every name it uses that a file outside its declared dependencies declares.
- */
 function crossings(files, globals = {}) {
   const context = vm.createContext({module: {exports: {}}, ...globals});
   const defined = name => { try { return vm.runInContext(`typeof ${name} !== 'undefined'`, context); } catch (_) { return false; } };

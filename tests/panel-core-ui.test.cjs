@@ -2,7 +2,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {PANEL_FILES} = require('./helpers/panel-source.cjs');
-const {load, plain, panel, catalogue, destination, playing, idle, choose, offline, names, paused, subsOk, withTracks, stopped, stopFromPlaying, key} = require('./helpers/panel-harness.cjs');
+const {plain, panel, catalogue, destination, playing, idle, choose, offline, names, paused, subsOk, withTracks, stopped, stopFromPlaying, key} = require('./helpers/panel-harness.cjs');
 
 // ───────── ui: layers, errors, notices, focus; and reconcile
 

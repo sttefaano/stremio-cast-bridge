@@ -1,6 +1,4 @@
-// Panel core: the model and its rules. Pure data in, plain data out: it never touches document, fetch, timers, storage or
-// `token`. bridge.py inlines the panel files in the order PANEL_SCRIPTS names, as one script; each file names only what
-// the files it depends on declare.
+// ───────── core: the model and its rules. Pure data in, plain data out.
 // Depends on: none.
 
 // ───────── wire types (server contract)
@@ -58,7 +56,7 @@
  * @property {Record<'discover'|'discover_devices',{ticket:Ticket|null,error:string}>} refresh
  */
 /**
- * @typedef {{from:string,n:number}} Origin  the control and interaction that asked; focus returns there once the command settles
+ * @typedef {{from:string,n:number}} Origin
  * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,origin:Origin|null}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
  * @typedef {{subtitleId:string|null,enabled:boolean,delayMs:number}} CaptionWant
  * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,afterSeq:number,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
@@ -91,9 +89,8 @@
 /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
 // ───────── constants and pure helpers
-// A hung poll fails only when the shell's 6 s fetch timeout fires, and the retry follows at once, so 10 s covers one hung
-// poll and one more try. Past that a confirmed Detener or Iniciar is dropped rather than fired at a TV the user may have
-// resumed with its own remote.
+// One poll that hangs until the shell's 6 s fetch timeout, then one more try. Later than that, a confirmed Detener or
+// Iniciar could land on a TV the user has since resumed with its own remote.
 const PENDING_MS = 10000;
 const POLL_MS = 1500, SKIP_MS = 600, CLOCK_MS = 250, SETTLE_S = 2, CLOCK_CAP_S = 2, SKIP_S = 30, MAX_UPLOAD = 1024 * 1024, MAX_READS = 6;
 const PLAYBACK_ACTIONS = ['start', 'pause', 'resume', 'seek', 'stop', 'volume', 'mute', 'subtitles'];
@@ -239,7 +236,6 @@ function linkCommand(m, fx, action, body, origin = null, owner = null) {
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
   return ticket;
 }
-/** A timer that gives up on a confirmed wait; the waiting state keeps the ticket so a stale one is ignored. */
 function pendingDeadline(m, fx, name) {
   const ticket = ticketOf(m);
   fx.push({fx: 'timer', name, ms: PENDING_MS, ticket});
@@ -273,7 +269,6 @@ function advanceOnStatus(m, fx) {
   stopAdvance(m, fx);
   seekOnStatus(m);
 }
-/** A reply for one of our commands; false for any other ticket. */
 function linkOnReply(m, fx, msg) {
   const c = m.link.inflight.find(x => x.ticket === msg.ticket);
   if (!c) return false;
@@ -372,7 +367,6 @@ function planAdoptSnapshot(m) {
     p.load = {s: 'error', message: snap.message || 'No se pudo analizar la película. Actualizá las pistas.'};
   }
 }
-/** A reply for the plan's catalogue, upload or list refresh; false for any other ticket. */
 function planOnReply(m, fx, msg) {
   const p = m.plan, t = msg.ticket;
   if (p.load.s === 'loading' && p.load.ticket === t) planOnCatalogueReply(m, msg);
@@ -597,7 +591,6 @@ function toggle(m, fx, msg) {
 const capSame = (a, b) => a.subtitleId === b.subtitleId && a.delayMs === b.delayMs;
 /** Derived, never stored: the draft differs from what the TV has. */
 const capDirty = m => !!m.remote.captions.draft && !capSame(m.remote.captions.draft, capServer(m.link.status));
-/** A draft equal to the server's is no draft. */
 function capSetDraft(m, next) {
   m.remote.captions.draft = capSame(next, capServer(m.link.status)) ? null : next;
 }
@@ -610,7 +603,6 @@ function capShift(m, delayOf) {
   const cur = capDraft(m);
   if (caps(m).captions && cur.subtitleId) capSetDraft(m, {subtitleId: cur.subtitleId, delayMs: delayOf(cur.delayMs)});
 }
-/** A nudge from the remote (Z, X) opens the sheet it edits. Steps round to 0,1 s and stop at ±30 s. */
 function capNudge(m, fx, msg) {
   const delta = Number(msg.arg);
   if (!finite(delta)) return;
@@ -694,7 +686,6 @@ function remoteCancelFlows(m) {
   m.remote.captions.apply = null;
   m.remote.seek = {s: 'idle'};
 }
-/** The stop names the playback it is for, when there is one, so the bridge refuses it for any other. */
 function remoteStopNow(m, fx, origin = null) {
   const u = m.ui, id = m.link.status.playback_id;
   remoteCancelFlows(m);
@@ -722,7 +713,7 @@ function uiOpen(m, sheet) {
   if (sheet === 'more') m.ui.exact = {text: '', error: ''};
   m.ui.sheet = sheet;
 }
-/** Escape, the backdrop, the sheet close button and the confirm cancel: close the TOP layer only; any dismissal cancels a pending start. */
+/** Closes the TOP layer only. */
 function uiDismiss(m) {
   const u = m.ui;
   if (u.confirm) { u.confirm = null; return; }
@@ -802,7 +793,6 @@ function uiScenario(m, fx, value, msg) {
   if (m.link.status.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, msg);
 }
 
-/** What settles each command when its confirming poll lands. `live` says whether a failed reply is still worth reporting; absent means always. */
 const OWNERS = {
   start: {done: planOnCommandDone},
   seek: {done: seekOnCommandDone},

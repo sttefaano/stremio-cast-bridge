@@ -1,4 +1,3 @@
-// A small DOM parsed from the real player.html: just enough surface for the shell.
 const VOID = new Set(['meta', 'input', 'br', 'hr', 'img', 'link', 'source']);
 
 class Node {

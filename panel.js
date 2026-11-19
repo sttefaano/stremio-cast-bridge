@@ -1,4 +1,4 @@
-// ───────── Panel: init, step and the standing rules that tie the core, the addon and the view together; the shell's only entry.
+// ───────── Panel: init, step, the standing rules, ACTS and keyMsg.
 // Depends on: panel-core.js, panel-addon.js, panel-view.js.
 
 /** @param {{lastDeviceId?:string|null}} [saved] @returns {{model:Model,fx:object[]}} the first poll is in fx */
