@@ -27,7 +27,7 @@ from urllib.request import urlopen
 from dataclasses import replace
 from addons import StremioAddon
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
-from vod import READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
+from vod import PLAYLIST_NAME, READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
@@ -183,7 +183,7 @@ def ffmpeg_command(source, session, plan, start_index=0, duration=None, readrate
         '-f', 'hls', '-hls_time', str(SEGMENT_SECONDS), '-hls_list_size', '0',
         '-hls_flags', 'independent_segments+temp_file', '-hls_playlist_type', 'event',
         '-master_pl_name', 'master.m3u8', '-var_stream_map', mapping,
-        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / 'video.m3u8')]
+        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / PLAYLIST_NAME)]
 
 
 STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'absolute_time',

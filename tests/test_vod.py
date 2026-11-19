@@ -110,20 +110,23 @@ class SegmentActionTest(unittest.TestCase):
 
 class ExitOutcomeTest(unittest.TestCase):
     def test_how_a_run_that_exited_by_itself_ended(self):
-        # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15).
+        # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15),
+        # and it finalizes the segment it was writing short.
         cases = (
-            ('reached its bound', 10, 20, 20, 0, 'complete'),
-            ('reached its bound by stalling in its last segment', 10, 20, 20, 60, 'stalled'),
-            ('stopped promptly in the last two listed segments', 10, 50, 48, 1, 'end'),
-            ('stopped promptly having written nothing near the end', 49, 50, 49, 1, 'end'),
-            ('stopped in the last two after a silence', 10, 50, 48, 45, 'stalled'),
-            ('wrote nothing near the end after a silence', 49, 50, 49, 45, 'stalled'),
-            ('stopped promptly far from the end', 10, 50, 30, 1, 'stalled'),
-            ('stopped near the end of a run bounded before the list end', 10, 49, 48, 1, 'stalled'),
+            ('reached its bound', 10, 20, 20, False, 0, 'complete'),
+            ('reached its bound slowly with its last segment whole', 10, 20, 20, False, 60, 'complete'),
+            ('reached its bound by stalling in its last segment', 10, 20, 20, True, 60, 'stalled'),
+            ('reached the listed end promptly with a short tail', 10, 50, 50, True, 1, 'end'),
+            ('stopped promptly in the last two listed segments', 10, 50, 48, True, 1, 'end'),
+            ('stopped promptly having written nothing near the end', 49, 50, 49, True, 1, 'end'),
+            ('stopped in the last two after a silence', 10, 50, 48, True, 45, 'stalled'),
+            ('wrote nothing near the end after a silence', 49, 50, 49, True, 45, 'stalled'),
+            ('stopped promptly far from the end', 10, 50, 30, False, 1, 'stalled'),
+            ('stopped near the end of a run bounded before the list end', 10, 49, 48, False, 1, 'stalled'),
         )
-        for label, start, limit, position, quiet, expected in cases:
+        for label, start, limit, position, short, quiet, expected in cases:
             with self.subTest(label):
-                self.assertEqual(exit_outcome(start, limit, position, 50, quiet, stall_seconds=10), expected)
+                self.assertEqual(exit_outcome(start, limit, position, 50, short, quiet, stall_seconds=10), expected)
 
 
 class FakeProcess:
@@ -166,9 +169,12 @@ class ProducerTest(unittest.TestCase):
         return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
                         **{'poll_seconds': .01, 'fresh_seconds': 0, **kwargs})
 
-    def write(self, *indices):
+    def write(self, *indices, length=None):
         for index in indices:
-            (self.directory / self.layout.segment_name(index)).write_bytes(b'ts')
+            name = self.layout.segment_name(index)
+            (self.directory / name).write_bytes(b'ts')
+            with open(self.directory / 'video.m3u8', 'a') as playlist:
+                playlist.write(f'#EXTINF:{self.layout.length(index) if length is None else length:.6f},\n{name}\n')
 
     def test_cover_starts_at_the_first_gap_and_stops_before_segments_already_on_disk(self):
         self.write(0, 1, 2, 8, 9)
@@ -363,15 +369,26 @@ class ProducerTest(unittest.TestCase):
                 self.write(7)
                 producer = self.producer(backoff_seconds=0, stall_seconds=5)
                 producer.cover(5)
-                self.write(5, 6)
-                if stalled:
-                    written = time.time() - 10
-                    os.utime(self.directory / self.layout.segment_name(5), (written, written))
+                self.write(5)
+                # Measured: a source that went silent mid-segment left it listed at 2.833333 s.
+                self.write(6, length=2.833333 if stalled else None)
                 self.launched[0].code = 0
                 producer.cover(5)
                 self.assertEqual([p.command for p in self.launched],
                                  [['ffmpeg', 5, 7], ['ffmpeg', 6, 7]] if stalled else [['ffmpeg', 5, 7], ['ffmpeg', 8, 20]])
                 self.assertEqual((self.directory / self.layout.segment_name(6)).exists(), not stalled)
+
+    def test_a_slow_run_that_wrote_its_last_segment_whole_is_served(self):
+        # Measured: with a source answering each request after 5.5 s, a one-segment run took over 10 s yet
+        # FFmpeg listed its segment at the full 6 s.
+        self.write(7)
+        producer = self.producer(hold_seconds=.3, stall_seconds=.1)
+        producer.cover(6)
+        time.sleep(.15)
+        self.write(6)
+        self.launched[0].code = 0
+        self.assertEqual(producer.request(6), 'serve')
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 6, 7]])
 
     def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
         self.layout = VodLayout(60.021)

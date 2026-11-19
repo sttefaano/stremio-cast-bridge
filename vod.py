@@ -17,6 +17,11 @@ SEGMENT_SECONDS = 6
 TAIL_SECONDS = 0.25
 SEGMENT_NAME = re.compile(r'segment-(\d{4,})\.ts')
 CUE_NAME = re.compile(r'video(0|[1-9]\d*)\.vtt')
+# FFmpeg's own playlist for a run, listing how long each segment it wrote came out.
+PLAYLIST_NAME = 'video.m3u8'
+# A whole segment ends within a frame of its window (measured 6.000000 s); a stall leaves it seconds short
+# (measured 2.833333 s).
+SHORT_SECONDS = .5
 # A segment this close to the producer arrives within a retry or two of the receiver (~10.5 s each);
 # a farther one is quicker to restart at.
 REACH = 3
@@ -131,15 +136,14 @@ def segment_action(index, complete, run, caller='arrival', yields=False, reach=R
     return 'restart'
 
 
-def exit_outcome(start, limit, position, count, quiet, stall_seconds=STALL_SECONDS):
+def exit_outcome(start, limit, position, count, short, quiet, stall_seconds=STALL_SECONDS):
     """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
-    quiet is how long it ran after its previous segment (or its launch) until it exited; a stall also
-    finalizes the segment it was writing, so even a run that reached its bound may have left it short."""
-    if quiet >= stall_seconds:
-        return 'stalled'
-    if position == limit:
+    short says its last segment came out shorter than its window, as a stall finalizes the one it was
+    writing, so even a run that reached its bound may have left it short. quiet is how long it ran after
+    its previous segment (or its launch) until it exited."""
+    if position == limit and not short:
         return 'complete'
-    if limit == count and position >= count - END_SLACK:
+    if limit == count and position >= count - END_SLACK and quiet < stall_seconds:
         return 'end'
     return 'stalled'
 
@@ -208,7 +212,8 @@ class Producer:
                      if self.position - 2 >= self.start else self.launched_at)
         except OSError:
             since = self.launched_at
-        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, time.time() - since,
+        short = self.position == self.start or self._short(self.position - 1)
+        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, short, time.time() - since,
                                self.stall_seconds)
         if outcome == 'complete':
             self.failures = 0
@@ -221,6 +226,15 @@ class Producer:
                 (self.directory / self.layout.segment_name(self.position)).unlink(missing_ok=True)
             self.failures = 0 if self.position > self.start else self.failures + 1
             self.retry_at = time.monotonic() + self.backoff_seconds
+
+    def _short(self, index):
+        try:
+            text = (self.directory / PLAYLIST_NAME).read_text()
+        except OSError:
+            return True
+        name = re.escape(self.layout.segment_name(index))
+        lengths = re.findall(rf'#EXTINF:([\d.]+),\n{name}\n', text)
+        return not lengths or float(lengths[-1]) < self.layout.length(index) - SHORT_SECONDS
 
     def _first_missing(self, index, until):
         return next((i for i in range(index, until) if not self.complete(i)), None)
