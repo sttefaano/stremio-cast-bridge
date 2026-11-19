@@ -98,7 +98,7 @@ function viewPlan(m) {
     refreshCatalogue: {enabled: online && !!p.sourceId && p.load.s !== 'loading'},
     primary: {
       label: p.start ? 'Iniciando…' : same ? 'Ya está en la TV' : modeOf(m) === 'mando' ? 'Cambiar película en la TV' : sel ? `Iniciar en ${deviceLabel(sel, true)}` : 'Iniciar',
-      note, enabled: c.start && can.ok && !same && !p.start && !confirmOf(m),
+      note, enabled: c.start && can.ok && !same && !p.start && !m.ui.confirm,
     },
     stub: {label: can.missing.length ? 'Falta' : 'Embarque', value: can.missing.length ? can.missing.join(' · ') : deviceLabel(sel), missing: can.missing},
   };
@@ -134,7 +134,7 @@ function viewDestination(m) {
 
 /** @typedef {{kind:'replace'|'stop',title:string,body:string,accept:string,cancel:string}} ConfirmView */
 function viewConfirm(m) {
-  const k = confirmOf(m), s = m.link.status;
+  const k = m.ui.confirm, s = m.link.status;
   if (!k) return null;
   if (k.kind === 'replace') return {kind: 'replace', title: '¿Cambiar la película en la TV?', body: `Vas a ver ${k.title}. Empieza desde el principio.`, accept: 'Cambiar película', cancel: 'Volver'};
   return {kind: 'stop', title: '¿Detener la película en la TV?', body: `Se corta en ${deviceLabel(s.selected_device) || 'la TV'} y volvés a elegir.`, accept: 'Detener', cancel: 'Seguir viendo'};

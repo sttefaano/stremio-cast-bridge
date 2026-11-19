@@ -68,11 +68,12 @@
  * @property {number|null} volumePreview
  * @property {Catalogue|null} overlay  newer active catalogue learned from a lookup or download
  * @property {Addon} addon
+ * @property {{afterSeq:number}|null} stop  a confirmed Detener waiting for a status issued after the confirm
  */
 /**
  * @typedef {object} Ui
  * @property {null|'subs'|'more'|'change'} sheet
- * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}} confirm
+ * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}|{kind:'stop',key:string}} confirm  a stop confirm holds the playbackKey it was asked for
  * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
  * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
  * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
@@ -93,6 +94,7 @@ const WAITING = ['preparing', 'buffering', 'loading'], LIVE = ['playing', 'pause
 const KNOWN = new Set(['idle', 'stopped', 'ended', 'error', ...WAITING, ...LIVE, ...FOREIGN]);
 const NO_STATUS = Object.freeze({phase: 'idle', sources: []});
 const KIND_OF_BRANCH = {file: 'embedded', stremio: 'addon', upload: 'upload'};
+const STOP_MOVED = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
 const finite = Number.isFinite;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -266,7 +268,7 @@ function linkOnCommandReply(m, fx, msg) {
 // ───────── plan: movie, catalogue, subtitle decision, Start
 function planTouch(m) {
   m.plan.start = null;
-  m.ui.confirm = null;
+  if (m.ui.confirm?.kind === 'replace') m.ui.confirm = null;
 }
 /** A change to what would be sent: touch, and abandon an upload or download that would land in the old draft. */
 function planEdit(m) {
@@ -419,7 +421,7 @@ function planRefresh(m, fx, kind) {
 
 function planStart(m, fx) {
   const p = m.plan, s = m.link.status;
-  if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || confirmOf(m)) return;
+  if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || m.ui.confirm) return;
   const snap = {sourceId: p.sourceId, catalogueId: p.catalogue.id, subtitleId: planSubtitleId(p), deviceId: s.selected_device.id, deviceRevision: s.device_revision};
   const consent = replacementIdentity(s);
   if (consent) m.ui.confirm = {kind: 'replace', snap, consent, title: sourceTitle(s, p.sourceId)};
@@ -455,8 +457,9 @@ function planOnCommandDone(m, c) {
 function remoteSync(m) {
   const key = playbackKey(m.link.status);
   if (key === m.remote.key) return;
-  if (m.remote.stop && caps(m).stop) m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
+  const stopping = m.remote.stop;
   m.remote = freshRemote(key);
+  if (stopping && caps(m).stop) m.ui.errors.local = STOP_MOVED;
   if (m.ui.sheet === 'subs') m.ui.sheet = null;
 }
 const durationOf = s => finite(s.duration) && s.duration > 0 ? s.duration : null;
@@ -628,8 +631,8 @@ function capOnCommandDone(m, c) {
 
 function remoteStop(m, fx, msg) {
   const c = caps(m), s = m.link.status;
-  if (!c.stop) return;
-  if (c.stopNeedsConfirm) m.remote.stop = {s: 'asking'};
+  if (!c.stop || m.ui.confirm) return;
+  if (c.stopNeedsConfirm) m.ui.confirm = {kind: 'stop', key: m.remote.key};
   else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
 }
 function remoteCancelFlows(m) {
@@ -640,23 +643,21 @@ function remoteCancelFlows(m) {
 function remoteStopNow(m, fx, body, msg) {
   const u = m.ui;
   remoteCancelFlows(m);
-  m.remote.stop = null;
   u.confirm = null;
   u.sheet = null;
   if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
 }
 function stopAdvance(m, fx) {
   const st = m.remote.stop, s = m.link.status;
-  if (st?.s !== 'confirmed' || m.link.statusSeq <= st.afterSeq) return;
+  if (!st || m.link.statusSeq <= st.afterSeq) return;
   m.remote.stop = null;
   if (caps(m).stop) remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {});
 }
 
 // ───────── ui: layers, errors
-const confirmOf = m => m.ui.confirm ?? (m.remote.stop?.s === 'asking' ? {kind: 'stop'} : null);
 /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
 function uiOpen(m, sheet) {
-  if (confirmOf(m) || !caps(m).sheets[sheet].open) return;
+  if (m.ui.confirm || !caps(m).sheets[sheet].open) return;
   if (sheet === 'change') planReset(m, null);
   if (sheet === 'more') m.ui.exact = {text: '', error: ''};
   m.ui.sheet = sheet;
@@ -664,8 +665,7 @@ function uiOpen(m, sheet) {
 /** Escape, the backdrop, the sheet close button and the confirm cancel: close the TOP layer only; any dismissal cancels a pending start. */
 function uiDismiss(m) {
   const u = m.ui;
-  if (u.confirm) { planTouch(m); return; }
-  if (m.remote.stop?.s === 'asking') { m.remote.stop = null; return; }
+  if (u.confirm) { u.confirm = null; return; }
   const was = u.sheet;
   u.sheet = null;
   planTouch(m);
@@ -673,14 +673,14 @@ function uiDismiss(m) {
 }
 function uiConfirmAccept(m, fx) {
   const c = m.ui.confirm, p = m.plan;
-  if (c) {
-    m.ui.confirm = null;
+  m.ui.confirm = null;
+  if (c?.kind === 'stop') {
+    remoteCancelFlows(m);
+    m.remote.stop = {afterSeq: linkRequestPoll(m, fx)};
+  } else if (c?.kind === 'replace') {
     const k = c.snap;
     if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;
     p.start = {stage: 'verifying', snap: k, consent: c.consent, afterSeq: linkRequestPoll(m, fx)};
-  } else if (m.remote.stop?.s === 'asking') {
-    remoteCancelFlows(m);
-    m.remote.stop = {s: 'confirmed', afterSeq: linkRequestPoll(m, fx)};
   }
 }
 function uiObserveError(m) {
@@ -697,8 +697,12 @@ function uiValidLayers(m) {
     if (u.sheet === 'change') planReset(m, null);
     u.sheet = null;
   }
-  if (u.confirm && c.foreign) u.confirm = null;
-  if (m.remote.stop?.s === 'asking' && !c.stop) m.remote.stop = null;
+  const k = u.confirm;
+  if (k?.kind === 'replace' && c.foreign) u.confirm = null;
+  if (k?.kind === 'stop' && (k.key !== m.remote.key || (c.online && !c.stop))) {
+    u.confirm = null;
+    if (c.stop) u.errors.local = STOP_MOVED;
+  }
 }
 /** The focus ticket is honoured once the command settles, and only if the user has not touched anything since. */
 function uiSettleFocus(m, fx) {

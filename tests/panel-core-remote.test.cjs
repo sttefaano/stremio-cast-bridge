@@ -451,6 +451,19 @@ test('a Start waiting for its fresh poll survives a failed poll and starts once 
   assert.equal(p.posted('start').body.source_id, 'a');
 });
 
+test('the stop confirm survives a failed poll, like the replace confirm, and still stops once the link returns', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  offline(p);
+  assert.equal(p.view.confirm?.kind, 'stop', 'a blip does not take the question away');
+  p.fire('poll');
+  p.status(playing);
+  assert.equal(p.view.confirm?.kind, 'stop');
+  p.tap('confirmAccept');
+  p.status(playing);
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+});
+
 test('stop with Seguir viendo or Escape sends nothing', () => {
   const p = panel(playing);
   p.tap('stop');
