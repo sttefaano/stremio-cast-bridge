@@ -643,7 +643,7 @@ function capFail(m, message, lost = false) {
 function capSettled(s, a) {
   const srv = capServer(s), w = a.want, choice = s.subtitle_choice;
   return srv.subtitleId === w.subtitleId && srv.enabled === w.enabled && srv.delayMs === w.delayMs
-    && (w.subtitleId === null || choice?.catalogue_id === s.active_catalogue?.id)
+    && (w.subtitleId === null || choice?.catalogue_id === s.active_catalogue.id)
     && (!finite(s.subtitle_delay_ms) || s.subtitle_delay_ms === w.delayMs)
     && (typeof s.subtitles_enabled !== 'boolean' || s.subtitles_enabled === w.enabled);
 }
@@ -698,7 +698,7 @@ function stopOnCommandDone(m, c, fx) {
   const k = caps(m);
   if (!stopOutranStart(c) || !k.stop) return;
   if (m.now - c.repliedAt <= PENDING_MS) remoteStopNow(m, fx);
-  else if (k.stopNeedsConfirm) remoteStop(m, fx, null);
+  else if (k.stopNeedsConfirm) remoteStop(m, fx);
   else uiSay(m, c.error.text);
 }
 function stopAdvance(m, fx) {

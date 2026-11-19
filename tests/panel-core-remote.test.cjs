@@ -744,7 +744,7 @@ test('a Detener that lost to a Cambiar película is not resent on its own after 
   const p = lostStop();
   p.status(beta);
   assert.equal(p.posts('stop').length, 0, 'the new movie plays: nothing goes out by itself');
-  assert.equal(p.view.confirm?.kind, 'stop', 'the user confirms the stop again, as a fresh Detener would ask');
+  assert.equal(p.view.confirm?.kind, 'stop', 'the user confirms the stop again');
   const q = lostStop();
   q.status({...beta, phase: 'preparing', pending: true});
   assert.equal(q.posts('stop').length, 0, 'still preparing: nothing goes out by itself either');
