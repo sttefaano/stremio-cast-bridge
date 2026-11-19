@@ -25,7 +25,7 @@
  * @property {boolean} correctionOpen
  * @property {Row[]} alternatives
  * @property {Ctl} search
- * @property {string} status
+ * @property {string} status  the line under the list in the subtitle sheet; '' in the plan, whose subsStatus already says it
  */
 const trackLabel = e => [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ');
 const stopLabel = (c, label) => c.stopping ? 'Deteniendo…' : label;
@@ -64,7 +64,7 @@ function viewStremio(m, scope) {
   };
 }
 
-function subsStatusLine(m) {
+function subsStatusLine(m, st) {
   const p = m.plan, cat = p.catalogue;
   if (!p.sourceId) return 'Elegí una película primero.';
   if (p.load.s === 'error') return p.load.message;
@@ -77,7 +77,6 @@ function subsStatusLine(m) {
       : chosen ? `Subtítulo elegido: ${chosen.label}.` : 'Elegí uno.';
   }
   if (b === 'upload') return p.upload.s === 'busy' ? 'Validando y subiendo el archivo…' : p.upload.message || (chosen ? `Archivo listo: ${chosen.label}.` : 'Elegí un archivo .srt o .vtt (UTF-8, hasta 1 MiB).');
-  const st = viewStremio(m, 'plan');
   return st?.status || (chosen ? `Subtítulo listo: ${chosen.label}.` : st?.use.shown ? 'Elegí un idioma y una versión.' : '');
 }
 
@@ -88,7 +87,7 @@ function viewPlan(m) {
   const info = cat?.addon, stremioOff = !!cat && (!info || info.state === 'off');
   const branchOk = online && !!p.sourceId && !!cat && idleLoad;
   const uploadFree = branchOk && p.upload.s === 'idle' && p.addon.op?.kind !== 'fetch';
-  const picked = entryOf(cat, p.choice.entryId);
+  const picked = entryOf(cat, p.choice.entryId), stremio = viewStremio(m, 'plan');
   let note = '';
   if (!online) note = 'Sin conexión con el puente.';
   else if (!can.ok && !can.missing.length) note = 'Leyendo la película…';
@@ -100,12 +99,12 @@ function viewPlan(m) {
       : s.sources.length ? '' : 'No hay películas todavía. Abrí una en Stremio y volvé a actualizar.',
     refreshSources: {enabled: online && !p.refresh.discover.ticket && s.source_discovery !== 'loading'},
     branches: SUBS_BRANCHES.map(([id, label]) => ({id, label, selected: p.choice.branch === id, hidden: id === 'stremio' && stremioOff, enabled: branchOk})),
-    subsStatus: subsStatusLine(m),
+    subsStatus: subsStatusLine(m, stremio),
     fileEntries: (cat?.entries || []).filter(e => e.kind === 'embedded').map(e => ({
       id: e.id, label: trackLabel(e), selected: p.choice.entryId === e.id,
       enabled: e.supported === true && branchOk, ...(e.supported === true ? {} : {reason: e.reason || 'Formato no compatible'})})),
     upload: {filename: p.upload.filename, busy: p.upload.s === 'busy', enabled: uploadFree, message: p.upload.message || '', chosen: p.choice.branch === 'upload' && picked ? picked.label : ''},
-    stremio: viewStremio(m, 'plan'),
+    stremio: stremio && {...stremio, status: ''},
     refreshCatalogue: {enabled: online && !!p.sourceId && p.load.s !== 'loading'},
     primary: {
       label: p.start ? 'Iniciando…' : same ? 'Ya está en la TV' : modeOf(m) === 'mando' ? 'Cambiar película en la TV' : sel ? `Iniciar en ${deviceLabel(sel, true)}` : 'Iniciar',
@@ -175,16 +174,16 @@ const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(del
 /**
  * @typedef {object} MandoView  The departures board and the remote. Null in Preparar.
  * @property {{title:string,clock:string,state:string,glyph:'play'|'pause'|'spinner'|null,room:string}} board  clock is display-only (interpolated while playing); glyph follows the phase, null when unconfirmed or not playing/waiting
- * @property {{enabled:boolean,max:number,value:number,elapsed:string,total:string,preview:string|null,previewAt:number|null,target:string|null,buffered:{start:number,end:number}|null}} track
- *           value and elapsed are the real position; preview ('→ h:mm:ss') exists only while dragging, target while a sent seek has not settled
+ * @property {{enabled:boolean,max:number,value:number,elapsed:string,total:string,preview:string|null,previewAt:number|null,hint:string,buffered:{start:number,end:number}|null}} track
+ *           value and elapsed are the real position; preview ('→ h:mm:ss') exists only while dragging; hint speaks while dragging or a sent seek has not settled
  * @property {Ctl} back
  * @property {Ctl} forward
- * @property {string|null} badge  accumulated skip, '+60 s'
+ * @property {{text:string,side:'back'|'forward'}|null} badge  accumulated skip, '+60 s', beside the button that points its way
  * @property {Ctl&{icon:'play'|'pause'|'spinner',label:string}} toggle
  * @property {null|{text:string,detail:string,cancel:Ctl&{label:string}}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
  * @property {Ctl&{percent:number|null,text:string}} volume
  * @property {Ctl&{pressed:boolean,label:string}} mute
- * @property {Ctl&{label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
+ * @property {Ctl&{kind:string,label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
  * @property {Ctl} more
  * @property {Ctl} change
  * @property {Ctl&{shown:boolean,label:string}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
@@ -194,7 +193,7 @@ function viewMando(m) {
   const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
   const chosen = s.subtitle_choice;
   const volume = m.remote.volumePreview ?? (finite(s.volume) ? Math.round(s.volume * 100) : null);
-  const spinner = waiting || m.link.inflight.length > 0 || !!s.command_pending;
+  const spinner = waiting || m.link.inflight.length > 0 || !!s.command_pending, unapplied = capDirty(m);
   return {
     board: {
       title: s.title || 'Tu película en la TV', clock: formatTime(pos), room: deviceLabel(sel) || 'Sin TV',
@@ -204,17 +203,18 @@ function viewMando(m) {
     track: {
       enabled: c.transport && !!d, max: d ?? 0, value: pos ?? 0, elapsed: formatTime(pos), total: formatTime(d),
       preview: k.s === 'dragging' ? `→ ${formatTime(k.preview)}` : null, previewAt: k.s === 'dragging' ? k.preview : null,
-      target: k.s === 'sent' ? `→ ${formatTime(k.target)}` : null, buffered: bufferedRange(s),
+      hint: k.s === 'dragging' ? `Soltá para saltar. La TV sigue en ${formatTime(pos)}.` : k.s === 'sent' ? `Saltando a ${formatTime(k.target)}. La TV sigue en ${formatTime(pos)}.` : '',
+      buffered: bufferedRange(s),
     },
     back: {enabled: c.transport && !!d}, forward: {enabled: c.transport && !!d},
-    badge: k.s === 'skipping' && k.delta !== 0 ? signedSkip(k.delta) : null,
+    badge: k.s === 'skipping' && k.delta !== 0 ? {text: signedSkip(k.delta), side: k.delta < 0 ? 'back' : 'forward'} : null,
     toggle: {enabled: c.transport, icon: spinner ? 'spinner' : s.phase === 'playing' ? 'pause' : 'play',
       label: spinner ? 'Esperando' : s.phase === 'playing' ? 'Pausar' : 'Continuar'},
     waiting: waiting ? {text: `Esperando a ${deviceLabel(sel) || 'la TV'}`, detail: s.message || WAITING_COPY[s.phase], cancel: {enabled: c.stop, label: stopLabel(c, 'Cancelar')}} : null,
     volume: {enabled: c.transport && finite(s.volume), percent: volume, text: volume === null ? '—' : `${volume}%`},
     mute: {enabled: c.transport && typeof s.muted === 'boolean', pressed: s.muted === true, label: s.muted ? 'Activar sonido' : 'Silenciar'},
     chip: {
-      enabled: c.sheets.subs.open, unapplied: capDirty(m),
+      enabled: c.sheets.subs.open, unapplied, kind: unapplied ? 'Sin aplicar' : 'Subtítulos',
       label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
     },
     more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: !problemOffersStop(m), label: stopLabel(c, 'Detener')},
@@ -273,6 +273,7 @@ function viewSheet(m) {
 /**
  * @typedef {object} ProblemView  The ONE problem block. kind priority: offline > unknown > foreign > disconnected > failed > notice > stopped.
  * @property {'offline'|'unknown'|'foreign'|'disconnected'|'failed'|'notice'|'stopped'} kind
+ * @property {string} label  'Detenido' | 'Aviso'
  * @property {string} title
  * @property {string} body  '' when the title says it all
  * @property {'page'|'sheet'} host  'sheet' while a sheet is open: the block renders there, once, never also on the page
@@ -306,7 +307,7 @@ function viewProblem(m) {
     stopped: () => [`Película detenida en ${u.lastDeviceLabel || 'la TV'}`, '', dismiss('Cerrar')],
   };
   const [title, body, action] = block[kind]();
-  return {kind, title, body, action, host: u.sheet ? 'sheet' : 'page'};
+  return {kind, label: kind === 'stopped' ? 'Detenido' : 'Aviso', title, body, action, host: u.sheet ? 'sheet' : 'page'};
 }
 const problemOffersStop = m => viewProblem(m)?.action?.act === 'stop';
 function view(m) {

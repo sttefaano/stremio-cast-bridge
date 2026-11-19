@@ -8,7 +8,7 @@ test('Stremio: the offers are pulled once the branch shows, languages and versio
   const p = stremioPlan();
   const pull = p.posted('subtitle_offers');
   assert.deepEqual(pull.body, {source_id: 'a', catalogue_id: 'cat-a'});
-  assert.equal(p.view.plan.stremio.status, 'Buscando subtítulos de Stremio…');
+  assert.equal(p.view.plan.subsStatus, 'Buscando subtítulos de Stremio…');
   p.reply(pull, {ok: true, body: offers});
   const v = p.view.plan.stremio;
   assert.equal(v.match, 'Coincidencia: Alpha (2020)');
@@ -42,7 +42,7 @@ test('Stremio: a doubtful match is a question, an unreadable subtitle stays list
   p.tap('stremioUse');
   p.reply(p.posted('subtitle_fetch'), {ok: false, code: 'invalid_subtitle', message: 'No se pudo leer ese subtítulo.'});
   assert.match(p.view.plan.stremio.versions[0].label, /no se pudo leer/);
-  assert.equal(p.view.plan.stremio.status, 'No se pudo leer ese subtítulo.');
+  assert.equal(p.view.plan.subsStatus, 'No se pudo leer ese subtítulo.');
 });
 
 test('Stremio: No es esta reveals at most four alternatives and a free search, both feeding one lookup', () => {
@@ -57,7 +57,7 @@ test('Stremio: No es esta reveals at most four alternatives and a free search, b
   p.reply(p.posted('subtitle_lookup'), {ok: true, body: {catalogue: catalogue('a', addonReady(2, {revision: 2}))}});
   p.tap('stremioSearch', 'x'.repeat(201));
   assert.equal(p.posts('subtitle_lookup').length, 0);
-  assert.match(p.view.plan.stremio.status, /hasta 200 caracteres/);
+  assert.match(p.view.plan.subsStatus, /hasta 200 caracteres/);
   p.tap('stremioSearch', '  Otra peli 2019 ');
   assert.equal(p.posted('subtitle_lookup').body.hint, 'Otra peli 2019');
 });
@@ -66,16 +66,16 @@ test('Stremio: an unidentified film opens the correction on its own; error and e
   const p = stremioPlan({state: 'unidentified', revision: 1, match: null, message: 'No pudimos identificar la película.', count: 0});
   assert.equal(p.view.plan.stremio.correctionOpen, true);
   assert.equal(p.view.plan.stremio.wrong.shown, false);
-  assert.equal(p.view.plan.stremio.status, 'No pudimos identificar la película.');
+  assert.equal(p.view.plan.subsStatus, 'No pudimos identificar la película.');
   const q = stremioPlan({state: 'error', revision: 1, match: null, message: 'Stremio no responde.', count: 0});
   assert.equal(q.view.plan.stremio.retry.shown, true);
-  assert.equal(q.view.plan.stremio.status, 'Stremio no responde.');
+  assert.equal(q.view.plan.subsStatus, 'Stremio no responde.');
   assert.equal(q.posts('subtitle_offers').length, 0, 'nothing to list in an error state');
   q.tap('stremioRetry');
   assert.equal(q.posts('subtitle_lookup').length, 1);
   const r = stremioPlan(addonReady(0));
   r.reply(r.posted('subtitle_offers'), {ok: true, body: {...offers, offers: [], count: 0}});
-  assert.equal(r.view.plan.stremio.status, 'Stremio no tiene subtítulos para Alpha (2020).');
+  assert.equal(r.view.plan.subsStatus, 'Stremio no tiene subtítulos para Alpha (2020).');
 });
 
 test('Stremio: late downloads cannot select a subtitle for another movie or an abandoned draft', () => {

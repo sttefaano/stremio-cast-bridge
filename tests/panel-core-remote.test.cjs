@@ -13,7 +13,7 @@ test('seek commits on release: dragging previews and sends nothing, the elapsed 
   assert.deepEqual(p.posted('seek').body, {device_id: 'tv-a', device_revision: 1, position: 300});
   assert.equal(p.posts().length, 1, 'one seek per release');
   assert.equal(p.view.mando.track.preview, null);
-  assert.equal(p.view.mando.track.target, '→ 5:00');
+  assert.equal(p.view.mando.track.hint, 'Saltando a 5:00. La TV sigue en 0:50.');
 });
 
 test('a release outside the movie sends nothing; a seek while busy or foreign is refused', () => {
@@ -39,43 +39,43 @@ test('Escape or pointer cancel while dragging goes back to idle and sends nothin
   assert.equal(p.posts().length, 0);
   p.tap('dropSeek', 200);
   p.tap('seekAbandon');
-  assert.ok(p.view.mando.track.target, 'abandon after a release does not forget the sent seek');
+  assert.match(p.view.mando.track.hint, /^Saltando/, 'abandon after a release does not forget the sent seek');
 });
 
 test('the target stays until the TV is usable and either was seen busy or is within 2 s', () => {
   const p = panel(playing);
   seekTo(p, 300);
   p.settle('seek', {...playing, absolute_time: 50});
-  assert.equal(p.view.mando.track.target, '→ 5:00', 'still at the old place: keep the target');
+  assert.match(p.view.mando.track.hint, /^Saltando a 5:00\./, 'still at the old place: keep the target');
   p.fire('poll');
   p.status({...playing, absolute_time: 50, pending: true});
   p.fire('poll');
   p.status({...playing, absolute_time: 52});
-  assert.equal(p.view.mando.track.target, null, 'it was busy and is usable again');
+  assert.equal(p.view.mando.track.hint, '', 'it was busy and is usable again');
   const q = panel(playing);
   seekTo(q, 300);
   q.settle('seek', {...playing, absolute_time: 299});
-  assert.equal(q.view.mando.track.target, null, 'within 2 s of the target');
+  assert.equal(q.view.mando.track.hint, '', 'within 2 s of the target');
 });
 
 test('a rejected seek clears only its own target; a worker failure arrives only as action_error', () => {
   const p = panel(playing);
   seekTo(p, 300);
   p.settle('seek', {...playing, command_pending: true}, {ok: false, code: 'busy', message: 'La TV está ocupada.'});
-  assert.equal(p.view.mando.track.target, null, 'a 409 clears the fictional target');
+  assert.equal(p.view.mando.track.hint, '', 'a 409 clears the fictional target');
   const q = panel(playing);
   seekTo(q, 300);
   q.settle('seek', {...playing, absolute_time: 50}, {ok: true, body: {accepted: true}});
-  assert.ok(q.view.mando.track.target);
+  assert.match(q.view.mando.track.hint, /^Saltando/);
   q.fire('poll');
   q.status({...playing, absolute_time: 50, action_error: 'La TV no pudo saltar.', action_error_revision: 4});
-  assert.equal(q.view.mando.track.target, null, 'the worker failure reached the page as action_error and ended the wait');
+  assert.equal(q.view.mando.track.hint, '', 'the worker failure reached the page as action_error and ended the wait');
 });
 
 test('±30 taps accumulate into one seek delta after a quiet 600 ms and show their sum', () => {
   const p = panel(playing);
   p.tap('skip', 30); p.tap('skip', 30); p.tap('skip', 30);
-  assert.equal(p.view.mando.badge, '+90 s');
+  assert.deepEqual(p.view.mando.badge, {text: '+90 s', side: 'forward'});
   assert.equal(p.posts().length, 0);
   const timers = p.effects('timer').filter(t => t.name === 'skip');
   assert.equal(timers.length, 3);
@@ -90,10 +90,10 @@ test('±30 taps accumulate into one seek delta after a quiet 600 ms and show the
 test('the accumulated skip is clamped so neither the badge nor the delta passes the movie', () => {
   const p = panel({...playing, absolute_time: 20});
   p.tap('skip', -30);
-  assert.equal(p.view.mando.badge, '−20 s');
+  assert.deepEqual(p.view.mando.badge, {text: '−20 s', side: 'back'});
   const q = panel({...playing, absolute_time: 490});
   q.tap('skip', 30); q.tap('skip', 30);
-  assert.equal(q.view.mando.badge, '+10 s');
+  assert.deepEqual(q.view.mando.badge, {text: '+10 s', side: 'forward'});
   q.send({t: 'timer', name: 'skip', ticket: q.effects('timer').filter(t => t.name === 'skip').pop().ticket});
   assert.equal(q.posted('seek').body.delta, 10);
   const r = panel({...playing, absolute_time: 0});

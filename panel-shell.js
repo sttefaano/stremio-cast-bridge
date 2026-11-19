@@ -70,7 +70,7 @@ function paintProblem(doc, v) {
   const quiet = p.kind === 'stopped' || p.kind === 'notice';
   attr(node, 'role', quiet ? 'status' : 'alert');
   put(node, 'className', p.kind === 'stopped' ? 'info' : '');
-  put(byId(doc, 'problem-kind'), 'textContent', p.kind === 'stopped' ? 'Detenido' : 'Aviso');
+  put(byId(doc, 'problem-kind'), 'textContent', p.label);
   put(byId(doc, 'problem-title'), 'textContent', p.title);
   put(byId(doc, 'problem-body'), 'textContent', p.body);
   const action = byId(doc, 'problem-action');
@@ -96,7 +96,7 @@ function paintStremio(doc, v) {
   paintList(byId(doc, 'stremio-alternatives'), st.alternatives);
   ctl(byId(doc, 'stremio-search'), st.search);
   put(byId(doc, 'stremio-hint'), 'disabled', !st.search.enabled);
-  put(byId(doc, 'stremio-status'), 'textContent', inSheet ? st.status : '');
+  put(byId(doc, 'stremio-status'), 'textContent', st.status);
 }
 
 function paintPlan(doc, v) {
@@ -168,8 +168,8 @@ function paintTrack(doc, t) {
   put(byId(doc, 'elapsed'), 'textContent', t.elapsed);
   put(byId(doc, 'total'), 'textContent', t.total);
   const hint = byId(doc, 'track-hint');
-  put(hint, 'textContent', dragging ? `Soltá para saltar. La TV sigue en ${t.elapsed}.` : t.target ? `Saltando a ${t.target.replace(/^→ /, '')}. La TV sigue en ${t.elapsed}.` : '');
-  attr(hint, 'data-pending', dragging || !!t.target);
+  put(hint, 'textContent', t.hint);
+  attr(hint, 'data-pending', !!t.hint);
 }
 
 function paintMando(doc, v) {
@@ -182,8 +182,8 @@ function paintMando(doc, v) {
   put(byId(doc, 'board-room'), 'textContent', m.board.room);
   paintTrack(doc, m.track);
   ctl(byId(doc, 'back'), m.back); ctl(byId(doc, 'forward'), m.forward);
-  const badge = byId(doc, 'skip-badge'), side = byId(doc, m.badge?.startsWith('−') ? 'back' : 'forward').parentNode;
-  put(badge, 'hidden', !m.badge); put(badge, 'textContent', m.badge ?? '');
+  const badge = byId(doc, 'skip-badge'), side = byId(doc, m.badge?.side ?? 'forward').parentNode;
+  put(badge, 'hidden', !m.badge); put(badge, 'textContent', m.badge?.text ?? '');
   if (badge.parentNode !== side) side.appendChild(badge);
   const play = byId(doc, 'toggle'), spinning = m.toggle.icon === 'spinner';
   ctl(play, m.toggle); attr(play, 'aria-label', m.toggle.label);
@@ -202,7 +202,7 @@ function paintMando(doc, v) {
   attr(byId(doc, 'mute-icon'), 'href', m.mute.pressed ? '#i-muted' : '#i-volume');
   const chip = byId(doc, 'open-subs');
   ctl(chip, m.chip); attr(chip, 'data-unapplied', m.chip.unapplied);
-  put(byId(doc, 'chip-kind'), 'textContent', m.chip.unapplied ? 'Sin aplicar' : 'Subtítulos');
+  put(byId(doc, 'chip-kind'), 'textContent', m.chip.kind);
   put(byId(doc, 'chip-value'), 'textContent', m.chip.label);
   ctl(byId(doc, 'open-more'), m.more); ctl(byId(doc, 'open-change'), m.change); paintStop(byId(doc, 'stop'), m.stop);
 }
