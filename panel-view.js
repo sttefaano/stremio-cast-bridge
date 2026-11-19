@@ -188,7 +188,7 @@ const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(del
  * @property {Ctl} change
  * @property {Ctl&{shown:boolean,label:string}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
  */
-function viewMando(m) {
+function viewMando(m, stopShown) {
   const s = m.link.status, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
   const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
   const chosen = s.subtitle_choice;
@@ -217,7 +217,7 @@ function viewMando(m) {
       enabled: c.sheets.subs.open, unapplied, kind: unapplied ? 'Sin aplicar' : 'Subtítulos',
       label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
     },
-    more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: !problemOffersStop(m), label: stopLabel(c, 'Detener')},
+    more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: stopShown, label: stopLabel(c, 'Detener')},
   };
 }
 
@@ -253,7 +253,7 @@ function viewSubsSheet(m) {
   };
 }
 /** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl&{shown:boolean,label:string}}} MoreSheetView */
-function viewMoreSheet(m) {
+function viewMoreSheet(m, stopShown) {
   const s = m.link.status, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
   return {
     kind: 'more',
@@ -262,12 +262,12 @@ function viewMoreSheet(m) {
       tv: deviceLabel(sel), host: sel?.host || '', file: s.sources.find(x => x.id === s.source_id)?.filename || 'Nombre no disponible',
       prepared: b ? `De ${formatTime(b.start)} a ${formatTime(b.end)}` : 'Sin datos todavía',
     },
-    stop: {enabled: c.stop, shown: !problemOffersStop(m), label: stopLabel(c, 'Detener')},
+    stop: {enabled: c.stop, shown: stopShown, label: stopLabel(c, 'Detener')},
   };
 }
-function viewSheet(m) {
+function viewSheet(m, stopShown) {
   const k = m.ui.sheet;
-  return k === 'subs' ? viewSubsSheet(m) : k === 'more' ? viewMoreSheet(m) : k === 'change' ? {kind: 'change'} : null;
+  return k === 'subs' ? viewSubsSheet(m) : k === 'more' ? viewMoreSheet(m, stopShown) : k === 'change' ? {kind: 'change'} : null;
 }
 
 /**
@@ -309,14 +309,13 @@ function viewProblem(m) {
   const [title, body, action] = block[kind]();
   return {kind, label: kind === 'stopped' ? 'Detenido' : 'Aviso', title, body, action, host: u.sheet ? 'sheet' : 'page'};
 }
-const problemOffersStop = m => viewProblem(m)?.action?.act === 'stop';
 function view(m) {
-  const mode = modeOf(m);
+  const mode = modeOf(m), problem = viewProblem(m), stopShown = problem?.action?.act !== 'stop';
   return {
     mode,
     plan: viewPlan(m), destination: viewDestination(m), confirm: viewConfirm(m),
-    mando: mode === 'mando' ? viewMando(m) : null, sheet: viewSheet(m),
-    problem: viewProblem(m), demo: m.link.status.demo === true ? {scenario: m.link.status.scenario || ''} : null,
+    mando: mode === 'mando' ? viewMando(m, stopShown) : null, sheet: viewSheet(m, stopShown),
+    problem, demo: m.link.status.demo === true ? {scenario: m.link.status.scenario || ''} : null,
     wake: mode === 'mando', restoring: m.ui.focus && {ref: m.ui.focus.ref, n: m.ui.focus.n},
   };
 }
