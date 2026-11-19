@@ -36,7 +36,7 @@ PRIVATE_SOURCE_KEYS = ('url', 'release')
 MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
-DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
+DELAY_PART = re.compile(r'd(0|-?[1-9][0-9]{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
 FILE_CUES = 'cues.json'
 CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)')

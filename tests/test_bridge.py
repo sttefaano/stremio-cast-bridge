@@ -378,7 +378,8 @@ class MediaPathsTest(unittest.TestCase):
                          '/session-123/%2e%2e/video.m3u8', '/session-123/d0/link.vtt', '/linked/d0/video.m3u8',
                          '/session-123/d0/file%00.vtt',
                          '/session-123/d-0/video.m3u8', '/session-123/d+5/video.m3u8', '/session-123/d05/video.m3u8',
-                         '/session-123/d30001/video.m3u8', '/session-123/dx/video.m3u8', '/session-123/500/video.m3u8'):
+                         '/session-123/d30001/video.m3u8', '/session-123/dx/video.m3u8', '/session-123/500/video.m3u8',
+                         '/session-123/d1%D9%A5%D9%A0%D9%A0/video.m3u8', '/session-123/d5%EF%BC%90/video.m3u8'):
                 with self.subTest(path=path):
                     self.assertIsNone(safe_media_path(root, path))
 
