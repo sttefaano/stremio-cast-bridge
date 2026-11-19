@@ -170,6 +170,12 @@ class ProducerTest(unittest.TestCase):
         return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
                         **{'poll_seconds': .01, 'fresh_seconds': 0, **kwargs})
 
+    def until(self, condition, message, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, message)
+            time.sleep(.01)
+
     def write(self, *indices, length=None):
         for index in indices:
             name = self.layout.segment_name(index)
@@ -498,7 +504,7 @@ class ProducerTest(unittest.TestCase):
                 for path in self.directory.iterdir():
                     path.unlink()
                 self.launched.clear()
-                producer = self.producer(hold_seconds=2, backoff_seconds=0, fresh_seconds=.3)
+                producer = self.producer(hold_seconds=10, backoff_seconds=0, fresh_seconds=2)
                 producer.cover(0)
                 result = []
                 holder = threading.Thread(target=lambda: result.append(producer.request(2)))
@@ -508,10 +514,10 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(result, [], 'too fresh to tell from a stall finalized while FFmpeg still runs')
                 if exits:
                     self.launched[0].code = 0
-                    time.sleep(.1)
+                    self.until(lambda: len(self.launched) == 2, 'the stalled run restarts at its short segment')
                     self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 2, 20]])
                     self.write(2)
-                holder.join(1)
+                holder.join(10)
                 self.assertEqual(result, ['serve'])
                 self.assertEqual(len(self.launched), 2 if exits else 1)
 
@@ -592,22 +598,26 @@ class ProducerTest(unittest.TestCase):
         for stopped in (False, True):
             with self.subTest(stopped=stopped):
                 self.launched.clear()
-                producer = self.producer(hold_seconds=1, backoff_seconds=0)
+                producer = self.producer(hold_seconds=10, backoff_seconds=0)
                 result = {}
                 def ask(index):
                     result[index] = producer.request(index)
                 first = threading.Thread(target=ask, args=(100,))
                 first.start()
-                time.sleep(.05)
+                self.until(lambda: self.launched, 'the first request starts a run')
                 if stopped:
                     self.launched[0].code = 0
                 second = threading.Thread(target=ask, args=(104,))
                 second.start()
+                if stopped:
+                    self.until(lambda: len(self.launched) == 2, 'the stopped run is revived')
+                else:
+                    self.until(lambda: (104, False) in producer.holds.values(), 'the request ahead is held')
                 time.sleep(.1)
                 self.assertEqual([p.command[1] for p in self.launched], [100, 100] if stopped else [100])
                 self.write(*range(100, 105))
-                first.join(1)
-                second.join(1)
+                first.join(10)
+                second.join(10)
                 self.assertEqual(result, {100: 'serve', 104: 'serve'})
                 for index in range(100, 105):
                     (self.directory / self.layout.segment_name(index)).unlink()
