@@ -334,6 +334,17 @@ test('an Aplicar or a visibility toggle that finds the TV busy says so, sends no
   assert.equal(q.view.sheet.visible.checked, true, 'the switch goes back to what the TV shows');
 });
 
+test('a rejected apply keeps its own reason when the bridge reports another error before it settles', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  p.reply(p.posted('subtitles'), {ok: false, message: 'La TV rechazó el cambio.'});
+  p.status({...subsOk('text-a', 0), ...withTracks, action_error: 'Otro fallo', action_error_revision: 1});
+  assert.equal(p.view.problem.body, 'La TV rechazó el cambio. Tu ajuste sigue en borrador.');
+});
+
 test('a partial failure names the visibility change and keeps the draft', () => {
   const hidden = {...subsOk('text-a', 0, false), ...withTracks};
   const p = panel(hidden);

@@ -23,7 +23,7 @@
  * @property {Ticket|null} pollTimer
  * @property {Command[]} inflight  at most one command, plus a stop that may join it; each reply routes to its own entry
  */
-/** @typedef {{ticket:Ticket,action:string,stage:'posting'|'confirming',afterSeq:number,ok:boolean|null}} Command */
+/** @typedef {{ticket:Ticket,action:string}&({stage:'posting'}|{stage:'confirming',ok:boolean,error:string|null,afterSeq:number})} Command */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
@@ -230,7 +230,7 @@ function linkCommand(m, fx, action, body, origin = null) {
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
-  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null});
+  l.inflight.push({ticket, action, stage: 'posting'});
   m.ui.errors.local = null;
   if (origin?.from) m.ui.focus = {ref: origin.from, n: origin.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
@@ -272,12 +272,10 @@ function advanceOnStatus(m, fx) {
 function linkOnReply(m, fx, msg) {
   const c = m.link.inflight.find(x => x.ticket === msg.ticket);
   if (!c) return false;
-  if (c.stage === 'posting') {
-    c.ok = msg.ok;
-    if (!msg.ok && (OWNERS[c.action]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
-    c.stage = 'confirming';
-    c.afterSeq = linkRequestPoll(m, fx);
-  }
+  if (c.stage !== 'posting') return true;
+  const error = msg.ok ? null : commandError(msg);
+  if (error && (OWNERS[c.action]?.live?.(m, c) ?? true)) m.ui.errors.local = error;
+  Object.assign(c, {stage: 'confirming', ok: msg.ok, error, afterSeq: linkRequestPoll(m, fx)});
   return true;
 }
 
@@ -672,7 +670,7 @@ function capAdvance(m, fx) {
 function capOnCommandDone(m, c) {
   const a = m.remote.captions.apply;
   if (a?.ticket !== c.ticket) return;
-  if (c.ok) a.stage = 'reading'; else capFail(m, m.ui.errors.local || 'No se pudo aplicar el cambio.');
+  if (c.ok) a.stage = 'reading'; else capFail(m, c.error);
 }
 
 function remoteStop(m, fx, msg) {
