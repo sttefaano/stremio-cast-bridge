@@ -1,14 +1,10 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const {PANEL_SOURCE, loadPanel} = require('./helpers/panel-source.cjs');
 
 const HTML = fs.readFileSync('player.html', 'utf8');
-const load = () => {
-  const context = {module: {exports: {}}, TextDecoder, AbortController};
-  vm.runInNewContext(fs.readFileSync('player.js', 'utf8'), context);
-  return context.module.exports;
-};
+const load = () => loadPanel({TextDecoder, AbortController});
 
 // ───────── a small DOM parsed from the real player.html: just enough surface for the shell
 const VOID = new Set(['meta', 'input', 'br', 'hr', 'img', 'link', 'source']);
@@ -180,8 +176,8 @@ test('the token placeholder appears once, as the global the server fills in', ()
   assert.equal(HTML.split('__TOKEN__').length - 1, 1);
   assert.ok(HTML.includes("const token='__TOKEN__';"));
   assert.equal(HTML.split('__SCRIPT__').length - 1, 1);
-  assert.ok(!fs.readFileSync('player.js', 'utf8').includes('__TOKEN__'));
-  assert.ok(!fs.readFileSync('player.js', 'utf8').includes('__SCRIPT__'));
+  assert.ok(!PANEL_SOURCE.includes('__TOKEN__'));
+  assert.ok(!PANEL_SOURCE.includes('__SCRIPT__'));
 });
 
 test('the page loads nothing from outside and keeps native dialogs outside the pages', () => {

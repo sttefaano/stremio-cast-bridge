@@ -1296,10 +1296,14 @@ class Bridge:
 
 
 FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
+PANEL_SCRIPTS = ('panel-core.js', 'panel-addon.js', 'panel-view.js', 'panel-shell.js')
 
 
 def build_panel(root):
-    html = (root / 'player.html').read_text().replace('__SCRIPT__', (root / 'player.js').read_text())
+    script = '\n'.join((root / name).read_text() for name in PANEL_SCRIPTS)
+    if '</script' in script.lower():
+        raise RuntimeError('Un script del panel contiene </script y cortaría la página.')
+    html = (root / 'player.html').read_text().replace('__SCRIPT__', script)
     fonts = {}
     for name in FONT_NAMES:
         payload = (root / 'fonts' / name).read_bytes()

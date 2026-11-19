@@ -9,7 +9,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer
 from unittest.mock import Mock
 
-from bridge import ROOT, ControlHandler, build_panel
+from bridge import PANEL_SCRIPTS, ROOT, ControlHandler, build_panel
 
 
 class PanelFontsTest(unittest.TestCase):
@@ -70,15 +70,34 @@ class PanelFontsTest(unittest.TestCase):
             self.assertEqual(res.status, 404, path)
             self.assertEqual(body, b'{}')
 
+    def copy_panel(self, root):
+        for name in ('player.html', *PANEL_SCRIPTS):
+            shutil.copy(ROOT / name, root / name)
+        shutil.copytree(ROOT / 'fonts', root / 'fonts')
+
     def test_a_missing_font_fails_when_the_panel_is_built(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name in ('player.html', 'player.js'):
-                shutil.copy(ROOT / name, root / name)
-            (root / 'fonts').mkdir()
-            shutil.copy(ROOT / 'fonts' / 'archivo.woff2', root / 'fonts' / 'archivo.woff2')
+            self.copy_panel(root)
+            (root / 'fonts' / 'jetbrains-mono.woff2').unlink()
             with self.assertRaises(FileNotFoundError):
                 build_panel(root)
+
+    def test_a_script_that_would_close_the_inline_tag_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.copy_panel(root)
+            build_panel(root)
+            with open(root / PANEL_SCRIPTS[-1], 'a') as script:
+                script.write("const tail = '</SCRIPT>';\n")
+            with self.assertRaisesRegex(RuntimeError, '</script'):
+                build_panel(root)
+
+    def test_the_page_inlines_every_panel_script_in_order(self):
+        _, page = self.get('/')
+        page = page.decode()
+        starts = [page.index((ROOT / name).read_text().splitlines()[0]) for name in PANEL_SCRIPTS]
+        self.assertEqual(starts, sorted(starts))
 
     def test_wrong_host_is_forbidden(self):
         res, _ = self.get('/fonts/archivo.woff2', host='localhost:%d' % self.port)

@@ -38,4 +38,4 @@ The bridge provides start, pause, resume, stop, seeking, subtitle selection and 
 
 ## Evidence on Hand
 
-README.md and bridge.py describe incumbent behavior. Existing tests cover playback ownership, input-seek restart, subtitle timing, growing HLS and startup lifecycle. `tests/panel-core.test.cjs` and `tests/panel-shell.test.cjs` cover the panel's rules and its page, and `scripts/verify_setup_browser.py` drives both modes in a browser against the demo. Neither a complete movie run nor new control behavior on hardware is certified by preview tests.
+README.md and bridge.py describe incumbent behavior. Existing tests cover playback ownership, input-seek restart, subtitle timing, growing HLS and startup lifecycle. The `tests/panel-core-*.test.cjs` files and `tests/panel-shell.test.cjs` cover the panel's rules and its page, and `scripts/verify_setup_browser.py` drives both modes in a browser against the demo. Neither a complete movie run nor new control behavior on hardware is certified by preview tests.
