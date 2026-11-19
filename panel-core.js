@@ -56,7 +56,7 @@
  * @property {Choice} choice
  * @property {Upload} upload
  * @property {Addon} addon
- * @property {Start|null} start  written ONLY by planTouch (clears), planReset (fresh plan), planStart, startAdvance, planOnCommandDone, uiConfirmAccept
+ * @property {Start|null} start
  * @property {Record<'discover'|'discover_devices',{ticket:Ticket|null,error:string}>} refresh
  */
 /**
