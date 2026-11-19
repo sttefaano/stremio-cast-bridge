@@ -12,8 +12,6 @@ const load = () => {
 
 // ───────── a small DOM parsed from the real player.html: just enough surface for the shell
 const VOID = new Set(['meta', 'input', 'br', 'hr', 'img', 'link', 'source']);
-const kebab = k => k.replace(/[A-Z]/g, c => '-' + c.toLowerCase());
-const camel = k => k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 
 class Node {
   constructor(tag, attrs = {}) {
@@ -37,14 +35,6 @@ class Node {
     this.files = [];
     this.text = '';
     this.document = null;
-    const self = this;
-    this.dataset = new Proxy({}, {
-      get: (_, k) => self.attrs.get('data-' + kebab(String(k))),
-      set: (_, k, v) => { self.attrs.set('data-' + kebab(String(k)), String(v)); return true; },
-      has: (_, k) => self.attrs.has('data-' + kebab(String(k))),
-      ownKeys: () => [...self.attrs.keys()].filter(k => k.startsWith('data-')).map(camel_data),
-      getOwnPropertyDescriptor: () => ({enumerable: true, configurable: true}),
-    });
   }
   get id() { return this.attrs.get('id') ?? ''; }
   get hidden() { return this.attrs.has('hidden'); }
@@ -115,7 +105,6 @@ class Node {
   showModal() { if (this.open) throw new Error('InvalidStateError: already open'); this.open = true; this.document.modals.push(this); }
   close() { this.open = false; const i = this.document.modals.indexOf(this); if (i >= 0) this.document.modals.splice(i, 1); }
 }
-const camel_data = k => camel(k.slice(5));
 
 function parse(html) {
   const doc = new Node('#document');
