@@ -32,16 +32,25 @@ const Panel = (() => {
    */
   /**
    * @typedef {object} Addon  Stremio state for one catalogue; holds no reference to its owner.
-   * @property {object|null} listing @property {string} listingKey
+   * @property {object|null} listing
+   * @property {string} listingKey
    * @property {{s:'idle'}|{s:'pulling',key:string,ticket:Ticket}|{s:'failed',key:string}} pull
-   * @property {string} language @property {string} offerId @property {boolean} correcting
+   * @property {string} language
+   * @property {string} offerId
+   * @property {boolean} correcting
    * @property {null|{kind:'lookup'|'fetch',ticket:Ticket,offerId?:string}} op
-   * @property {{text:string,key:string}|null} message @property {string|null} lastHint @property {string[]} unreadable
+   * @property {{text:string,key:string}|null} message
+   * @property {string|null} lastHint
+   * @property {string[]} unreadable
    */
   /**
    * @typedef {object} Plan  What the user is assembling. Shared by Preparar and the "Cambiar película" sheet.
-   * @property {string|null} sourceId @property {Catalogue|null} catalogue  monotonic per id
-   * @property {Load} load @property {Choice} choice @property {Upload} upload @property {Addon} addon
+   * @property {string|null} sourceId
+   * @property {Catalogue|null} catalogue  monotonic per id
+   * @property {Load} load
+   * @property {Choice} choice
+   * @property {Upload} upload
+   * @property {Addon} addon
    * @property {Start|null} start  written ONLY by planTouch (clears), planReset (fresh plan), planStart, startAdvance, planOnCommandDone, uiConfirmAccept
    * @property {Record<'discover'|'discover_devices',{ticket:Ticket|null,error:string}>} refresh
    */
@@ -53,7 +62,8 @@ const Panel = (() => {
    */
   /**
    * @typedef {object} Remote  Drafts bound to ONE playback identity; reconcile replaces it when the identity changes.
-   * @property {string} key @property {Seek} seek
+   * @property {string} key
+   * @property {Seek} seek
    * @property {{draft:{subtitleId:string|null,delayMs:number}|null,apply:CaptionApply|null}} captions
    * @property {number|null} volumePreview
    * @property {null|{snap:StopSnap,afterSeq:number,generation:number}} stop  confirmed stop awaiting fresh status
@@ -67,9 +77,13 @@ const Panel = (() => {
    * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
    * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
    * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
-   * @property {boolean} stopIssued  our Stop was sent; the next return to Preparar shows the notice  @property {{text:string,error:string}} exact
-   * @property {'preparar'|'mando'|null} mode @property {boolean} reseed @property {Ticket|null} clock
-   * @property {string|null} lastSourceId @property {string} lastDeviceLabel
+   * @property {boolean} stopIssued  our Stop was sent; the next return to Preparar shows the notice
+   * @property {{text:string,error:string}} exact
+   * @property {'preparar'|'mando'|null} mode
+   * @property {boolean} reseed
+   * @property {Ticket|null} clock
+   * @property {string|null} lastSourceId
+   * @property {string} lastDeviceLabel
    */
   /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
@@ -117,7 +131,7 @@ const Panel = (() => {
   /** True when `a` carries strictly more than `b` for the same catalogue id. */
   const richer = (a, b) => a.entries.length >= b.entries.length && addonRevision(a) >= addonRevision(b)
     && (a.entries.length > b.entries.length || addonRevision(a) > addonRevision(b));
-  /** {ok:true,text} | {ok:false,message}. Decodes bytes, never file.text (policy 12). */
+  /** {ok:true,text} | {ok:false,message}. Decodes the bytes strictly, so a non-UTF-8 file is refused instead of turned into U+FFFD. */
   function decodeSubtitle(bytes) {
     if (!bytes || bytes.byteLength > MAX_UPLOAD) return {ok: false, message: 'El archivo supera 1 MiB.'};
     try { return {ok: true, text: new TextDecoder('utf-8', {fatal: true}).decode(bytes)}; }
@@ -150,13 +164,16 @@ const Panel = (() => {
   // ───────── capabilities: THE guard. view turns it into `enabled`; every handler asks it again.
   /**
    * @typedef {object} Caps
-   * @property {boolean} online @property {boolean} busy  own command in flight, command_pending, pending or a waiting phase
+   * @property {boolean} online
+   * @property {boolean} busy  own command in flight, command_pending, pending or a waiting phase
    * @property {boolean} foreign  receiver_changed, disconnected or a phase we do not know: only Stop is allowed
    * @property {boolean} owned    the page shows Mando
    * @property {boolean} transport  pause/resume/seek/skip/volume/mute
    * @property {boolean} captions   transport + something to edit + no apply in flight
-   * @property {boolean} stop @property {boolean} stopNeedsConfirm @property {boolean} changeDevice
-   * @property {boolean} start  destination half of policy 5
+   * @property {boolean} stop
+   * @property {boolean} stopNeedsConfirm
+   * @property {boolean} changeDevice
+   * @property {boolean} start  the TV can take a Start now; planCanStart says whether the plan is complete
    */
   /** @param {Model} m @returns {Caps} */
   function caps(m) {
@@ -194,7 +211,7 @@ const Panel = (() => {
     fx.push({fx: 'poll', gen: l.generation, seq: ++l.seq});
   }
   /**
-   * Send a command (policies 1-3). Refused when offline or when one is in flight, except Stop, which preempts.
+   * Send the one command. Refused when offline or when one is in flight, except Stop, which preempts.
    * Playback commands carry the device identity; explicit fields in `body` win (start sends its click-time snapshot).
    * @returns {Ticket|null}
    */
@@ -262,7 +279,7 @@ const Panel = (() => {
   }
 
   // ───────── plan: movie, catalogue, subtitle decision, Start
-  /** THE cancellation point (policy 7): a pending Start and an open replacement consent die here. */
+  /** THE cancellation point: any change to the plan kills a pending Start and an open replacement consent. */
   function planTouch(m) {
     m.plan.start = null;
     if (m.ui.confirm?.kind === 'replace') m.ui.confirm = null;
@@ -283,7 +300,7 @@ const Panel = (() => {
   const entryOf = (cat, id) => cat?.entries.find(e => e.id === id) || null;
   const sourceTitle = (s, id) => s.sources.find(x => x.id === id)?.title || 'la película elegida';
 
-  /** Plan half of policy 5, with the names of what is still missing for the stub. */
+  /** The plan is complete enough to start, with the names of what is still missing for the stub. */
   function planCanStart(m) {
     const s = m.link.status || NO_STATUS, p = m.plan, missing = [];
     if (!p.sourceId || !s.sources.some(x => x.id === p.sourceId)) missing.push('PELÍCULA');
@@ -318,7 +335,7 @@ const Panel = (() => {
     fx.push({fx: 'post', ticket, action: 'catalogue', body: {source_id: p.sourceId, refresh}});
   }
   /**
-   * Monotonic merge (policy 11): never fewer entries or a lower addon revision for the same id; a new id starts the
+   * Monotonic merge: never fewer entries or a lower addon revision for the same id; a new id starts the
    * plan over. Returns whether the plan took it.
    */
   function planAcceptCatalogue(m, cat) {
@@ -407,7 +424,7 @@ const Panel = (() => {
     p.upload = {s: 'idle', filename: u.filename, message: `Archivo listo: ${u.filename}. Se usará solo al iniciar.`};
   }
 
-  /** pickDevice never casts: it only selects (policy 4). */
+  /** pickDevice never casts: it only selects. */
   function planPickDevice(m, fx, id, msg) {
     const s = m.link.status;
     if (!caps(m).changeDevice || !s.devices?.some(d => d.id === id) || s.selected_device?.id === id) return;
@@ -422,7 +439,7 @@ const Panel = (() => {
     fx.push({fx: 'post', ticket: r.ticket, action: kind, body: {}});
   }
 
-  /** start intent (policies 3, 5, 6): nothing is sent from the click itself. */
+  /** Nothing is sent from the click itself: a fresh poll must confirm the TV, the list and any replacement first. */
   function planStart(m, fx) {
     const p = m.plan, s = m.link.status;
     if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || m.ui.confirm) return;
@@ -662,7 +679,7 @@ const Panel = (() => {
       fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
     } else m.remote.seek = {s: 'idle'};
   }
-  /** A sent seek stays on screen until the TV is usable and either was seen busy or reached the target (policy 14). */
+  /** A sent seek stays on screen until the TV is usable and either was seen busy or reached the target. */
   function seekOnStatus(m) {
     const k = m.remote.seek, s = m.link.status, c = caps(m);
     if (k.s === 'dragging' && !c.transport) m.remote.seek = {s: 'idle'};
@@ -758,7 +775,7 @@ const Panel = (() => {
       && (!finite(s.subtitle_delay_ms) || s.subtitle_delay_ms === w.delayMs)
       && (typeof s.subtitles_enabled !== 'boolean' || s.subtitles_enabled === w.enabled);
   }
-  /** Runs on every applied status (policy 13). A playback identity change dropped the apply already, in reconcile. */
+  /** Runs on every applied status. A playback identity change dropped the apply already, in remoteSync. */
   function capAdvance(m, fx) {
     const a = m.remote.captions.apply, l = m.link, s = l.status, c = caps(m);
     if (!a) return;
@@ -786,7 +803,7 @@ const Panel = (() => {
     if (c.ok) a.stage = 'reading'; else capFail(m, m.ui.errors.local || 'No se pudo aplicar el cambio.');
   }
 
-  /** stop intent (policy 8). Confirm only while playing or paused; anything else stops at once and interrupts. */
+  /** Confirm only while playing or paused; anything else stops at once and interrupts. */
   function remoteStop(m, fx, msg) {
     const c = caps(m), s = m.link.status;
     if (!c.stop) return;
@@ -852,7 +869,7 @@ const Panel = (() => {
       m.remote.stop = {snap: c.snap, afterSeq: linkRequestPoll(m, fx), generation: m.link.generation};
     }
   }
-  /** A new backend error identity is the latest word: it replaces a local message and ends a seek wait (policy 14, 15). */
+  /** A new backend error identity is the latest word: it replaces a local message and ends a seek wait. */
   function uiObserveError(m) {
     const e = m.ui.errors, id = errorIdentity(m.link.status);
     if (!id || id === e.observed) return;
@@ -909,7 +926,7 @@ const Panel = (() => {
     else if (e.local !== null) e.local = null;
     else e.dismissed = errorIdentity(m.link.status);
   }
-  /** Demo scenarios exist only when the server says it is the demo (policy 17). */
+  /** Demo scenarios exist only when the server says it is the demo. */
   function uiScenario(m, fx, value, msg) {
     if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
   }
@@ -970,10 +987,10 @@ const Panel = (() => {
   /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
   function reconcile(m, fx) {
     const l = m.link, s = l.status, u = m.ui, c = caps(m);
-    // 2. remember what we owned, to label the stopped notice and re-seed Preparar
+    // remember what we owned, to label the stopped notice and re-seed Preparar
     if (s && c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
     uiValidLayers(m);
-    // 3. back in Preparar after an owned playback: movie and TV stay chosen, the subtitle decision starts over
+    // back in Preparar after an owned playback: movie and TV stay chosen, the subtitle decision starts over
     if (s) {
       const mode = modeOf(m);
       if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
@@ -990,7 +1007,7 @@ const Panel = (() => {
       u.clock = ticketOf(m);
       fx.push({fx: 'timer', name: 'clock', ms: CLOCK_MS, ticket: u.clock});
     }
-    // 4/5. remember the TV the server confirmed; pre-select it when nothing is selected (never casts)
+    // remember the TV the server confirmed; pre-select it when nothing is selected (never casts)
     if (s?.selected_device && s.selected_device.id !== m.prefs.lastDeviceId) {
       m.prefs.lastDeviceId = s.selected_device.id;
       fx.push({fx: 'store', key: 'cast.lastDevice', value: s.selected_device.id});
@@ -1000,7 +1017,7 @@ const Panel = (() => {
       m.prefs.autoSelectTried = true;
       planPickDevice(m, fx, m.prefs.lastDeviceId);
     }
-    // 6/7. Stremio offers follow the block that shows them; the branch vanishes when the addon is off
+    // Stremio offers follow the block that shows them; the branch vanishes when the addon is off
     const info = m.plan.catalogue?.addon;
     if (m.plan.choice.branch === 'stremio' && (!info || info.state === 'off')) m.plan.choice = {branch: 'none', entryId: null};
     addonReconcile(m, fx, 'plan');
@@ -1012,7 +1029,9 @@ const Panel = (() => {
    * @typedef {{enabled:boolean}} Ctl
    * @typedef {{id:string,label:string,note?:string,selected:boolean,enabled:boolean,reason?:string,tag?:string}} Row
    * @typedef {object} PlanView  Rendered in Preparar (segments 01 and 03 and the stub) and inside the "Cambiar película" sheet.
-   * @property {Row[]} sources @property {string} sourceStatus @property {Ctl} refreshSources
+   * @property {Row[]} sources
+   * @property {string} sourceStatus
+   * @property {Ctl} refreshSources
    * @property {{id:'none'|'file'|'stremio'|'upload',label:string,selected:boolean,hidden:boolean,enabled:boolean}[]} branches
    * @property {string} subsStatus  the one status line of the chosen branch
    * @property {Row[]} fileEntries  embedded tracks; unsupported ones visible, disabled, with a reason
@@ -1022,9 +1041,16 @@ const Panel = (() => {
    * @property {{label:string,note:string,enabled:boolean}} primary  'Iniciar en Sala (Google TV)' | 'Cambiar película en la TV' | 'Ya está en la TV' | 'Iniciando…'
    * @property {{label:'Falta'|'Embarque',value:string,missing:string[]}} stub
    * @typedef {object} StremioView
-   * @property {string} match @property {Row[]} languages @property {Row[]} versions @property {Ctl&{shown:boolean,label:string}} use
-   * @property {Ctl&{shown:boolean}} retry @property {Ctl&{shown:boolean,open:boolean}} wrong
-   * @property {boolean} correctionOpen @property {Row[]} alternatives @property {Ctl} search @property {string} status
+   * @property {string} match
+   * @property {Row[]} languages
+   * @property {Row[]} versions
+   * @property {Ctl&{shown:boolean,label:string}} use
+   * @property {Ctl&{shown:boolean}} retry
+   * @property {Ctl&{shown:boolean,open:boolean}} wrong
+   * @property {boolean} correctionOpen
+   * @property {Row[]} alternatives
+   * @property {Ctl} search
+   * @property {string} status
    */
   const SUBS_BRANCHES = [['none', 'Sin'], ['file', 'Del archivo'], ['stremio', 'Stremio'], ['upload', 'Subir']];
 
@@ -1107,8 +1133,12 @@ const Panel = (() => {
    * @typedef {object} DestinationView  02 DESTINO · TV
    * @property {string} label 'Sala · Google TV' | 'Sin TV elegida'
    * @property {string} note '' | 'Lista sin confirmar' | 'No disponible'  (a failed discovery is not a disconnected TV)
-   * @property {string} status @property {Row[]} rows @property {Ctl} refresh @property {string} rule
-   * @property {Ctl&{shown:boolean}} stop @property {string} details  host of the chosen TV, for the disclosure
+   * @property {string} status
+   * @property {Row[]} rows
+   * @property {Ctl} refresh
+   * @property {string} rule
+   * @property {Ctl&{shown:boolean}} stop
+   * @property {string} details  host of the chosen TV, for the disclosure
    */
   function viewDestination(m) {
     const s = m.link.status || NO_STATUS, p = m.plan, c = caps(m), sel = s.selected_device, last = m.prefs.lastDeviceId;
@@ -1161,12 +1191,17 @@ const Panel = (() => {
    * @property {{title:string,clock:string,state:string,glyph:'play'|'pause'|'spinner'|null,room:string}} board  clock is display-only (interpolated while playing); glyph follows the phase, null when unconfirmed or not playing/waiting
    * @property {{enabled:boolean,max:number,value:number,elapsed:string,total:string,preview:string|null,previewAt:number|null,target:string|null,buffered:{start:number,end:number}|null}} track
    *           value and elapsed are the real position; preview ('→ h:mm:ss') exists only while dragging, target while a sent seek has not settled
-   * @property {Ctl} back @property {Ctl} forward @property {string|null} badge  accumulated skip, '+60 s'
+   * @property {Ctl} back
+   * @property {Ctl} forward
+   * @property {string|null} badge  accumulated skip, '+60 s'
    * @property {Ctl&{icon:'play'|'pause'|'spinner',label:string}} toggle
    * @property {null|{text:string,detail:string,cancel:Ctl}} waiting  'Esperando a Sala · Google TV' with Cancelar (= stop)
-   * @property {Ctl&{percent:number|null,text:string}} volume @property {Ctl&{pressed:boolean,label:string}} mute
+   * @property {Ctl&{percent:number|null,text:string}} volume
+   * @property {Ctl&{pressed:boolean,label:string}} mute
    * @property {Ctl&{label:string,unapplied:boolean}} chip  subtitle chip; unapplied while a caption draft differs from the TV
-   * @property {Ctl} more @property {Ctl} change @property {Ctl&{shown:boolean}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
+   * @property {Ctl} more
+   * @property {Ctl} change
+   * @property {Ctl&{shown:boolean}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
    */
   function viewMando(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
@@ -1202,11 +1237,17 @@ const Panel = (() => {
 
   /**
    * @typedef {object} SubsSheetView  "Enmienda al pase"
-   * @property {'subs'} kind @property {Row[]} tracks  'Sin subtítulos' (id '') then the supported tracks
+   * @property {'subs'} kind
+   * @property {Row[]} tracks  'Sin subtítulos' (id '') then the supported tracks
    * @property {Ctl&{checked:boolean}} visible  applies at once, through the same pipeline as Aplicar
-   * @property {{text:string,meaning:string}} delay @property {Ctl} steps
-   * @property {Ctl&{label:string,pending:boolean}} apply @property {Ctl} discard @property {boolean} unapplied
-   * @property {string} onTv @property {string} note @property {StremioView|null} stremio
+   * @property {{text:string,meaning:string}} delay
+   * @property {Ctl} steps
+   * @property {Ctl&{label:string,pending:boolean}} apply
+   * @property {Ctl} discard
+   * @property {boolean} unapplied
+   * @property {string} onTv
+   * @property {string} note
+   * @property {StremioView|null} stremio
    */
   function viewSubsSheet(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), srv = capServer(s), d = capDraft(m), a = m.remote.captions.apply, cat = remoteCatalogue(m);
@@ -1246,7 +1287,8 @@ const Panel = (() => {
   /**
    * @typedef {object} ProblemView  The ONE problem block. kind priority: offline > unknown > foreign > disconnected > failed > notice > stopped.
    * @property {'offline'|'unknown'|'foreign'|'disconnected'|'failed'|'notice'|'stopped'} kind
-   * @property {string} title @property {string} body  '' when the title says it all
+   * @property {string} title
+   * @property {string} body  '' when the title says it all
    * @property {'page'|'sheet'} host  'sheet' while a sheet is open: the block renders there, once, never also on the page
    * @property {null|{act:'stop'|'dismissNotice',label:string,enabled:boolean}} action
    */
