@@ -1080,7 +1080,7 @@ test('confirmed stop re-polls, re-checks the TV and the playback, and sends the 
   assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
 });
 
-test('stop consent is void for a different playback, TV or revision, or after any command in between', () => {
+test('stop consent is void for a different playback, TV or revision', () => {
   const swaps = {playback: {playback_id: 'play-b'}, device: {selected_device: {...destination.selected_device, id: 'tv-b'}}, revision: {device_revision: 2}};
   for (const [name, change] of Object.entries(swaps)) {
     const p = panel(playing);
@@ -1089,14 +1089,40 @@ test('stop consent is void for a different playback, TV or revision, or after an
     p.status({...playing, ...change});
     assert.equal(p.posts('stop').length, 0, name);
   }
-  const q = panel(playing);
-  q.tap('stop');
-  q.tap('confirmAccept');
-  q.tap('toggle');
-  q.status(playing);
-  q.reply(q.posted('pause'));
-  q.status({...playing, phase: 'paused'});
-  assert.equal(q.posts('stop').length, 0, 'an intervening command voids the stop');
+});
+
+test('a confirmed Detener survives a failed poll and stops once the link returns', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  p.status(null, false);
+  assert.equal(p.posts('stop').length, 0, 'nothing can be sent offline');
+  p.fire('poll');
+  p.status(playing);
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+});
+
+test('our own command between the confirm and the fresh poll does not cancel a confirmed Detener', () => {
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('confirmAccept');
+  p.tap('toggle');
+  p.status(playing);
+  p.reply(p.posted('pause'));
+  p.status(paused);
+  assert.deepEqual(p.posted('stop').body, {device_id: 'tv-a', device_revision: 1, playback_id: 'play-a'});
+});
+
+test('a Start waiting for its fresh poll survives a failed poll and starts once the link returns', () => {
+  const p = panel(idle);
+  choose(p);
+  p.tap('start');
+  p.status(null, false);
+  assert.equal(p.posts('start').length, 0);
+  assert.equal(p.view.plan.primary.label, 'Iniciando…');
+  p.fire('poll');
+  p.status(idle);
+  assert.equal(p.posted('start').body.source_id, 'a');
 });
 
 test('stop with Seguir viendo or Escape sends nothing', () => {

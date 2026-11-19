@@ -17,7 +17,7 @@ const Panel = (() => {
    * @property {number} statusAt       msg.at of the last applied status (display clock only)
    * @property {number} generation     bumped by every command; status replies of an older generation are dropped
    * @property {number} seq            seq of the last ISSUED poll
-   * @property {number} appliedSeq     seq of the last applied poll
+   * @property {number} appliedSeq     seq of the last poll that brought a status
    * @property {boolean} polling       one poll in flight
    * @property {boolean} repoll        a poll issued after now is needed as soon as the one in flight returns
    * @property {Ticket|null} pollTimer
@@ -58,7 +58,6 @@ const Panel = (() => {
    * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,from?:string,n?:number}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
    * @typedef {{subtitleId:string|null,enabled:boolean,delayMs:number}} CaptionWant
    * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,afterSeq:number,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,from?:string,n?:number}} CaptionApply
-   * @typedef {{deviceId:string|undefined,deviceRevision:number|undefined,playbackId:string|null}} StopSnap
    */
   /**
    * @typedef {object} Remote  Drafts bound to ONE playback identity; reconcile replaces it when the identity changes.
@@ -66,14 +65,14 @@ const Panel = (() => {
    * @property {Seek} seek
    * @property {{draft:{subtitleId:string|null,delayMs:number}|null,apply:CaptionApply|null}} captions
    * @property {number|null} volumePreview
-   * @property {null|{snap:StopSnap,afterSeq:number,generation:number}} stop  confirmed stop awaiting fresh status
+   * @property {null|{s:'asking'}|{s:'confirmed',afterSeq:number}} stop  asking is the open confirm; confirmed waits for fresh status
    * @property {Catalogue|null} overlay  newer active catalogue learned from a lookup or download
    * @property {Addon} addon
    */
   /**
    * @typedef {object} Ui
    * @property {null|'subs'|'more'|'change'} sheet
-   * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}|{kind:'stop',snap:StopSnap}} confirm
+   * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}} confirm  the stop confirm lives in Remote.stop
    * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
    * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
    * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
@@ -124,10 +123,11 @@ const Panel = (() => {
     return d.model ? (paren ? `${d.name} (${d.model})` : `${d.name} · ${d.model}`) : d.name;
   }
   const errorIdentity = s => s?.action_error ? `${s.action_error_revision || 0}:${s.action_error}` : null;
-  const playbackKey = s => JSON.stringify([s?.selected_device?.id ?? null, s?.device_revision ?? null, s?.source_id ?? null, s?.playback_id ?? null, s?.active_catalogue?.id ?? null]);
+  const playbackTuple = s => [s?.selected_device?.id ?? null, s?.device_revision ?? null, s?.source_id ?? null, s?.playback_id ?? null];
+  /** The playback the remote's drafts and a stop consent belong to. */
+  const playbackKey = s => JSON.stringify([...playbackTuple(s), s?.active_catalogue?.id ?? null]);
   /** null unless a movie is on the TV; else what a replacement consent was given for. */
-  const replacementIdentity = s => LIVE.includes(s.phase)
-    ? JSON.stringify([s.selected_device?.id ?? null, s.device_revision ?? null, s.source_id ?? null, s.playback_id ?? null, s.session ?? null, s.subtitle_choice ?? null]) : null;
+  const replacementIdentity = s => LIVE.includes(s.phase) ? JSON.stringify([...playbackTuple(s), s.session ?? null, s.subtitle_choice ?? null]) : null;
   const parseStatus = raw => raw && typeof raw === 'object' && typeof raw.phase === 'string' && Array.isArray(raw.sources) ? raw : null;
   const addonRevision = c => c?.addon?.revision ?? 0;
   /** `a` may replace `b`: the same catalogue id with no fewer entries and no older addon revision. */
@@ -233,8 +233,7 @@ const Panel = (() => {
     l.polling = false;
     if (msg.gen === l.generation) {
       const s = msg.ok ? parseStatus(msg.raw) : null;
-      if (s) { l.status = s; l.online = true; l.statusAt = msg.at; } else l.online = false;
-      l.appliedSeq = msg.seq;
+      if (s) { l.status = s; l.online = true; l.statusAt = msg.at; l.appliedSeq = msg.seq; } else l.online = false;
       advanceOnStatus(m, fx);
     }
     if (l.repoll) linkIssuePoll(m, fx);
@@ -272,7 +271,7 @@ const Panel = (() => {
   /** THE cancellation point: any change to the plan kills a pending Start and an open replacement consent. */
   function planTouch(m) {
     m.plan.start = null;
-    if (m.ui.confirm?.kind === 'replace') m.ui.confirm = null;
+    m.ui.confirm = null;
   }
   /** A change to what would be sent: touch, and abandon an upload or download that would land in the old draft. */
   function planEdit(m) {
@@ -431,7 +430,7 @@ const Panel = (() => {
   /** Nothing is sent from the click itself: a fresh poll must confirm the TV, the list and any replacement first. */
   function planStart(m, fx) {
     const p = m.plan, s = m.link.status;
-    if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || m.ui.confirm) return;
+    if (!caps(m).start || !planCanStart(m).ok || samePlan(m) || p.start || confirmOf(m)) return;
     const snap = {sourceId: p.sourceId, catalogueId: p.catalogue.id, subtitleId: planSubtitleId(p), deviceId: s.selected_device.id, deviceRevision: s.device_revision};
     const consent = replacementIdentity(s);
     if (consent) m.ui.confirm = {kind: 'replace', snap, consent, title: sourceTitle(s, p.sourceId)};
@@ -622,7 +621,7 @@ const Panel = (() => {
   function remoteSync(m) {
     const key = playbackKey(m.link.status);
     if (key === m.remote.key) return;
-    if (m.remote.stop) m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
+    if (m.remote.stop && caps(m).stop) m.ui.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
     m.remote = freshRemote(key);
     if (m.ui.sheet === 'subs') m.ui.sheet = null;
   }
@@ -799,7 +798,7 @@ const Panel = (() => {
   function remoteStop(m, fx, msg) {
     const c = caps(m), s = m.link.status;
     if (!c.stop) return;
-    if (c.stopNeedsConfirm) m.ui.confirm = {kind: 'stop', snap: {deviceId: s.selected_device?.id, deviceRevision: s.device_revision, playbackId: s.playback_id ?? null}};
+    if (c.stopNeedsConfirm) m.remote.stop = {s: 'asking'};
     else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
   }
   /** A stop, asked or sent, outranks every flow that was waiting to act on the TV. */
@@ -816,22 +815,20 @@ const Panel = (() => {
     u.sheet = null;
     if (linkCommand(m, fx, 'stop', body, {owner: 'stop', from: msg?.from, n: msg?.n})) u.stopIssued = true;
   }
-  /**
-   * After a poll issued since the click: no command since and, because remoteSync would have dropped the consent
-   * (with a message) if the TV, its revision or the playback had changed, the consent still holds.
-   */
+  /** After a status polled since the click. remoteSync drops the consent, with a message, if the playback changed. */
   function stopAdvance(m, fx) {
-    const st = m.remote.stop, l = m.link;
-    if (!st || l.appliedSeq <= st.afterSeq) return;
+    const st = m.remote.stop, s = m.link.status;
+    if (st?.s !== 'confirmed' || m.link.appliedSeq <= st.afterSeq) return;
     m.remote.stop = null;
-    if (st.generation === l.generation && caps(m).stop) remoteStopNow(m, fx, st.snap.playbackId ? {playback_id: st.snap.playbackId} : {});
+    if (caps(m).stop) remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {});
   }
 
   // ───────── ui: layers, errors
+  const confirmOf = m => m.ui.confirm ?? (m.remote.stop?.s === 'asking' ? {kind: 'stop'} : null);
   /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
   function uiOpen(m, sheet) {
     const s = m.link.status || NO_STATUS, c = caps(m);
-    if (m.ui.confirm) return;
+    if (confirmOf(m)) return;
     if (sheet === 'subs' && !(s.playback_id && remoteCatalogue(m) && c.online && !c.foreign)) return;
     if (sheet === 'more' && !c.owned) return;
     if (sheet === 'change') {
@@ -844,7 +841,8 @@ const Panel = (() => {
   /** dismiss (Escape, backdrop), confirmCancel, closeSheet: close the TOP layer only; any dismissal cancels a pending start. */
   function uiDismiss(m) {
     const u = m.ui;
-    if (u.confirm) { if (u.confirm.kind === 'replace') planTouch(m); u.confirm = null; return; }
+    if (u.confirm) { planTouch(m); return; }
+    if (m.remote.stop?.s === 'asking') { m.remote.stop = null; return; }
     const was = u.sheet;
     u.sheet = null;
     planTouch(m);
@@ -852,15 +850,14 @@ const Panel = (() => {
   }
   function uiConfirmAccept(m, fx) {
     const c = m.ui.confirm, p = m.plan;
-    if (!c) return;
-    m.ui.confirm = null;
-    if (c.kind === 'replace') {
+    if (c) {
+      m.ui.confirm = null;
       const k = c.snap;
       if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;
       p.start = {stage: 'verifying', snap: k, consent: c.consent, afterSeq: linkRequestPoll(m, fx)};
-    } else {
+    } else if (m.remote.stop?.s === 'asking') {
       remoteCancelFlows(m);
-      m.remote.stop = {snap: c.snap, afterSeq: linkRequestPoll(m, fx), generation: m.link.generation};
+      m.remote.stop = {s: 'confirmed', afterSeq: linkRequestPoll(m, fx)};
     }
   }
   /** A new backend error identity is the latest word: it replaces a local message and ends a seek wait. */
@@ -877,15 +874,8 @@ const Panel = (() => {
     if (u.sheet === 'subs' && !(s.playback_id && remoteCatalogue(m)) || u.sheet === 'subs' && c.foreign) u.sheet = null;
     if ((u.sheet === 'more' || u.sheet === 'change') && !c.owned) u.sheet = null;
     if (u.sheet === 'change' && c.foreign) { u.sheet = null; planReset(m, null); }
-    if (u.confirm?.kind === 'replace' && c.foreign) u.confirm = null;
-    if (u.confirm?.kind === 'stop') {
-      const k = u.confirm.snap;
-      if (!c.stop) u.confirm = null;
-      else if (k.deviceId !== s.selected_device?.id || k.deviceRevision !== s.device_revision || k.playbackId !== (s.playback_id ?? null)) {
-        u.confirm = null;
-        u.errors.local = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
-      }
-    }
+    if (u.confirm && c.foreign) u.confirm = null;
+    if (m.remote.stop?.s === 'asking' && !c.stop) m.remote.stop = null;
   }
   /** The focus ticket is honoured once the command settles, and only if the user has not touched anything since. */
   function uiSettleFocus(m, fx) {
@@ -1131,7 +1121,7 @@ const Panel = (() => {
       refreshCatalogue: {enabled: online && !!p.sourceId && p.load.s !== 'loading'},
       primary: {
         label: p.start ? 'Iniciando…' : same ? 'Ya está en la TV' : modeOf(m) === 'mando' ? 'Cambiar película en la TV' : sel ? `Iniciar en ${deviceLabel(sel, true)}` : 'Iniciar',
-        note, enabled: c.start && can.ok && !same && !p.start && !m.ui.confirm,
+        note, enabled: c.start && can.ok && !same && !p.start && !confirmOf(m),
       },
       stub: {label: can.missing.length ? 'Falta' : 'Embarque', value: can.missing.length ? can.missing.join(' · ') : deviceLabel(sel), missing: can.missing},
     };
@@ -1167,7 +1157,7 @@ const Panel = (() => {
 
   /** @typedef {{kind:'replace'|'stop',title:string,body:string,accept:string,cancel:string}} ConfirmView */
   function viewConfirm(m) {
-    const k = m.ui.confirm, s = m.link.status || NO_STATUS;
+    const k = confirmOf(m), s = m.link.status || NO_STATUS;
     if (!k) return null;
     if (k.kind === 'replace') return {kind: 'replace', title: '¿Cambiar la película en la TV?', body: `Vas a ver ${k.title}. Empieza desde el principio.`, accept: 'Cambiar película', cancel: 'Volver'};
     return {kind: 'stop', title: '¿Detener la película en la TV?', body: `Se corta en ${deviceLabel(s.selected_device) || 'la TV'} y volvés a elegir.`, accept: 'Detener', cancel: 'Seguir viendo'};
