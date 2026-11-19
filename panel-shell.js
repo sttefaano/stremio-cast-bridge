@@ -1,4 +1,5 @@
 // ───────── DOM shell: performs the core's effects and paints Panel.view(). It knows ids and effect kinds, never a rule.
+// Depends on: panel.js.
 const byId = (doc, id) => {
   const node = doc.getElementById(id);
   if (!node) throw new Error(`Falta #${id} en el markup`);

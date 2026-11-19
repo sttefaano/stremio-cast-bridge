@@ -1296,7 +1296,7 @@ class Bridge:
 
 
 FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
-PANEL_SCRIPTS = ('panel-core.js', 'panel-addon.js', 'panel-view.js', 'panel-shell.js')
+PANEL_SCRIPTS = ('panel-core.js', 'panel-addon.js', 'panel-view.js', 'panel.js', 'panel-shell.js')
 
 
 def build_panel(root):

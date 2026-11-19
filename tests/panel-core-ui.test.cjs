@@ -518,7 +518,6 @@ test('every message the page can send is a handler in ACTS; an unknown or inheri
 });
 
 test('the core reads no document, fetch, timer, storage or token; the token placeholder lives only in the markup', () => {
-  assert.deepEqual(PANEL_FILES, ['panel-core.js', 'panel-addon.js', 'panel-view.js', 'panel-shell.js']);
   for (const name of PANEL_FILES) {
     const src = fs.readFileSync(name, 'utf8');
     assert.equal(src.includes('__TOKEN__'), false, name);

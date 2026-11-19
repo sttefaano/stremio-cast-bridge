@@ -1,4 +1,5 @@
 // ───────── view: plain data for the shell to paint. All es-AR copy lives here; view reads the model and writes nothing.
+// Depends on: panel-core.js, panel-addon.js.
 /**
  * @typedef {{enabled:boolean}} Ctl
  * @typedef {{id:string,label:string,note?:string,selected:boolean,enabled:boolean,reason?:string,tag?:string}} Row
@@ -295,5 +296,3 @@ function view(m) {
     wake: mode === 'mando', restoring: m.ui.focus && {ref: m.ui.focus.ref, n: m.ui.focus.n},
   };
 }
-
-const Panel = Object.freeze({init, step, view, keyMsg, ACTS});

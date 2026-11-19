@@ -1,4 +1,5 @@
 // ───────── addon (Stremio): one state machine for the plan and for the live subtitle sheet
+// Depends on: panel-core.js.
 const ADDON_LOADING = 'Buscando subtítulos de Stremio…';
 const ADDON_ERROR = 'No se pudieron buscar subtítulos de Stremio. Las pistas y los archivos locales siguen disponibles.';
 const addonKey = cat => cat?.addon ? `${cat.id}:${cat.addon.revision}` : '';
