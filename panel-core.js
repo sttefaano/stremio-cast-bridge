@@ -796,7 +796,7 @@ function uiScenario(m, fx, value, msg) {
 const OWNERS = {
   start: {done: planOnCommandDone},
   seek: {done: seekOnCommandDone},
-  subtitles: {quiet: (m, c) => m.remote.captions.apply?.ticket !== c.ticket, done: capOnCommandDone},
+  subtitles: {quiet: () => true, done: capOnCommandDone},
   volume: {done: m => { m.remote.volumePreview = null; }},
   stop: {quiet: (m, c) => stopOutranStart(c), done: stopOnCommandDone},
 };
