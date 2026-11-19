@@ -721,6 +721,36 @@ test('a Detener that joins a Cambiar película stops the new movie once the brid
   assert.equal(p.view.problem.body, 'La reproducción cambió. Revisá la película activa.');
 });
 
+test('a Detener that lost to a Cambiar película is not resent on its own after an outage', () => {
+  const refused = {ok: false, code: 'stale_playback', message: 'La reproducción cambió. Revisá la película activa.'};
+  const lostStop = () => {
+    const p = panel(playing);
+    p.tap('openChange');
+    choose(p, 'b');
+    p.tap('start');
+    p.tap('confirmAccept');
+    p.status(playing);
+    p.reply(p.posted('start'));
+    p.tap('dismiss');
+    p.tap('stop');
+    p.reply(p.posted('stop'), refused);
+    p.status(null, false);
+    for (let i = 0; i < 40; i++) offline(p);
+    p.tick(70000);
+    p.fire('poll');
+    return p;
+  };
+  const beta = {...playing, source_id: 'b', title: 'Beta', playback_id: 'play-b'};
+  const p = lostStop();
+  p.status(beta);
+  assert.equal(p.posts('stop').length, 0, 'the new movie plays: nothing goes out by itself');
+  assert.equal(p.view.confirm?.kind, 'stop', 'the user confirms the stop again, as a fresh Detener would ask');
+  const q = lostStop();
+  q.status({...beta, phase: 'preparing', pending: true});
+  assert.equal(q.posts('stop').length, 0, 'still preparing: nothing goes out by itself either');
+  assert.equal(q.view.problem.body, refused.message, 'the refusal shows so the user can stop again');
+});
+
 test('focus goes back only when the command that asked for it settles', () => {
   const p = panel(playing);
   p.tap('toggle', undefined, 'toggle', 1);

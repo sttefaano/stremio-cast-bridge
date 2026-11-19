@@ -26,7 +26,7 @@
  */
 /**
  * @typedef {{text:string,code:string|null}} CommandError
- * @typedef {{ticket:Ticket,action:string,joins:string|null}&({stage:'posting'}|{stage:'confirming',error:CommandError|null,afterSeq:number})} Command  joins: the action in flight when this stop went out
+ * @typedef {{ticket:Ticket,action:string,joins:string|null}&({stage:'posting'}|{stage:'confirming',error:CommandError|null,afterSeq:number,repliedAt:number})} Command  joins: the action in flight when this stop went out
  */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
@@ -278,7 +278,7 @@ function linkOnReply(m, fx, msg) {
   if (!c) return false;
   if (c.stage !== 'posting') return true;
   const error = msg.ok ? null : {text: commandError(msg), code: msg.code ?? null};
-  Object.assign(c, {stage: 'confirming', error, afterSeq: linkRequestPoll(m, fx)});
+  Object.assign(c, {stage: 'confirming', error, afterSeq: linkRequestPoll(m, fx), repliedAt: m.now});
   if (error && !OWNERS[c.action]?.quiet?.(m, c)) uiSay(m, error.text);
   return true;
 }
@@ -695,7 +695,11 @@ const stopOutranStart = c => c.joins === 'start' && c.error?.code === 'stale_pla
 function stopOnCommandDone(m, c, fx) {
   if (!c.error) return;
   m.ui.stopIssued = false;
-  if (stopOutranStart(c) && caps(m).stop) remoteStopNow(m, fx);
+  const k = caps(m);
+  if (!stopOutranStart(c) || !k.stop) return;
+  if (m.now - c.repliedAt <= PENDING_MS) remoteStopNow(m, fx);
+  else if (k.stopNeedsConfirm) remoteStop(m, fx, null);
+  else uiSay(m, c.error.text);
 }
 function stopAdvance(m, fx) {
   const st = m.remote.stop;
