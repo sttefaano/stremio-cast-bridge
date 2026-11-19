@@ -7,11 +7,11 @@ const addonFailure = msg => msg.timeout ? 'La consulta tardó demasiado. Reinten
 const stremioScope = m => m.ui.sheet === 'subs' ? 'remote' : 'plan';
 /** The newer of the server's active catalogue and what a lookup or download returned since. */
 function remoteCatalogue(m) {
-  const a = m.link.status?.active_catalogue ?? null, o = m.remote.overlay;
+  const a = m.link.status.active_catalogue ?? null, o = m.remote.overlay;
   return notOlder(o, a) ? o : a;
 }
 function addonCtx(m, scope) {
-  const c = caps(m), s = m.link.status || NO_STATUS;
+  const c = caps(m), s = m.link.status;
   if (scope === 'plan') {
     const p = m.plan;
     return {

@@ -13,7 +13,7 @@
 /** @typedef {number} Ticket  Unique per effect. A reply is honoured only by the slot that still holds its ticket. */
 /**
  * @typedef {object} Link
- * @property {object|null} status    last APPLIED status; kept while offline
+ * @property {object} status    last APPLIED status, NO_STATUS before the first; kept while offline
  * @property {boolean} online
  * @property {number} statusAt       msg.at of the last applied status (display clock only)
  * @property {number} generation     bumped by every command; status replies of an older generation are dropped
@@ -121,9 +121,9 @@ function deviceLabel(d, paren = false) {
   if (!d) return '';
   return d.model ? (paren ? `${d.name} (${d.model})` : `${d.name} · ${d.model}`) : d.name;
 }
-const errorIdentity = s => s?.action_error ? `${s.action_error_revision || 0}:${s.action_error}` : null;
-const playbackTuple = s => [s?.selected_device?.id ?? null, s?.device_revision ?? null, s?.source_id ?? null, s?.playback_id ?? null];
-const playbackKey = s => JSON.stringify([...playbackTuple(s), s?.active_catalogue?.id ?? null]);
+const errorIdentity = s => s.action_error ? `${s.action_error_revision || 0}:${s.action_error}` : null;
+const playbackTuple = s => [s.selected_device?.id ?? null, s.device_revision ?? null, s.source_id ?? null, s.playback_id ?? null];
+const playbackKey = s => JSON.stringify([...playbackTuple(s), s.active_catalogue?.id ?? null]);
 /** null unless a movie is on the TV; else what a replacement consent was given for. */
 const replacementIdentity = s => LIVE.includes(s.phase) ? JSON.stringify([...playbackTuple(s), s.session ?? null, s.subtitle_choice ?? null]) : null;
 const parseStatus = raw => raw && typeof raw === 'object' && typeof raw.phase === 'string' && Array.isArray(raw.sources) ? raw : null;
@@ -145,11 +145,11 @@ const commandError = msg => msg.timeout ? 'La acción tardó demasiado. Revisá 
 const ticketOf = m => ++m.nextTicket;
 /** What the TV says about captions right now, from the server's own fields. */
 function capServer(s) {
-  const c = s?.subtitle_choice;
+  const c = s.subtitle_choice;
   return {
     subtitleId: c?.subtitle_id ?? null,
-    enabled: typeof c?.enabled === 'boolean' ? c.enabled : s?.subtitles_enabled === true,
-    delayMs: finite(c?.delay_ms) ? c.delay_ms : finite(s?.subtitle_delay_ms) ? s.subtitle_delay_ms : 0,
+    enabled: typeof c?.enabled === 'boolean' ? c.enabled : s.subtitles_enabled === true,
+    delayMs: finite(c?.delay_ms) ? c.delay_ms : finite(s.subtitle_delay_ms) ? s.subtitle_delay_ms : 0,
   };
 }
 /** The draft the sheet edits: the unapplied one, or the server's when there is none. */
@@ -175,7 +175,7 @@ function capDraft(m) {
  */
 /** @param {Model} m @returns {Caps} */
 function caps(m) {
-  const l = m.link, s = l.status || NO_STATUS, online = l.online && !!l.status;
+  const l = m.link, s = l.status, online = l.online;
   const unknown = !KNOWN.has(s.phase), foreign = FOREIGN.includes(s.phase) || unknown;
   const busy = !!l.command || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
   const live = LIVE.includes(s.phase), owned = modeOf(m) === 'mando';
@@ -193,7 +193,7 @@ function caps(m) {
 }
 /** 'mando' while a playback is ours or foreign-but-present; Preparar otherwise. Offline keeps the last status. */
 function modeOf(m) {
-  const s = m.link.status || NO_STATUS;
+  const s = m.link.status;
   if (LIVE.includes(s.phase) || WAITING.includes(s.phase) || FOREIGN.includes(s.phase) || !KNOWN.has(s.phase)) return 'mando';
   return s.phase === 'error' && s.can_change_device === false ? 'mando' : 'preparar';
 }
@@ -216,7 +216,7 @@ function linkIssuePoll(m, fx) {
  */
 function linkCommand(m, fx, action, body, opts = {}) {
   const l = m.link, s = l.status;
-  if (!l.online || !s || (l.command && action !== 'stop')) return null;
+  if (!l.online || (l.command && action !== 'stop')) return null;
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
@@ -285,7 +285,7 @@ const entryOf = (cat, id) => cat?.entries.find(e => e.id === id) || null;
 const sourceTitle = (s, id) => s.sources.find(x => x.id === id)?.title || 'la película elegida';
 
 function planCanStart(m) {
-  const s = m.link.status || NO_STATUS, p = m.plan, missing = [];
+  const s = m.link.status, p = m.plan, missing = [];
   if (!p.sourceId || !s.sources.some(x => x.id === p.sourceId)) missing.push('PELÍCULA');
   if (!s.selected_device) missing.push('TV'); else if (s.selected_device.available !== true) missing.push('TV DISPONIBLE');
   const resolved = p.choice.branch === 'none' || entryOf(p.catalogue, p.choice.entryId)?.supported === true;
@@ -295,14 +295,14 @@ function planCanStart(m) {
 }
 /** What is on the TV already is exactly this plan: starting it again would only restart it. */
 function samePlan(m) {
-  const s = m.link.status || NO_STATUS, p = m.plan, c = s.subtitle_choice, id = planSubtitleId(p);
+  const s = m.link.status, p = m.plan, c = s.subtitle_choice, id = planSubtitleId(p);
   return LIVE.includes(s.phase) && !!p.catalogue && p.sourceId === s.source_id && c?.catalogue_id === p.catalogue.id
     && (c?.subtitle_id ?? null) === id && (c?.delay_ms ?? 0) === 0 && c?.enabled === (id !== null);
 }
 
 function planPickSource(m, fx, id) {
   const s = m.link.status;
-  if (!m.link.online || !s?.sources.some(x => x.id === id) || m.plan.sourceId === id) return;
+  if (!m.link.online || !s.sources.some(x => x.id === id) || m.plan.sourceId === id) return;
   planReset(m, id);
   const cached = s.catalogues?.[id];
   if (cached?.state === 'ready' && cached.catalogue?.source_id === id) m.plan.catalogue = cached.catalogue;
@@ -337,7 +337,7 @@ function planAcceptCatalogue(m, cat) {
 /** Consume status.catalogues[plan.sourceId]; a source that left the list ends the plan. */
 function planAdoptSnapshot(m) {
   const s = m.link.status, p = m.plan;
-  if (!s || !p.sourceId) return;
+  if (!p.sourceId) return;
   if (!s.sources.some(x => x.id === p.sourceId)) { planReset(m, null); return; }
   const snap = s.catalogues?.[p.sourceId], loading = p.load;
   if (!snap) return;
@@ -410,7 +410,7 @@ function planPickDevice(m, fx, id, msg) {
 }
 /** discover / discover_devices: independent of commands, one in flight per kind. */
 function planRefresh(m, fx, kind) {
-  const r = m.plan.refresh[kind], s = m.link.status || NO_STATUS;
+  const r = m.plan.refresh[kind], s = m.link.status;
   if (!m.link.online || r.ticket || (kind === 'discover' ? s.source_discovery : s.device_discovery) === 'loading') return;
   r.ticket = ticketOf(m);
   r.error = '';
@@ -431,7 +431,7 @@ function startAdvance(m, fx) {
   if (st?.stage !== 'verifying' || l.statusSeq <= st.afterSeq) return;
   const k = st.snap;
   p.start = null;
-  if (s?.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { m.ui.errors.local = 'El destino cambió. Revisá la TV y volvé a intentar.'; return; }
+  if (s.selected_device?.id !== k.deviceId || s.device_revision !== k.deviceRevision) { m.ui.errors.local = 'El destino cambió. Revisá la TV y volvé a intentar.'; return; }
   if (!caps(m).start || !s.sources.some(x => x.id === k.sourceId) || samePlan(m)) return;
   const snap = s.catalogues?.[k.sourceId];
   if (snap?.state !== 'ready' || snap.catalogue.id !== k.catalogueId || (k.subtitleId && !snap.catalogue.entries.some(e => e.id === k.subtitleId && e.supported === true))) {
@@ -459,7 +459,7 @@ function remoteSync(m) {
   m.remote = freshRemote(key);
   if (m.ui.sheet === 'subs') m.ui.sheet = null;
 }
-const durationOf = s => finite(s?.duration) && s.duration > 0 ? s.duration : null;
+const durationOf = s => finite(s.duration) && s.duration > 0 ? s.duration : null;
 
 /** Position on the line while dragging; the real elapsed time stays frozen until release. */
 function seekDrag(m, pos) {
@@ -587,7 +587,7 @@ function capDiscard(m) {
 }
 function capFail(m, message) {
   const a = m.remote.captions.apply, s = m.link.status;
-  const partial = !!a && typeof a.prevVisible === 'boolean' && s?.subtitles_enabled !== a.prevVisible && s?.subtitles_enabled === a.want.enabled && s?.subtitle_delay_ms !== a.want.delayMs;
+  const partial = !!a && typeof a.prevVisible === 'boolean' && s.subtitles_enabled !== a.prevVisible && s.subtitles_enabled === a.want.enabled && s.subtitle_delay_ms !== a.want.delayMs;
   m.remote.captions.apply = null;
   m.ui.errors.local = `${partial ? 'La visibilidad ya cambió; la sincronía sigue sin confirmar. ' : ''}${message}${a?.kind === 'plan' ? ' Tu ajuste sigue en borrador.' : ''}`;
 }
@@ -708,7 +708,7 @@ function uiSettleFocus(m, fx) {
 }
 /** What the one problem block says, or null. The same function decides what dismissNotice dismisses. */
 function problemOf(m) {
-  const s = m.link.status || NO_STATUS, c = caps(m), u = m.ui;
+  const s = m.link.status, c = caps(m), u = m.ui;
   const stopAction = label => ({act: 'stop', label, enabled: c.stop});
   if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
   if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
@@ -734,7 +734,7 @@ function uiDismissNotice(m) {
   else e.dismissed = errorIdentity(m.link.status);
 }
 function uiScenario(m, fx, value, msg) {
-  if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
+  if (m.link.status.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
 }
 
 /** What settles each command when its confirming poll lands. `live` says whether a failed reply is still worth reporting; absent means always. */
@@ -763,8 +763,8 @@ const freshUi = () => ({
 function init(boot = {}) {
   const m = {
     nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
-    link: {status: null, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
-    plan: freshPlan(null), remote: freshRemote(playbackKey(null)), ui: freshUi(),
+    link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
+    plan: freshPlan(null), remote: freshRemote(playbackKey(NO_STATUS)), ui: freshUi(),
   };
   const fx = [];
   linkRequestPoll(m, fx);
@@ -802,29 +802,27 @@ function onTimer(m, fx, msg) {
 /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
 function reconcile(m, fx) {
   const l = m.link, s = l.status, u = m.ui, c = caps(m);
-  if (s && c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
+  if (c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
   uiValidLayers(m);
-  if (s) {
-    const mode = modeOf(m);
-    if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
-    if (mode === 'mando') u.stoppedNotice = false;
-    u.mode = mode;
-  }
-  if (u.reseed && l.online && s && !m.plan.sourceId) {
+  const mode = modeOf(m);
+  if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
+  if (mode === 'mando') u.stoppedNotice = false;
+  u.mode = mode;
+  if (u.reseed && l.online && !m.plan.sourceId) {
     u.reseed = false;
     const id = [s.source_id, u.lastSourceId].find(x => x && s.sources.some(y => y.id === x));
     if (id) planPickSource(m, fx, id);
   }
   // the flap clock ticks only while a movie plays
-  if (u.mode === 'mando' && s?.phase === 'playing' && l.online && u.clock === null) {
+  if (u.mode === 'mando' && s.phase === 'playing' && l.online && u.clock === null) {
     u.clock = ticketOf(m);
     fx.push({fx: 'timer', name: 'clock', ms: CLOCK_MS, ticket: u.clock});
   }
-  if (s?.selected_device && s.selected_device.id !== m.prefs.lastDeviceId) {
+  if (s.selected_device && s.selected_device.id !== m.prefs.lastDeviceId) {
     m.prefs.lastDeviceId = s.selected_device.id;
     fx.push({fx: 'store', key: 'cast.lastDevice', value: s.selected_device.id});
   }
-  if (s && !s.selected_device && !m.prefs.autoSelectTried && m.prefs.lastDeviceId && caps(m).changeDevice
+  if (!s.selected_device && !m.prefs.autoSelectTried && m.prefs.lastDeviceId && caps(m).changeDevice
       && s.devices?.some(d => d.id === m.prefs.lastDeviceId && d.available !== false)) {
     m.prefs.autoSelectTried = true;
     planPickDevice(m, fx, m.prefs.lastDeviceId);

@@ -71,7 +71,7 @@ function subsStatusLine(m) {
 }
 
 function viewPlan(m) {
-  const s = m.link.status || NO_STATUS, p = m.plan, c = caps(m), cat = p.catalogue, sel = s.selected_device;
+  const s = m.link.status, p = m.plan, c = caps(m), cat = p.catalogue, sel = s.selected_device;
   const can = planCanStart(m), same = samePlan(m), online = c.online, idleLoad = p.load.s === 'idle';
   const sourceError = p.refresh.discover.error || (s.source_discovery === 'error' ? s.source_error || 'Reintentá la búsqueda.' : '');
   const info = cat?.addon, stremioOff = !!cat && (!info || info.state === 'off');
@@ -116,7 +116,7 @@ function viewPlan(m) {
  * @property {string} details  host of the chosen TV, for the disclosure
  */
 function viewDestination(m) {
-  const s = m.link.status || NO_STATUS, p = m.plan, c = caps(m), sel = s.selected_device, last = m.prefs.lastDeviceId;
+  const s = m.link.status, p = m.plan, c = caps(m), sel = s.selected_device, last = m.prefs.lastDeviceId;
   const error = p.refresh.discover_devices.error || (s.device_discovery === 'error' ? s.device_error || 'Reintentá la búsqueda.' : '');
   const devices = s.devices || [], busyList = s.device_discovery === 'loading' || !!p.refresh.discover_devices.ticket;
   return {
@@ -134,7 +134,7 @@ function viewDestination(m) {
 
 /** @typedef {{kind:'replace'|'stop',title:string,body:string,accept:string,cancel:string}} ConfirmView */
 function viewConfirm(m) {
-  const k = confirmOf(m), s = m.link.status || NO_STATUS;
+  const k = confirmOf(m), s = m.link.status;
   if (!k) return null;
   if (k.kind === 'replace') return {kind: 'replace', title: '¿Cambiar la película en la TV?', body: `Vas a ver ${k.title}. Empieza desde el principio.`, accept: 'Cambiar película', cancel: 'Volver'};
   return {kind: 'stop', title: '¿Detener la película en la TV?', body: `Se corta en ${deviceLabel(s.selected_device) || 'la TV'} y volvés a elegir.`, accept: 'Detener', cancel: 'Seguir viendo'};
@@ -147,7 +147,7 @@ const WAITING_COPY = {preparing: 'Preparando la película para la TV…', buffer
 
 /** Where the flap clock reads: the last status plus the time since, capped so a stalled poll never invents a position. */
 function shownPosition(m) {
-  const s = m.link.status || NO_STATUS;
+  const s = m.link.status;
   if (!finite(s.absolute_time)) return null;
   const run = s.phase === 'playing' && m.link.online ? clamp((m.now - m.link.statusAt) / 1000, 0, CLOCK_CAP_S) : 0;
   return Math.min(s.absolute_time + run, durationOf(s) ?? Infinity);
@@ -179,7 +179,7 @@ const signedSkip = delta => `${delta < 0 ? '−' : '+'}${Math.abs(Math.round(del
  * @property {Ctl&{shown:boolean}} stop  header Detener; hidden while the page's problem block offers its own (one Detener at a time)
  */
 function viewMando(m) {
-  const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
+  const s = m.link.status, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
   const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
   const chosen = s.subtitle_choice;
   const volume = m.remote.volumePreview ?? (finite(s.volume) ? Math.round(s.volume * 100) : null);
@@ -225,7 +225,7 @@ function viewMando(m) {
  * @property {StremioView|null} stremio
  */
 function viewSubsSheet(m) {
-  const s = m.link.status || NO_STATUS, c = caps(m), srv = capServer(s), d = capDraft(m), a = m.remote.captions.apply, cat = remoteCatalogue(m);
+  const s = m.link.status, c = caps(m), srv = capServer(s), d = capDraft(m), a = m.remote.captions.apply, cat = remoteCatalogue(m);
   const row = (id, label) => ({id, label, selected: d.subtitleId === (id || null), enabled: c.captions});
   const dirty = capDirty(m);
   return {
@@ -243,7 +243,7 @@ function viewSubsSheet(m) {
 }
 /** @typedef {{kind:'more',exact:Ctl&{text:string,error:string},details:{tv:string,host:string,file:string,prepared:string},stop:Ctl&{shown:boolean}}} MoreSheetView */
 function viewMoreSheet(m) {
-  const s = m.link.status || NO_STATUS, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
+  const s = m.link.status, c = caps(m), sel = s.selected_device, b = bufferedRange(s);
   return {
     kind: 'more',
     exact: {enabled: c.transport && !!durationOf(s), text: m.ui.exact.text, error: m.ui.exact.error},
@@ -290,7 +290,7 @@ function view(m) {
     mode,
     plan: viewPlan(m), destination: viewDestination(m), confirm: viewConfirm(m),
     mando: mode === 'mando' ? viewMando(m) : null, sheet: viewSheet(m),
-    problem: viewProblem(m), demo: m.link.status?.demo === true ? {scenario: m.link.status.scenario || ''} : null,
+    problem: viewProblem(m), demo: m.link.status.demo === true ? {scenario: m.link.status.scenario || ''} : null,
     wake: mode === 'mando', restoring: m.ui.focus,
   };
 }
