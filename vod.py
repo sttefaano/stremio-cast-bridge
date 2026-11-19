@@ -360,9 +360,10 @@ class Producer:
         return None
 
     def _servable(self, index, run):
-        """On disk, and not a running run's newest segment so fresh it may be the short one a stall leaves."""
+        """On disk, and not a running run's newest segment so fresh it may be the short one a stall leaves.
+        One written since the run snapshot is at least as new."""
         complete = self.complete(index)
-        if not complete or run.state != 'running' or not run.start <= index == run.position - 1:
+        if not complete or run.state != 'running' or not max(run.start, run.position - 1) <= index < run.limit:
             return complete
         try:
             return time.time() - os.lstat(self.directory / self.layout.segment_name(index)).st_mtime >= self.fresh_seconds

@@ -515,6 +515,20 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(result, ['serve'])
                 self.assertEqual(len(self.launched), 2 if exits else 1)
 
+    def test_a_segment_written_while_a_request_is_judged_waits_out_the_same_grace(self):
+        # Seen with real FFmpeg: a stall finalized a 2.8 s segment between the run snapshot and the
+        # on-disk check, and the request was served it 2 ms after it appeared.
+        producer = self.producer(hold_seconds=.3, fresh_seconds=10)
+        producer.cover(0)
+        self.write(0, 1)
+        snapshot = producer._run
+        def written_after_the_snapshot():
+            run = snapshot()
+            self.write(2)
+            return run
+        with patch.object(producer, '_run', side_effect=written_after_the_snapshot):
+            self.assertEqual(producer.request(2), 'missing')
+
     def test_failures_without_a_new_segment_spend_a_bounded_retry_budget(self):
         producer = self.producer(backoff_seconds=0)
         producer.cover(0)
