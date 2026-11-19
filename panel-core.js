@@ -104,7 +104,6 @@ const WAITING = ['preparing', 'buffering', 'loading'], LIVE = ['playing', 'pause
 const KNOWN = new Set(['idle', 'stopped', 'ended', 'error', ...WAITING, ...LIVE, ...FOREIGN]);
 const NO_STATUS = Object.freeze({phase: 'idle', sources: []});
 const KIND_OF_BRANCH = {file: 'embedded', stremio: 'addon', upload: 'upload'};
-const STOPPING = 'Deteniendo…';
 const STOP_MOVED = 'La TV cambió o hay otra sesión. Revisá antes de detener.';
 const finite = Number.isFinite;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -119,15 +118,6 @@ function parseTime(value) {
   const parts = value.trim().split(':').map(Number);
   if (parts.slice(1).some(n => n >= 60)) return null;
   return parts.reduce((a, n) => a * 60 + n, 0);
-}
-const decimalSeconds = ms => (Math.abs(ms) / 1000).toFixed(1).replace('.', ',');
-/** '+0,4 s' with U+2212 for negatives; '—' when unknown. */
-function signedSeconds(ms) {
-  return finite(ms) ? `${ms < 0 ? '−' : '+'}${decimalSeconds(ms)} s` : '—';
-}
-function delayMeaning(ms) {
-  if (!ms) return 'Sincronizados con la voz';
-  return `Aparecen ${decimalSeconds(ms)} s ${ms > 0 ? 'después que' : 'antes que'} la voz`;
 }
 /** Always name + model so two "Sala" TVs differ. `paren` gives the button form 'Sala (Google TV)'. */
 function deviceLabel(d, paren = false) {
@@ -773,28 +763,27 @@ function uiSettleFocus(m, fx, c) {
   m.ui.focus = null;
   if (f.n === m.n) fx.push({fx: 'focus', ref: f.ref, n: f.n});
 }
-/** What the one problem block says, or null. The same function decides what dismissNotice dismisses. */
-function problemOf(m) {
-  const s = m.link.status, c = caps(m), u = m.ui;
-  const stopAction = label => ({act: 'stop', label: c.stopping ? STOPPING : label, enabled: c.stop});
-  if (!c.online) return {kind: 'offline', title: 'Sin conexión con el puente', body: u.errors.local?.lost ? u.errors.local.text : 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', action: null};
-  if (!KNOWN.has(s.phase)) return {kind: 'unknown', title: 'Estado desconocido de la TV', body: 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', action: stopAction('Detener')};
-  if (s.phase === 'receiver_changed') return {kind: 'foreign', title: 'Hay otro contenido en la TV', body: 'Este mando no lo controla. Detené para volver a elegir.', action: stopAction('Detener y volver a elegir')};
-  if (s.phase === 'disconnected') return {kind: 'disconnected', title: 'TV no disponible', body: 'Se perdió la conexión con la TV. Detené para volver a elegir.', action: stopAction('Detener')};
-  if (s.phase === 'error') return {kind: 'failed', title: 'No se pudo completar la acción', body: s.message || 'Revisá la película y volvé a intentar.', action: s.can_change_device === false ? stopAction('Detener') : null};
-  const say = u.errors.local?.text ?? backendError(m);
-  if (say) return {kind: 'notice', title: 'No se pudo completar la acción', body: say, action: {act: 'dismissNotice', label: 'Entendido', enabled: true}};
-  if (u.stoppedNotice) return {kind: 'stopped', title: `Película detenida en ${u.lastDeviceLabel || 'la TV'}`, body: '', action: {act: 'dismissNotice', label: 'Cerrar', enabled: true}};
-  return null;
+/**
+ * The one problem block's kind, or null, in priority order. The same rule decides what dismissNotice dismisses.
+ * @returns {'offline'|'unknown'|'foreign'|'disconnected'|'failed'|'notice'|'stopped'|null}
+ */
+function problemKind(m) {
+  const s = m.link.status, u = m.ui;
+  if (!m.link.online) return 'offline';
+  if (!KNOWN.has(s.phase)) return 'unknown';
+  if (s.phase === 'receiver_changed') return 'foreign';
+  if (s.phase === 'disconnected') return 'disconnected';
+  if (s.phase === 'error') return 'failed';
+  if (u.errors.local || backendError(m)) return 'notice';
+  return u.stoppedNotice ? 'stopped' : null;
 }
-const problemOffersStop = m => problemOf(m)?.action?.act === 'stop';
 /** The server's action_error, unless dismissed, absorbed by a caption apply that reported it, or an apply is still pending. */
 function backendError(m) {
   const s = m.link.status, id = errorIdentity(s), e = m.ui.errors;
   return id && id !== e.dismissed && id !== e.absorbed && !m.remote.captions.apply ? s.action_error : null;
 }
 function uiDismissNotice(m) {
-  const kind = problemOf(m)?.kind, e = m.ui.errors;
+  const kind = problemKind(m), e = m.ui.errors;
   if (kind !== 'notice' && kind !== 'stopped') return;
   if (kind === 'stopped') m.ui.stoppedNotice = false;
   else if (e.local !== null) e.local = null;

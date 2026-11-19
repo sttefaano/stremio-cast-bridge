@@ -28,7 +28,16 @@
  * @property {string} status
  */
 const trackLabel = e => [e.label || 'Pista sin nombre', e.language].filter(Boolean).join(' · ');
-const stopLabel = (c, label) => c.stopping ? STOPPING : label;
+const stopLabel = (c, label) => c.stopping ? 'Deteniendo…' : label;
+const decimalSeconds = ms => (Math.abs(ms) / 1000).toFixed(1).replace('.', ',');
+/** '+0,4 s' with U+2212 for negatives; '—' when unknown. */
+function signedSeconds(ms) {
+  return finite(ms) ? `${ms < 0 ? '−' : '+'}${decimalSeconds(ms)} s` : '—';
+}
+function delayMeaning(ms) {
+  if (!ms) return 'Sincronizados con la voz';
+  return `Aparecen ${decimalSeconds(ms)} s ${ms > 0 ? 'después que' : 'antes que'} la voz`;
+}
 const SUBS_BRANCHES = [['none', 'Sin'], ['file', 'Del archivo'], ['stremio', 'Stremio'], ['upload', 'Subir']];
 
 function viewStremio(m, scope) {
@@ -283,9 +292,23 @@ function viewSheet(m) {
  * @property {{ref:string,n:number}|null} restoring  a command is in flight and focus will return to control `ref`; keyMsg swallows keys meanwhile
  */
 function viewProblem(m) {
-  const p = problemOf(m);
-  return p && {...p, host: m.ui.sheet ? 'sheet' : 'page'};
+  const kind = problemKind(m), s = m.link.status, c = caps(m), u = m.ui;
+  if (!kind) return null;
+  const stop = label => ({act: 'stop', label: stopLabel(c, label), enabled: c.stop});
+  const dismiss = label => ({act: 'dismissNotice', label, enabled: true});
+  const block = {
+    offline: () => ['Sin conexión con el puente', u.errors.local?.lost ? u.errors.local.text : 'No podemos confirmar qué pasa en la TV. Seguimos intentando.', null],
+    unknown: () => ['Estado desconocido de la TV', 'Este mando no entiende lo que pasa en la TV. Detené para volver a elegir.', stop('Detener')],
+    foreign: () => ['Hay otro contenido en la TV', 'Este mando no lo controla. Detené para volver a elegir.', stop('Detener y volver a elegir')],
+    disconnected: () => ['TV no disponible', 'Se perdió la conexión con la TV. Detené para volver a elegir.', stop('Detener')],
+    failed: () => ['No se pudo completar la acción', s.message || 'Revisá la película y volvé a intentar.', s.can_change_device === false ? stop('Detener') : null],
+    notice: () => ['No se pudo completar la acción', u.errors.local?.text ?? backendError(m), dismiss('Entendido')],
+    stopped: () => [`Película detenida en ${u.lastDeviceLabel || 'la TV'}`, '', dismiss('Cerrar')],
+  };
+  const [title, body, action] = block[kind]();
+  return {kind, title, body, action, host: u.sheet ? 'sheet' : 'page'};
 }
+const problemOffersStop = m => viewProblem(m)?.action?.act === 'stop';
 function view(m) {
   const mode = modeOf(m);
   return {
