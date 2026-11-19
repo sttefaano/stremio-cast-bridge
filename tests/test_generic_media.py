@@ -7,7 +7,7 @@ import time
 from unittest.mock import patch
 from pathlib import Path
 
-from bridge import FFMPEG, probe, ffmpeg_command
+from bridge import FFMPEG, probe, ffmpeg_command, write_file_cues
 from bridge import Bridge, arguments
 from media import Analysis, Catalogue, PlaybackPlan, Subtitle, SetupCatalogue, MediaError, analyse, normalize_subtitles
 from vod import VodLayout
@@ -74,6 +74,55 @@ class CatalogueTest(unittest.TestCase):
         bridge._scan_loop(scans, wake)
         self.assertEqual(scans.call_count, 2)
         self.assertEqual(waits, [30, 30])
+
+    def test_explicit_cli_startup_retries_on_a_later_scan_that_finds_the_device(self):
+        from test_device_selector import DeviceSelectorTest
+        from backend_fixtures import seed_plan
+        for first in ('empty', 'error'):
+            with self.subTest(first=first):
+                bridge = DeviceSelectorTest().fixture()
+                bridge.args = arguments(['--device-name', 'Sala', '--autostart'])
+                info = DeviceSelectorTest().info()
+                source = dict(id='source', url='synthetic', title='Synthetic')
+                bridge.sources = [source]
+                bridge.source_snapshot['source_discovery'] = 'ready'
+                seed_plan(bridge, source)
+                attempts, started = [], threading.Event()
+                original = bridge.submit
+                def submit(action, data, expected_generation=None):
+                    original(action, data, expected_generation)
+                    if action == 'configure_device':
+                        attempts.append(action)
+                        action, payload, _ = bridge.jobs.get_nowait()
+                        try:
+                            bridge.mutate(action, payload)
+                        except MediaError:
+                            pass
+                        bridge.update(command_pending=False)
+                    elif action == 'start':
+                        started.set()
+                if first == 'empty':
+                    with patch('bridge.discover_receivers', return_value=[]):
+                        bridge.scan_devices()
+                else:
+                    with patch('bridge.discover_receivers', side_effect=OSError('mDNS unavailable')), \
+                         self.assertRaises(MediaError):
+                        bridge.scan_devices()
+                with patch.object(bridge, 'submit', side_effect=submit):
+                    startup = threading.Thread(target=bridge._configured_startup, daemon=True)
+                    startup.start()
+                    time.sleep(.3)
+                    self.assertEqual(len(attempts), 1 if first == 'empty' else 0)
+                    with patch('bridge.discover_receivers', return_value=[info]):
+                        bridge.scan_devices()
+                    self.assertTrue(started.wait(5))
+                    startup.join(5)
+                self.assertFalse(startup.is_alive())
+                self.assertEqual(len(attempts), 2 if first == 'empty' else 1)
+                self.assertEqual(bridge.status()['selected_device']['id'], str(info.uuid))
+                action, payload, _ = bridge.jobs.get_nowait()
+                self.assertEqual(action, 'start')
+                self.assertEqual(payload['source_id'], 'source')
 
     def test_upload_plain_vtt_preserves_text_and_validates_cue_settings(self):
         from demo import DemoBridge
@@ -638,12 +687,14 @@ class GenericProducerTest(unittest.TestCase):
                     plan = store.resolve('source', catalogue['id'], upload['entry']['id'], 0, True)
                     session = sessions / f'session-{format}'
                     session.mkdir()
+                    write_file_cues(session, plan)
                     result = subprocess.run(ffmpeg_command(str(source), session, plan,
                         start_index=2, duration=12, readrate=1000), capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
-                    # The restart at 12 s clips Crossing to its first segment; times are movie times.
-                    for delay, expected in [(500, {'Crossing': (12.5, 15.5), 'Early': (12.7, 12.9), 'Future': (13.5, 17.5)}),
-                                            (-500, {'Crossing': (11.5, 14.5), 'Early': (11.7, 11.9), 'Future': (12.5, 16.5)})]:
+                    # The restart at 12 s drops Crossing; the served cues come from the track itself, at movie time.
+                    for delay, expected in [(500, {'Past': (7.5, 11.5), 'Crossing': (11.5, 15.5), 'Early': (12.7, 12.9), 'Future': (13.5, 17.5)}),
+                                            (-500, {'Past': (6.5, 10.5), 'Crossing': (10.5, 14.5), 'Early': (11.7, 11.9), 'Future': (12.5, 16.5)}),
+                                            (2000, {'Past': (9, 13), 'Crossing': (13, 17), 'Early': (14.2, 14.4), 'Future': (15, 19)})]:
                         with self.subTest(format=format, delay=delay), \
                                 media_server(sessions, finished_producer(session, 24)) as fetch:
                             cues = served_cues(fetch, session.name, delay)

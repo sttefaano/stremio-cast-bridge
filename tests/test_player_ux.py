@@ -142,7 +142,6 @@ class CancellationTest(unittest.TestCase):
         self.assertEqual(b.status()['phase'], 'error')
 
     def test_stop_at_connect_invocation_fences_uncommitted_discovery(self):
-        import sys
         import tempfile
         from pathlib import Path
         from test_bridge import RestartPolicyTest
@@ -151,23 +150,20 @@ class CancellationTest(unittest.TestCase):
             b.cast = None
             b.jobs = queue.Queue()
             b.args.device_name, b.args.device_host = 'Fixture', None
+            b.devices = {'fixture-device': SimpleNamespace(uuid='fixture-device', cast_type='cast', friendly_name='Fixture', host='192.0.2.2', model_name='Chromecast')}
             b.device_revision = 1
-            boundary = next(i for i, line in enumerate(Path('bridge.py').read_text().splitlines(), 1)
-                            if line.strip().startswith('self.connect('))
-            def schedule(frame, event, arg):
-                if frame.f_code is Bridge.begin.__code__ and event == 'line' and frame.f_lineno == boundary:
-                    b.submit('stop', {'device_id':'fixture-device', 'device_revision':1, })
-                return schedule
-            with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
+            connect = Bridge.connect
+            def stop_then_connect(bridge, *args, **kwargs):
+                b.submit('stop', {'device_id':'fixture-device', 'device_revision':1})
+                return connect(bridge, *args, **kwargs)
+            with patch.object(Bridge, 'connect', autospec=True, side_effect=stop_then_connect) as connecting, \
                  patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)), \
                  patch('bridge.discover_receivers', side_effect=AssertionError('cancelled scan forbidden')) as discovery, \
+                 patch('pychromecast.dial.get_device_info', side_effect=AssertionError('cancelled connection forbidden')), \
                  patch('bridge.subprocess.Popen') as launch:
-                sys.settrace(schedule)
-                try:
-                    with self.assertRaises(PreparationCancelled):
-                        b.mutate('start', start_data(b))
-                finally:
-                    sys.settrace(None)
+                with self.assertRaises(PreparationCancelled):
+                    b.mutate('start', start_data(b))
+                connecting.assert_called_once()
                 discovery.assert_not_called()
                 launch.assert_not_called()
 
@@ -199,8 +195,7 @@ class CancellationTest(unittest.TestCase):
                 b.submit('stop', {'device_id':'fixture-device', 'device_revision':1, })
                 self.assertTrue(b.status()['command_pending'])
                 accepted.set()
-            with patch('bridge.probe', return_value=([0, 1, 2], 120)), \
-                 patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)), \
+            with patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)), \
                   patch('bridge.discover_receivers', side_effect=AssertionError('no scan on connect')), \
                   patch('pychromecast.dial.get_device_info', side_effect=endpoint), \
                  patch('bridge.subprocess.Popen') as launch:
