@@ -175,16 +175,19 @@ const Panel = (() => {
    * @property {boolean} stopNeedsConfirm
    * @property {boolean} changeDevice
    * @property {boolean} start  the TV can take a Start now; planCanStart says whether the plan is complete
+   * @property {Record<'subs'|'more'|'change',{open:boolean,keep:boolean}>} sheets  open: may open now; keep: an open one stays (offline keeps it)
    */
   /** @param {Model} m @returns {Caps} */
   function caps(m) {
     const l = m.link, s = l.status || NO_STATUS, online = l.online && !!l.status;
     const unknown = !KNOWN.has(s.phase), foreign = FOREIGN.includes(s.phase) || unknown;
     const busy = !!l.command || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
-    const live = LIVE.includes(s.phase);
+    const live = LIVE.includes(s.phase), owned = modeOf(m) === 'mando';
     const transport = online && live && !busy;
+    const subs = !!s.playback_id && !!remoteCatalogue(m) && !foreign, change = owned && !foreign;
     return {
-      online, busy, foreign, owned: modeOf(m) === 'mando', transport,
+      online, busy, foreign, owned, transport,
+      sheets: {subs: {open: online && subs, keep: subs}, more: {open: owned, keep: owned}, change: {open: online && change, keep: change}},
       captions: transport && !!s.playback_id && !!s.active_catalogue && !m.remote.captions.apply,
       stop: online && (s.can_change_device === false || busy || live || WAITING.includes(s.phase) || foreign || s.phase === 'error'),
       stopNeedsConfirm: live && !busy,
@@ -827,14 +830,8 @@ const Panel = (() => {
   const confirmOf = m => m.ui.confirm ?? (m.remote.stop?.s === 'asking' ? {kind: 'stop'} : null);
   /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
   function uiOpen(m, sheet) {
-    const s = m.link.status || NO_STATUS, c = caps(m);
-    if (confirmOf(m)) return;
-    if (sheet === 'subs' && !(s.playback_id && remoteCatalogue(m) && c.online && !c.foreign)) return;
-    if (sheet === 'more' && !c.owned) return;
-    if (sheet === 'change') {
-      if (!c.owned || c.foreign || !c.online) return;
-      planReset(m, null);
-    }
+    if (confirmOf(m) || !caps(m).sheets[sheet].open) return;
+    if (sheet === 'change') planReset(m, null);
     if (sheet === 'more') m.ui.exact = {text: '', error: ''};
     m.ui.sheet = sheet;
   }
@@ -870,10 +867,11 @@ const Panel = (() => {
   }
   /** Layers can't outlive the permission that opened them. */
   function uiValidLayers(m) {
-    const u = m.ui, s = m.link.status || NO_STATUS, c = caps(m);
-    if (u.sheet === 'subs' && !(s.playback_id && remoteCatalogue(m)) || u.sheet === 'subs' && c.foreign) u.sheet = null;
-    if ((u.sheet === 'more' || u.sheet === 'change') && !c.owned) u.sheet = null;
-    if (u.sheet === 'change' && c.foreign) { u.sheet = null; planReset(m, null); }
+    const u = m.ui, c = caps(m);
+    if (u.sheet && !c.sheets[u.sheet].keep) {
+      if (u.sheet === 'change') planReset(m, null);
+      u.sheet = null;
+    }
     if (u.confirm && c.foreign) u.confirm = null;
     if (m.remote.stop?.s === 'asking' && !c.stop) m.remote.stop = null;
   }
@@ -1204,7 +1202,7 @@ const Panel = (() => {
   function viewMando(m) {
     const s = m.link.status || NO_STATUS, c = caps(m), k = m.remote.seek, sel = s.selected_device, d = durationOf(s);
     const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
-    const chosen = s.subtitle_choice, hasCaptions = !!s.playback_id && !!remoteCatalogue(m);
+    const chosen = s.subtitle_choice;
     const volume = m.remote.volumePreview ?? (finite(s.volume) ? Math.round(s.volume * 100) : null);
     const spinner = waiting || !!m.link.command || !!s.command_pending;
     return {
@@ -1226,10 +1224,10 @@ const Panel = (() => {
       volume: {enabled: c.transport && finite(s.volume), percent: volume, text: volume === null ? '—' : `${volume}%`},
       mute: {enabled: c.transport && typeof s.muted === 'boolean', pressed: s.muted === true, label: s.muted ? 'Activar sonido' : 'Silenciar'},
       chip: {
-        enabled: c.online && !c.foreign && hasCaptions, unapplied: capDirty(m),
+        enabled: c.sheets.subs.open, unapplied: capDirty(m),
         label: !srv.subtitleId ? 'Sin subtítulos' : `${chosen?.label || 'Subtítulos'} · ${srv.enabled ? signedSeconds(srv.delayMs) : 'ocultos'}`,
       },
-      more: {enabled: c.owned}, change: {enabled: c.owned && !c.foreign && c.online}, stop: {enabled: c.stop, shown: !problemOffersStop(m)},
+      more: {enabled: c.sheets.more.open}, change: {enabled: c.sheets.change.open}, stop: {enabled: c.stop, shown: !problemOffersStop(m)},
     };
   }
 

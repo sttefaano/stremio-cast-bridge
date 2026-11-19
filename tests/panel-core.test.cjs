@@ -1634,6 +1634,20 @@ test('layers cannot outlive the permission that opened them', () => {
   assert.equal(subs.view.sheet, null, 'and it cannot be reopened');
 });
 
+test('offline keeps an open subtitle or change sheet, but neither opens', () => {
+  for (const [act, kind] of [['openSubs', 'subs'], ['openChange', 'change']]) {
+    const open = panel(playing);
+    open.tap(act);
+    offline(open);
+    assert.equal(open.view.sheet?.kind, kind, `${kind} stays open offline`);
+    const closed = panel(playing);
+    offline(closed);
+    closed.tap(act);
+    assert.equal(closed.view.sheet, null, `${kind} does not open offline`);
+    assert.equal(closed.view.mando[kind === 'subs' ? 'chip' : 'change'].enabled, false);
+  }
+});
+
 test('a confirm blocks opening another layer', () => {
   const p = panel(playing);
   p.tap('stop');
