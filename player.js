@@ -1155,7 +1155,7 @@ const Panel = (() => {
       note: !sel ? '' : s.phase === 'disconnected' ? 'No disponible' : error ? 'Lista sin confirmar' : sel.available || LIVE.includes(s.phase) ? '' : 'No disponible',
       status: error ? `No se pudo actualizar la lista de TVs. Usá Actualizar para reintentar. ${error}`
         : busyList ? 'Buscando TVs…' : devices.length ? '' : s.device_discovery === 'ready' ? 'No encontramos ninguna TV. Revisá que esté encendida y en la misma red, y actualizá.' : 'Buscando TVs…',
-      rows: devices.map(d => ({id: d.id, label: deviceLabel(d), note: d.host || '', selected: d.id === sel?.id, enabled: c.changeDevice, ...(d.id === last ? {tag: 'Última usada'} : {})})),
+      rows: devices.map(d => ({id: d.id, label: deviceLabel(d), selected: d.id === sel?.id, enabled: c.changeDevice, ...(d.id === last ? {tag: 'Última usada'} : {})})),
       refresh: {enabled: c.online && !busyList},
       rule: s.can_change_device === false ? 'Primero detené la película para cambiar de TV.' : '',
       stop: {shown: s.can_change_device === false, enabled: c.stop},
@@ -1532,7 +1532,7 @@ function paintDestination(doc, v) {
   const d = v.destination, name = byId(doc, 'device-name');
   put(name, 'textContent', d.label);
   put(name, 'hidden', d.rows.some(r => r.selected));
-  paintList(byId(doc, 'device-list'), d.rows.map(r => ({...r, note: ''})));
+  paintList(byId(doc, 'device-list'), d.rows);
   put(byId(doc, 'device-note'), 'textContent', d.note);
   put(byId(doc, 'device-status'), 'textContent', d.status);
   put(byId(doc, 'device-rule'), 'textContent', d.rule); put(byId(doc, 'device-rule'), 'hidden', !d.rule);
