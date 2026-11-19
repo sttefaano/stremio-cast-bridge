@@ -1296,8 +1296,24 @@ class Bridge:
 
 
 FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
-FONTS = {f'/fonts/{n}': (ROOT / 'fonts' / n).read_bytes() for n in FONT_NAMES if (ROOT / 'fonts' / n).is_file()}
-PANEL = (ROOT / "player.html").read_text().replace("__SCRIPT__", (ROOT / "player.js").read_text())
+
+
+def build_panel(root):
+    """The panel page and its fonts by URL. A font's URL names its bytes, so a cached copy is never stale."""
+    html = (root / 'player.html').read_text().replace('__SCRIPT__', (root / 'player.js').read_text())
+    fonts = {}
+    for name in FONT_NAMES:
+        payload = (root / 'fonts' / name).read_bytes()
+        stem, ext = name.rsplit('.', 1)
+        url = f'/fonts/{stem}.{hashlib.sha256(payload).hexdigest()[:16]}.{ext}'
+        if f'/fonts/{name}' not in html:
+            raise RuntimeError(f'player.html no usa /fonts/{name}')
+        html = html.replace(f'/fonts/{name}', url)
+        fonts[url] = payload
+    return html, fonts
+
+
+PANEL, FONTS = build_panel(ROOT)
 
 
 class MediaHandler(BaseHTTPRequestHandler):
@@ -1389,23 +1405,18 @@ class ControlHandler(BaseHTTPRequestHandler):
     def trusted_host(self):
         return self.headers.get('Host') == f'127.0.0.1:{self.server.server_port}'
 
-    def reply(self, code, body, content_type='application/json'):
-        payload = body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode()
+    def reply(self, code, body, content_type='application/json', cache='no-store'):
+        if isinstance(body, bytes):
+            payload = body
+        else:
+            payload = body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode()
+            content_type += '; charset=utf-8'
         self.send_response(code)
-        self.send_header('Content-Type', content_type + '; charset=utf-8')
+        self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def reply_font(self, payload):
-        self.send_response(200)
-        self.send_header('Content-Type', 'font/woff2')
-        self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
-        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(payload)
 
@@ -1413,7 +1424,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         if not self.trusted_host():
             self.reply(403, {})
         elif self.path in FONTS:
-            self.reply_font(FONTS[self.path])
+            self.reply(200, FONTS[self.path], 'font/woff2', 'public, max-age=31536000, immutable')
         elif self.path == '/':
             panel = PANEL.replace('__TOKEN__', self.server.token)
             self.reply(200, panel, 'text/html')

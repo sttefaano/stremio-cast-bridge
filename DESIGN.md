@@ -176,8 +176,10 @@ A cold graphite platform with warm off-white ink and exactly one hot color. Cont
 
 ## Typography
 
-**Display and body font:** Archivo (variable, 100 to 900 weight, 62 to 125% width), falling back to Arial Narrow then system-ui. Served from `/fonts/archivo.woff2`.
-**Label and readout font:** JetBrains Mono, falling back to ui-monospace and Menlo. Served from `/fonts/jetbrains-mono.woff2`.
+**Display and body font:** Archivo (variable, 100 to 900 weight, 62 to 125% width), falling back to Arial Narrow then system-ui. Stored in `fonts/archivo.woff2`.
+**Label and readout font:** JetBrains Mono, falling back to ui-monospace and Menlo. Stored in `fonts/jetbrains-mono.woff2`.
+
+The bridge serves each font at a URL carrying a hash of its bytes, such as `/fonts/archivo.<sha256 prefix>.woff2`, and caches it as immutable. Changing a font file changes its URL, so a browser never keeps a stale copy.
 
 **Character:** Archivo is pulled into its condensed widths (75 to 90%) for titles and choices, which gives the signage feel of a departures board at 22 to 28px without a second display face. Mono carries every figure, time, host and system status, always with tabular numerals.
 

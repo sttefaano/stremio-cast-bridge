@@ -1,10 +1,15 @@
+import hashlib
 import http.client
+import re
+import shutil
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 from unittest.mock import Mock
 
-from bridge import ROOT, ControlHandler
+from bridge import ROOT, ControlHandler, build_panel
 
 
 class PanelFontsTest(unittest.TestCase):
@@ -39,22 +44,41 @@ class PanelFontsTest(unittest.TestCase):
         self.assertIn("font-src 'self'", csp)
         self.assertIn("default-src 'none'", csp)
 
-    def test_fonts_are_served_immutable_with_exact_bytes(self):
-        for name in ('archivo.woff2', 'jetbrains-mono.woff2'):
-            res, body = self.get(f'/fonts/{name}')
+    def font_urls(self):
+        _, page = self.get('/')
+        return dict(re.findall(r'url\((/fonts/([a-z-]+)\.[0-9a-f]+\.woff2)\)', page.decode()))
+
+    def test_fonts_are_served_immutable_at_a_url_that_names_their_bytes(self):
+        urls = self.font_urls()
+        self.assertEqual(sorted(urls.values()), ['archivo', 'jetbrains-mono'])
+        for url, stem in urls.items():
+            payload = (ROOT / 'fonts' / f'{stem}.woff2').read_bytes()
+            self.assertIn(hashlib.sha256(payload).hexdigest()[:16], url)
+            res, body = self.get(url)
             self.assertEqual(res.status, 200)
             self.assertEqual(res.getheader('Content-Type'), 'font/woff2')
             self.assertEqual(res.getheader('Cache-Control'), 'public, max-age=31536000, immutable')
             self.assertEqual(res.getheader('X-Content-Type-Options'), 'nosniff')
             self.assertEqual(res.getheader('Content-Length'), str(len(body)))
-            self.assertEqual(body, (ROOT / 'fonts' / name).read_bytes())
+            self.assertEqual(body, payload)
             self.assertEqual(body[:4], b'wOF2')
 
     def test_other_font_paths_are_not_found(self):
-        for path in ('/fonts/../bridge.py', '/fonts/other.woff2', '/fonts/', '/fonts/archivo.woff2?x=1'):
+        url = next(iter(self.font_urls()))
+        for path in ('/fonts/../bridge.py', '/fonts/other.woff2', '/fonts/', '/fonts/archivo.woff2', url + '?x=1', url.replace('.woff2', '0.woff2')):
             res, body = self.get(path)
             self.assertEqual(res.status, 404, path)
             self.assertEqual(body, b'{}')
+
+    def test_a_missing_font_fails_when_the_panel_is_built(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('player.html', 'player.js'):
+                shutil.copy(ROOT / name, root / name)
+            (root / 'fonts').mkdir()
+            shutil.copy(ROOT / 'fonts' / 'archivo.woff2', root / 'fonts' / 'archivo.woff2')
+            with self.assertRaises(FileNotFoundError):
+                build_panel(root)
 
     def test_wrong_host_is_forbidden(self):
         res, _ = self.get('/fonts/archivo.woff2', host='localhost:%d' % self.port)
