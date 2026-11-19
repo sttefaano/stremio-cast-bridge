@@ -128,9 +128,8 @@ const Panel = (() => {
     ? JSON.stringify([s.selected_device?.id ?? null, s.device_revision ?? null, s.source_id ?? null, s.playback_id ?? null, s.session ?? null, s.subtitle_choice ?? null]) : null;
   const parseStatus = raw => raw && typeof raw === 'object' && typeof raw.phase === 'string' && Array.isArray(raw.sources) ? raw : null;
   const addonRevision = c => c?.addon?.revision ?? 0;
-  /** True when `a` carries strictly more than `b` for the same catalogue id. */
-  const richer = (a, b) => a.entries.length >= b.entries.length && addonRevision(a) >= addonRevision(b)
-    && (a.entries.length > b.entries.length || addonRevision(a) > addonRevision(b));
+  /** `a` may replace `b`: the same catalogue id with no fewer entries and no older addon revision. */
+  const notOlder = (a, b) => !!a && !!b && a.id === b.id && a.entries.length >= b.entries.length && addonRevision(a) >= addonRevision(b);
   /** {ok:true,text} | {ok:false,message}. Decodes the bytes strictly, so a non-UTF-8 file is refused instead of turned into U+FFFD. */
   function decodeSubtitle(bytes) {
     if (!bytes || bytes.byteLength > MAX_UPLOAD) return {ok: false, message: 'El archivo supera 1 MiB.'};
@@ -342,9 +341,9 @@ const Panel = (() => {
     const p = m.plan, cur = p.catalogue;
     if (!cat || cat.source_id !== p.sourceId) return false;
     if (cur?.id === cat.id) {
-      if (cat.entries.length < cur.entries.length || addonRevision(cat) < addonRevision(cur)) return false;
+      if (!notOlder(cat, cur)) return false;
       p.catalogue = cat;
-      return richer(cat, cur);
+      return !notOlder(cur, cat);
     }
     if (cur) {
       p.choice = {branch: 'none', entryId: null};
@@ -483,7 +482,7 @@ const Panel = (() => {
   /** The newer of the server's active catalogue and what a lookup or download returned since. */
   function remoteCatalogue(m) {
     const a = m.link.status?.active_catalogue ?? null, o = m.remote.overlay;
-    return a && o && o.id === a.id && o.entries.length >= a.entries.length && addonRevision(o) >= addonRevision(a) ? o : a;
+    return notOlder(o, a) ? o : a;
   }
   function addonCtx(m, scope) {
     const c = caps(m), s = m.link.status || NO_STATUS;
@@ -507,8 +506,7 @@ const Panel = (() => {
       addon: r.addon, catalogue: remoteCatalogue(m), shown: m.ui.sheet === 'subs', when: 'Se usará solo al aplicar.',
       canAct: c.online && !c.foreign && !!s.playback_id && !r.captions.apply,
       accept(cat, entry) {
-        const cur = remoteCatalogue(m);
-        if (!cur || cat?.id !== cur.id || cat.entries.length < cur.entries.length || addonRevision(cat) < addonRevision(cur)) return false;
+        if (!notOlder(cat, remoteCatalogue(m))) return false;
         r.overlay = cat;
         if (!entry) return true;
         if (!entryOf(cat, entry.id)?.supported) return false;
