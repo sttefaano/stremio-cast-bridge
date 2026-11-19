@@ -476,7 +476,7 @@ dialog::backdrop{background:rgba(6,7,8,.72)}
 <dialog id="sheet" aria-labelledby="sheet-title">
   <header class="sheet-h">
     <h2 id="sheet-title"></h2>
-    <button id="sheet-close" type="button" data-act="closeSheet" aria-label="Cerrar"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <button id="sheet-close" type="button" data-act="dismiss" aria-label="Cerrar"><svg class="ico" aria-hidden="true"><use href="#i-close"/></svg></button>
   </header>
   <div class="sbody">
     <div id="sheet-problem-slot"></div>
@@ -541,7 +541,7 @@ dialog::backdrop{background:rgba(6,7,8,.72)}
   <p id="confirm-body"></p>
   <div class="btns">
     <button id="confirm-accept" type="button" class="btn-y" data-act="confirmAccept"></button>
-    <button id="confirm-cancel" type="button" class="quiet" data-act="confirmCancel" autofocus></button>
+    <button id="confirm-cancel" type="button" class="quiet" data-act="dismiss" autofocus></button>
   </div>
 </dialog>
 

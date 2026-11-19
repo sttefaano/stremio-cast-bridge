@@ -452,13 +452,11 @@ test('a Start waiting for its fresh poll survives a failed poll and starts once 
 });
 
 test('stop with Seguir viendo or Escape sends nothing', () => {
-  for (const act of ['confirmCancel', 'dismiss']) {
-    const p = panel(playing);
-    p.tap('stop');
-    p.tap(act);
-    assert.equal(p.view.confirm, null);
-    assert.equal(p.posts().length + p.polls(), 0, act);
-  }
+  const p = panel(playing);
+  p.tap('stop');
+  p.tap('dismiss');
+  assert.equal(p.view.confirm, null);
+  assert.equal(p.posts().length + p.polls(), 0);
 });
 
 test('preparation, a foreign receiver and an error stop at once with device and playback identity', () => {

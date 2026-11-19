@@ -661,7 +661,7 @@ function uiOpen(m, sheet) {
   if (sheet === 'more') m.ui.exact = {text: '', error: ''};
   m.ui.sheet = sheet;
 }
-/** dismiss (Escape, backdrop), confirmCancel, closeSheet: close the TOP layer only; any dismissal cancels a pending start. */
+/** Escape, the backdrop, the sheet close button and the confirm cancel: close the TOP layer only; any dismissal cancels a pending start. */
 function uiDismiss(m) {
   const u = m.ui;
   if (u.confirm) { planTouch(m); return; }
@@ -877,9 +877,7 @@ const ACTS = Object.freeze({
   openSubs: m => uiOpen(m, 'subs'),
   openMore: m => uiOpen(m, 'more'),
   openChange: m => uiOpen(m, 'change'),
-  closeSheet: uiDismiss,
   dismiss: uiDismiss,
-  confirmCancel: uiDismiss,
   confirmAccept: uiConfirmAccept,
 });
 

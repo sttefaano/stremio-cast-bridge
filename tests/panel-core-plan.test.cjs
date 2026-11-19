@@ -215,12 +215,11 @@ test('replacement consent cannot be reused for a different source or session', (
   assert.equal(p.posted('start').body.source_id, 'b');
 });
 
-test('a pending Start dies on any plan edit, Cancelar, Escape, sheet close or new catalogue id', () => {
+test('a pending Start dies on any plan edit, a dismissal or new catalogue id', () => {
   const edits = {
     'subtitle branch': p => p.tap('subsBranch', 'file'),
     'other movie': p => p.tap('pickSource', 'b'),
-    'Escape': p => p.tap('dismiss'),
-    'closeSheet': p => p.tap('closeSheet'),
+    'dismiss': p => p.tap('dismiss'),
     'refreshCatalogue': p => p.tap('refreshCatalogue'),
     'new catalogue id': p => p.send({t: 'status', ...(() => { const f = p.pending.find(e => e.fx === 'poll'); return {gen: f.gen, seq: f.seq}; })(), ok: true, raw: fixture({...idle, catalogues: undefined})}),
   };
@@ -240,7 +239,7 @@ test('a Start waiting in a replacement confirm dies with Volver', () => {
   p.tap('openChange');
   choose(p, 'b');
   p.tap('start');
-  p.tap('confirmCancel');
+  p.tap('dismiss');
   assert.equal(p.view.confirm, null);
   p.fire('poll');
   p.status(playing);

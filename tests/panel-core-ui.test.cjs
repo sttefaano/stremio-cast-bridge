@@ -444,10 +444,10 @@ test('keys stay off in Preparar and while a confirm or any sheet except the subt
   const p = panel(playing);
   p.tap('stop');
   for (const k of [' ', 'ArrowLeft', 'm', 'z']) assert.equal(key(p, k), null, 'confirm open');
-  p.tap('confirmCancel');
+  p.tap('dismiss');
   p.tap('openMore');
   for (const k of [' ', 'ArrowLeft', 'm', 'z', 'x']) assert.equal(key(p, k), null, 'Más open');
-  p.tap('closeSheet');
+  p.tap('dismiss');
   p.tap('openSubs');
   assert.equal(key(p, ' '), null);
   assert.equal(key(p, 'ArrowLeft'), null);
@@ -509,7 +509,7 @@ test('every message the page can send is a handler in ACTS; an unknown or inheri
     'stremioLanguage', 'stremioVersion', 'stremioUse', 'stremioRetry', 'stremioWrong', 'stremioAlt', 'stremioSearch', 'start',
     'toggle', 'skip', 'dragSeek', 'dropSeek', 'seekAbandon', 'volumePreview', 'volume', 'mute', 'stop', 'openSubs', 'openMore', 'openChange',
     'capTrack', 'capVisible', 'capNudge', 'capReset', 'capApply', 'capDiscard', 'exactInput', 'gotoTime',
-    'closeSheet', 'dismiss', 'confirmAccept', 'confirmCancel', 'dismissNotice', 'scenario'];
+    'dismiss', 'confirmAccept', 'dismissNotice', 'scenario'];
   for (const name of names) assert.equal(typeof Panel.ACTS[name], 'function', name);
   assert.deepEqual(Object.keys(Panel.ACTS).sort(), [...names].sort(), 'no handler without a name in the contract');
   const p = panel(playing);
