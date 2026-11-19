@@ -26,7 +26,7 @@
  */
 /**
  * @typedef {{text:string,code:string|null}} CommandError
- * @typedef {{ticket:Ticket,action:string,joins:string|null}&({stage:'posting'}|{stage:'confirming',ok:boolean,error:CommandError|null,afterSeq:number})} Command  joins: the action in flight when this stop went out
+ * @typedef {{ticket:Ticket,action:string,joins:string|null}&({stage:'posting'}|{stage:'confirming',error:CommandError|null,afterSeq:number})} Command  joins: the action in flight when this stop went out
  */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
@@ -278,7 +278,7 @@ function linkOnReply(m, fx, msg) {
   if (!c) return false;
   if (c.stage !== 'posting') return true;
   const error = msg.ok ? null : {text: commandError(msg), code: msg.code ?? null};
-  Object.assign(c, {stage: 'confirming', ok: msg.ok, error, afterSeq: linkRequestPoll(m, fx)});
+  Object.assign(c, {stage: 'confirming', error, afterSeq: linkRequestPoll(m, fx)});
   if (error && !OWNERS[c.action]?.quiet?.(m, c)) uiSay(m, error.text);
   return true;
 }
@@ -485,7 +485,7 @@ function startAdvance(m, fx) {
 function planOnCommandDone(m, c) {
   if (m.plan.start?.ticket !== c.ticket) return;
   m.plan.start = null;
-  if (c.ok && m.ui.sheet === 'change') m.ui.sheet = null;
+  if (!c.error && m.ui.sheet === 'change') m.ui.sheet = null;
 }
 
 // ───────── remote: seek, volume, captions, stop
@@ -558,7 +558,7 @@ function seekOnStatus(m) {
 /** A rejected seek clears only its own target. */
 function seekOnCommandDone(m, c) {
   const k = m.remote.seek;
-  if (!c.ok && k.s === 'sent' && k.ticket === c.ticket) m.remote.seek = {s: 'idle'};
+  if (c.error && k.s === 'sent' && k.ticket === c.ticket) m.remote.seek = {s: 'idle'};
 }
 /** Exact time applies directly; invalid input stays in the field with a reason. */
 function seekGoto(m, fx, text, msg) {
@@ -670,7 +670,7 @@ function capAdvance(m, fx) {
 function capOnCommandDone(m, c) {
   const a = m.remote.captions.apply;
   if (a?.ticket !== c.ticket) return;
-  if (c.ok) a.stage = 'reading'; else capFail(m, c.error.text);
+  if (c.error) capFail(m, c.error.text); else a.stage = 'reading';
 }
 
 function remoteStop(m, fx, msg) {
@@ -693,7 +693,7 @@ function remoteStopNow(m, fx, origin = null) {
 }
 const stopOutranStart = c => c.joins === 'start' && c.error?.code === 'stale_playback';
 function stopOnCommandDone(m, c, fx) {
-  if (c.ok) return;
+  if (!c.error) return;
   m.ui.stopIssued = false;
   if (stopOutranStart(c) && caps(m).stop) remoteStopNow(m, fx);
 }
