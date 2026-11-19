@@ -1426,12 +1426,11 @@ class ControlHandler(BaseHTTPRequestHandler):
     def trusted_host(self):
         return self.headers.get('Host') == f'127.0.0.1:{self.server.server_port}'
 
-    def reply(self, code, body, content_type='application/json', cache='no-store'):
-        if isinstance(body, bytes):
-            payload = body
-        else:
-            payload = body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode()
-            content_type += '; charset=utf-8'
+    def reply(self, code, body, content_type='application/json'):
+        payload = body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode()
+        self.reply_bytes(code, payload, f'{content_type}; charset=utf-8')
+
+    def reply_bytes(self, code, payload, content_type, cache='no-store'):
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(payload)))
@@ -1445,7 +1444,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         if not self.trusted_host():
             self.reply(403, {})
         elif self.path in FONTS:
-            self.reply(200, FONTS[self.path], 'font/woff2', 'public, max-age=31536000, immutable')
+            self.reply_bytes(200, FONTS[self.path], 'font/woff2', 'public, max-age=31536000, immutable')
         elif self.path == '/':
             panel = PANEL.replace('__TOKEN__', self.server.token)
             self.reply(200, panel, 'text/html')
