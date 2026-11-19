@@ -348,9 +348,8 @@ const Panel = (() => {
       return !notOlder(cur, cat);
     }
     if (cur) {
-      p.choice = {branch: 'none', entryId: null};
-      p.upload = {s: 'idle', filename: '', message: ''};
-      p.addon = freshAddon();
+      const {choice, upload, addon} = freshPlan(p.sourceId);
+      Object.assign(p, {choice, upload, addon});
       planTouch(m);
     }
     p.catalogue = cat;
@@ -810,11 +809,15 @@ const Panel = (() => {
     if (c.stopNeedsConfirm) m.ui.confirm = {kind: 'stop', snap: {deviceId: s.selected_device?.id, deviceRevision: s.device_revision, playbackId: s.playback_id ?? null}};
     else remoteStopNow(m, fx, s.playback_id ? {playback_id: s.playback_id} : {}, msg);
   }
-  function remoteStopNow(m, fx, body, msg) {
-    const u = m.ui;
+  /** A stop, asked or sent, outranks every flow that was waiting to act on the TV. */
+  function remoteCancelFlows(m) {
     planTouch(m);
     m.remote.captions.apply = null;
     m.remote.seek = {s: 'idle'};
+  }
+  function remoteStopNow(m, fx, body, msg) {
+    const u = m.ui;
+    remoteCancelFlows(m);
     m.remote.stop = null;
     u.confirm = null;
     u.sheet = null;
@@ -863,9 +866,7 @@ const Panel = (() => {
       if (p.sourceId !== k.sourceId || p.catalogue?.id !== k.catalogueId || planSubtitleId(p) !== k.subtitleId) return;
       p.start = {stage: 'verifying', snap: k, consent: c.consent, afterSeq: linkRequestPoll(m, fx)};
     } else {
-      planTouch(m);
-      m.remote.captions.apply = null;
-      m.remote.seek = {s: 'idle'};
+      remoteCancelFlows(m);
       m.remote.stop = {snap: c.snap, afterSeq: linkRequestPoll(m, fx), generation: m.link.generation};
     }
   }
