@@ -970,7 +970,6 @@ const Panel = (() => {
   /** Idempotent standing rules, run after every message: "whenever X holds, make Y so". */
   function reconcile(m, fx) {
     const l = m.link, s = l.status, u = m.ui, c = caps(m);
-    remoteSync(m);
     // 2. remember what we owned, to label the stopped notice and re-seed Preparar
     if (s && c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
     uiValidLayers(m);
