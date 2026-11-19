@@ -183,7 +183,7 @@ function viewMando(m) {
   const pos = shownPosition(m), waiting = WAITING.includes(s.phase), srv = capServer(s);
   const chosen = s.subtitle_choice;
   const volume = m.remote.volumePreview ?? (finite(s.volume) ? Math.round(s.volume * 100) : null);
-  const spinner = waiting || !!m.link.command || !!s.command_pending;
+  const spinner = waiting || m.link.inflight.length > 0 || !!s.command_pending;
   return {
     board: {
       title: s.title || 'Tu película en la TV', clock: formatTime(pos), room: deviceLabel(sel) || 'Sin TV',
@@ -291,7 +291,7 @@ function view(m) {
     plan: viewPlan(m), destination: viewDestination(m), confirm: viewConfirm(m),
     mando: mode === 'mando' ? viewMando(m) : null, sheet: viewSheet(m),
     problem: viewProblem(m), demo: m.link.status.demo === true ? {scenario: m.link.status.scenario || ''} : null,
-    wake: mode === 'mando', restoring: m.ui.focus,
+    wake: mode === 'mando', restoring: m.ui.focus && {ref: m.ui.focus.ref, n: m.ui.focus.n},
   };
 }
 

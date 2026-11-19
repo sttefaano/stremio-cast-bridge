@@ -507,6 +507,36 @@ test('stop interrupts an in-flight command and its late reply cannot overwrite c
   assert.equal(p.view.mode, 'preparar');
 });
 
+test('a stop that joins an in-flight command still reports that command and settles it', () => {
+  for (const [act, arg, action] of [['volume', 80, 'volume'], ['toggle', undefined, 'pause'], ['mute', undefined, 'mute'], ['dropSeek', 200, 'seek']]) {
+    const p = panel(playing);
+    p.tap(act, arg);
+    p.tap('stop');
+    assert.equal(p.posts('stop').length, 1, `${action}: our own command in flight, so the stop goes at once`);
+    p.reply(p.posted(action), {ok: false, message: 'La TV rechazó el cambio.'});
+    assert.equal(p.view.problem?.body, 'La TV rechazó el cambio.', action);
+  }
+  const q = panel(playing);
+  q.tap('volumePreview', 80);
+  q.tap('volume', 80);
+  q.tap('stop');
+  q.reply(q.posted('volume'));
+  q.reply(q.posted('stop'));
+  q.status(playing);
+  assert.equal(q.view.mando.volume.percent, 30, 'the preview gives way to what the TV reports');
+});
+
+test('focus goes back only when the command that asked for it settles', () => {
+  const p = panel(playing);
+  p.tap('toggle', undefined, 'toggle', 1);
+  p.tap('stop', undefined, 'stop', 1);
+  p.reply(p.posted('pause'));
+  p.status(playing);
+  assert.equal(p.effects('focus').length, 0, 'the pause settled, the stop that took the focus has not');
+  p.settle('stop', paused);
+  assert.deepEqual(p.effects('focus').map(f => f.ref), ['stop']);
+});
+
 test('stopping drops a pending apply, seek and Start along with the open sheet', () => {
   const p = panel({...subsOk('text-a', 0), ...withTracks});
   p.tap('openSubs');

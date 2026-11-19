@@ -22,8 +22,9 @@
  * @property {boolean} polling       one poll in flight
  * @property {boolean} repoll        a poll issued after now is needed as soon as the one in flight returns
  * @property {Ticket|null} pollTimer
- * @property {{ticket:Ticket,action:string,stage:'posting'|'confirming',afterSeq:number,ok:boolean|null,owner:string|null}|null} command
+ * @property {Command[]} inflight  at most one command, plus a stop that may join it; each reply routes to its own entry
  */
+/** @typedef {{ticket:Ticket,action:string,stage:'posting'|'confirming',afterSeq:number,ok:boolean|null,owner:string|null}} Command */
 /**
  * @typedef {{branch:'none'}|{branch:'file'|'stremio'|'upload',entryId:string|null}} Choice  entry kind always matches the branch
  * @typedef {{s:'idle'}|{s:'loading',ticket:Ticket|null,analysisId:string|null,previousId:string|null}|{s:'error',message:string}} Load
@@ -75,7 +76,7 @@
  * @property {null|'subs'|'more'|'change'} sheet
  * @property {null|{kind:'replace',snap:StartSnap,consent:string,title:string}|{kind:'stop',key:string}} confirm  a stop confirm holds the playbackKey it was asked for
  * @property {{local:string|null,observed:string|null,dismissed:string|null,absorbed:string|null}} errors  identities are `${rev}:${text}`
- * @property {{ref:string,n:number}|null} focus  control to refocus once the command settles
+ * @property {{ref:string,n:number,ticket:Ticket}|null} focus  control to refocus once command `ticket` settles
  * @property {boolean} stoppedNotice  'Película detenida en <TV>' not yet dismissed
  * @property {boolean} stopIssued  our Stop was sent; the next return to Preparar shows the notice
  * @property {{text:string,error:string}} exact
@@ -179,7 +180,7 @@ function capDraft(m) {
 function caps(m) {
   const l = m.link, s = l.status, online = l.online;
   const unknown = !KNOWN.has(s.phase), foreign = FOREIGN.includes(s.phase) || unknown;
-  const busy = !!l.command || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
+  const busy = l.inflight.length > 0 || !!s.command_pending || !!s.pending || WAITING.includes(s.phase);
   const live = LIVE.includes(s.phase), owned = modeOf(m) === 'mando';
   const transport = online && live && !busy;
   const subs = !!s.playback_id && !!remoteCatalogue(m) && !foreign, change = owned && !foreign;
@@ -218,13 +219,13 @@ function linkIssuePoll(m, fx) {
  */
 function linkCommand(m, fx, action, body, opts = {}) {
   const l = m.link, s = l.status;
-  if (!l.online || (l.command && action !== 'stop')) return null;
+  if (!l.online || l.inflight.some(c => action !== 'stop' || c.action === 'stop')) return null;
   const ticket = ticketOf(m);
   const identity = PLAYBACK_ACTIONS.includes(action) && s.selected_device ? {device_id: s.selected_device.id, device_revision: s.device_revision} : {};
   l.generation++;
-  l.command = {ticket, action, stage: 'posting', afterSeq: 0, ok: null, owner: opts.owner ?? null};
+  l.inflight.push({ticket, action, stage: 'posting', afterSeq: 0, ok: null, owner: opts.owner ?? null});
   m.ui.errors.local = null;
-  if (opts.from) m.ui.focus = {ref: opts.from, n: opts.n};
+  if (opts.from) m.ui.focus = {ref: opts.from, n: opts.n, ticket};
   fx.push({fx: 'post', ticket, action, body: {...identity, ...body}});
   return ticket;
 }
@@ -245,19 +246,18 @@ function advanceOnStatus(m, fx) {
   remoteSync(m);
   uiObserveError(m);
   planAdoptSnapshot(m);
-  if (l.command?.stage === 'confirming' && l.statusSeq > l.command.afterSeq) {
-    const done = l.command;
-    l.command = null;
-    OWNERS[done.owner]?.done(m, done);
-    uiSettleFocus(m, fx);
+  const settled = l.inflight.filter(c => c.stage === 'confirming' && l.statusSeq > c.afterSeq);
+  l.inflight = l.inflight.filter(c => !settled.includes(c));
+  for (const c of settled) {
+    OWNERS[c.owner]?.done(m, c);
+    uiSettleFocus(m, fx, c);
   }
   startAdvance(m, fx);
   capAdvance(m, fx);
   stopAdvance(m, fx);
   seekOnStatus(m);
 }
-function linkOnCommandReply(m, fx, msg) {
-  const c = m.link.command;
+function linkOnCommandReply(m, fx, c, msg) {
   if (c.stage !== 'posting') return;
   c.ok = msg.ok;
   if (!msg.ok && (OWNERS[c.owner]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
@@ -501,7 +501,7 @@ function seekOnTimer(m, fx, msg) {
   if (k.s !== 'skipping' || k.ticket !== msg.ticket) return;
   if (k.delta === 0) m.remote.seek = {s: 'idle'};
   else if (caps(m).transport) seekSend(m, fx, {delta: k.delta}, clamp(s.absolute_time + k.delta, 0, durationOf(s) ?? Infinity), k);
-  else if (m.link.command) {
+  else if (m.link.inflight.length) {
     const ticket = ticketOf(m);
     m.remote.seek = {...k, ticket};
     fx.push({fx: 'timer', name: 'skip', ms: SKIP_MS, ticket});
@@ -534,8 +534,7 @@ function volumePreview(m, value) {
 }
 function volumeSet(m, fx, value, msg) {
   const ok = caps(m).transport && finite(m.link.status.volume) && finite(value);
-  if (ok) linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, {owner: 'volume', from: msg.from, n: msg.n});
-  if (!ok || !m.link.command) m.remote.volumePreview = null;
+  if (!ok || !linkCommand(m, fx, 'volume', {level: clamp(value, 0, 100) / 100}, {owner: 'volume', from: msg.from, n: msg.n})) m.remote.volumePreview = null;
 }
 function muteToggle(m, fx, msg) {
   const s = m.link.status;
@@ -705,10 +704,11 @@ function uiValidLayers(m) {
   }
 }
 /** The focus ticket is honoured once the command settles, and only if the user has not touched anything since. */
-function uiSettleFocus(m, fx) {
+function uiSettleFocus(m, fx, c) {
   const f = m.ui.focus;
+  if (f?.ticket !== c.ticket) return;
   m.ui.focus = null;
-  if (f && f.n === m.n) fx.push({fx: 'focus', ref: f.ref, n: f.n});
+  if (f.n === m.n) fx.push({fx: 'focus', ref: f.ref, n: f.n});
 }
 /** What the one problem block says, or null. The same function decides what dismissNotice dismisses. */
 function problemOf(m) {
@@ -767,7 +767,7 @@ const freshUi = () => ({
 function init(boot = {}) {
   const m = {
     nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: boot.lastDeviceId ?? null, autoSelectTried: false},
-    link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, command: null},
+    link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, inflight: []},
     plan: freshPlan(null), remote: freshRemote(playbackKey(NO_STATUS)), ui: freshUi(),
   };
   const fx = [];
@@ -792,7 +792,8 @@ function step(m, msg) {
   return {model: m, fx};
 }
 function linkRouteReply(m, fx, msg) {
-  if (m.link.command?.ticket === msg.ticket) linkOnCommandReply(m, fx, msg);
+  const c = m.link.inflight.find(x => x.ticket === msg.ticket);
+  if (c) linkOnCommandReply(m, fx, c, msg);
   else planOnReply(m, fx, msg);
 }
 function onTimer(m, fx, msg) {
