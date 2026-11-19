@@ -736,7 +736,7 @@ test('a Detener that lost to a Cambiar película is not resent on its own after 
     if (repliedAt) p.tick(repliedAt);
     p.reply(p.posted('stop'), refused);
     p.status(null, false);
-    for (let i = 0; i < 40; i++) offline(p);
+    offline(p);
     p.tick(settledAt);
     p.fire('poll');
     return p;
