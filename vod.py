@@ -25,7 +25,7 @@ SHORT_SECONDS = .5
 # A segment this close to the producer arrives within a retry or two of the receiver (~10.5 s each);
 # a farther one is quicker to restart at.
 REACH = 3
-# Held below the receiver's ~45 s give-up, measured from the first request for that segment.
+# Held below the receiver's ~45 s give-up, measured from the first request for that segment since the last seek.
 HOLD_SECONDS = 40
 # The receiver retries every ~10.5 s; a request after this long a pause starts a fresh hold.
 RETRY_GAP_SECONDS = 15
@@ -258,7 +258,6 @@ class Producer:
         self.launched_at = time.time()
         self.start, self.limit, self.position, self.settled = index, limit, index, False
         self.suspended, self.pauses = False, []
-        self.first_seen.clear()
 
     def _kill(self):
         # SIGKILL, not SIGTERM: a terminated FFmpeg drains its input and finalizes a short segment.
@@ -299,6 +298,7 @@ class Producer:
             run = self._run()
             if segment_action(index, self.complete(index), run) == 'restart':
                 self._restart(index)
+                self.first_seen.clear()
 
     def request(self, index, extra=(), cue=False):
         """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming.

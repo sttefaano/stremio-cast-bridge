@@ -314,6 +314,20 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.request(2), 'missing')
         self.assertLess(time.monotonic() - started, .6, 'a retry shares the first deadline')
 
+    def test_a_restart_never_extends_the_hold_of_a_segment_the_receiver_already_asked_for(self):
+        producer = self.producer(hold_seconds=.3, backoff_seconds=0)
+        producer.cover(0)
+        result = []
+        first = threading.Thread(target=lambda: result.append(producer.request(2)))
+        first.start()
+        time.sleep(.05)
+        self.launched[0].code = 1
+        first.join(1)
+        self.assertEqual((result, [p.command[1] for p in self.launched]), (['missing'], [0, 2]))
+        started = time.monotonic()
+        self.assertEqual(producer.request(2), 'missing')
+        self.assertLess(time.monotonic() - started, .15, 'the retry shares the deadline from before the restart')
+
     def test_a_cue_request_never_shortens_the_hold_of_the_video_segment_it_shares_an_index_with(self):
         producer = self.producer(hold_seconds=.4)
         producer.cover(0)
