@@ -435,6 +435,22 @@ test('an apply that gets no status for 10 s is dropped, says so, keeps the draft
   assert.deepEqual([p.view.sheet.apply.pending, p.view.sheet.unapplied], [false, true]);
 });
 
+test('an apply the TV accepted keeps reading back through an outage, like any posted command', () => {
+  const p = panel({...subsOk('text-a', 0), ...withTracks});
+  p.tap('openSubs');
+  p.tap('capNudge', 300);
+  p.tap('capApply');
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  p.reply(p.posted('subtitles'));
+  p.status({...subsOk('text-a', 0), ...withTracks});
+  offline(p);
+  assert.equal(p.view.sheet.apply.pending, true, 'the change already went out: an outage does not undo it');
+  p.fire('poll');
+  p.status({...subsOk('text-a', 300), ...withTracks});
+  assert.equal(p.view.sheet, null);
+  assert.equal(p.view.mando.chip.unapplied, false);
+});
+
 // stop
 
 test('confirmed stop re-polls, re-checks the TV and the playback, and sends the captured playback_id', () => {
