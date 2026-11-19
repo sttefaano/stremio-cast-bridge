@@ -688,8 +688,9 @@ class GenericProducerTest(unittest.TestCase):
                     result = subprocess.run(ffmpeg_command(str(source), session, plan,
                         origin=10, duration=12, readrate=1000), capture_output=True, timeout=15)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
-                    for delay, expected in [(500, {'Crossing': (.5, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
-                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)})]:
+                    for delay, expected in [(500, {'Crossing': (0, 3.5), 'Early': (.7, .9), 'Future': (1.5, 5.5)}),
+                                            (-500, {'Crossing': (0, 2.5), 'Future': (.5, 4.5)}),
+                                            (2000, {'Past': (0, 1), 'Crossing': (1, 5), 'Early': (2.2, 2.4), 'Future': (3, 7)})]:
                         with self.subTest(format=format, delay=delay), media_server(sessions) as fetch:
                             cues = served_cues(fetch, session.name, delay)
                             self.assertEqual(set(cues), set(expected))
