@@ -1554,6 +1554,28 @@ test('opening Cambiar película starts from an empty plan; a confirmed start clo
   assert.equal(p.view.sheet, null);
 });
 
+test('a sent Start that fails is reported even when the TV left Mando while it was in flight', () => {
+  for (const next of [stopped, {...playing, phase: 'receiver_changed'}]) {
+    const p = panel(playing);
+    p.tap('openChange');
+    choose(p, 'b');
+    p.tap('start');
+    p.tap('confirmAccept');
+    p.status(playing);
+    const start = p.posted('start');
+    p.fire('poll');
+    p.status(next);
+    p.reply(start, {ok: false, code: 'busy', message: 'La TV está ocupada.'});
+    p.status(next);
+    assert.equal(p.view.problem?.body, next === stopped ? 'La TV está ocupada.' : 'Este mando no lo controla. Detené para volver a elegir.', next.phase);
+    if (next !== stopped) {
+      p.fire('poll');
+      p.status(playing);
+      assert.equal(p.view.problem?.body, 'La TV está ocupada.', 'shown once the foreign state clears');
+    }
+  }
+});
+
 test('layers cannot outlive the permission that opened them', () => {
   const change = panel(playing);
   change.tap('openChange');

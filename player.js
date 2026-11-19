@@ -926,11 +926,12 @@ const Panel = (() => {
   }
 
   /**
-   * The flows that own a command. `live` says whether the flow still wants the reply: a cancelled flow reports no
-   * failure, because its draft is gone and a message would be about nothing. `done` runs once fresh status confirms it.
+   * The flows that own a command. `done` runs once fresh status confirms it. `live` says whether a failure is still
+   * news: a dropped caption apply belonged to a draft that is gone. A sent Start has no `live`, because the plan is
+   * also reset by the server (the TV left Mando, a foreign receiver) and the user still pressed Iniciar.
    */
   const OWNERS = {
-    start: {live: (m, c) => m.plan.start?.ticket === c.ticket, done: planOnCommandDone},
+    start: {done: planOnCommandDone},
     seek: {done: seekOnCommandDone},
     captions: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
     volume: {done: m => { m.remote.volumePreview = null; }},
