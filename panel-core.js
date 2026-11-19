@@ -63,7 +63,7 @@
  * @typedef {{from:string,n:number}} Origin
  * @typedef {{s:'idle'}|{s:'dragging',preview:number}|{s:'skipping',delta:number,ticket:Ticket,origin:Origin|null}|{s:'sent',target:number,ticket:Ticket,sawBusy:boolean}} Seek
  * @typedef {{subtitleId:string|null,enabled:boolean,delayMs:number}} CaptionWant
- * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,catalogueId:string,gate:Gate,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
+ * @typedef {{kind:'plan'|'visibility',stage:'verifying'|'posting'|'reading',want:CaptionWant,gate:Gate,ticket:Ticket|null,prevVisible:boolean|null,errorAtStart:string|null,reads:number,origin:Origin|null}} CaptionApply
  */
 /**
  * @typedef {object} Remote  Drafts bound to ONE playback identity; reconcile replaces it when the identity changes.
@@ -612,7 +612,7 @@ const capReset = m => capShift(m, () => 0);
 function capBegin(m, fx, kind, want, msg) {
   const s = m.link.status;
   m.remote.captions.apply = {
-    kind, stage: 'verifying', want, catalogueId: s.active_catalogue.id, gate: linkGate(m, fx), ticket: null,
+    kind, stage: 'verifying', want, gate: linkGate(m, fx), ticket: null,
     prevVisible: typeof s.subtitles_enabled === 'boolean' ? s.subtitles_enabled : null, errorAtStart: errorIdentity(s), reads: 0, origin: originOf(msg),
   };
 }
@@ -643,7 +643,7 @@ function capFail(m, message, lost = false) {
 function capSettled(s, a) {
   const srv = capServer(s), w = a.want, choice = s.subtitle_choice;
   return srv.subtitleId === w.subtitleId && srv.enabled === w.enabled && srv.delayMs === w.delayMs
-    && (w.subtitleId === null || choice?.catalogue_id === a.catalogueId)
+    && (w.subtitleId === null || choice?.catalogue_id === s.active_catalogue?.id)
     && (!finite(s.subtitle_delay_ms) || s.subtitle_delay_ms === w.delayMs)
     && (typeof s.subtitles_enabled !== 'boolean' || s.subtitles_enabled === w.enabled);
 }
@@ -654,8 +654,7 @@ function capAdvance(m, fx) {
   if (a.stage === 'verifying') {
     if (!gatePassed(m, a.gate)) return;
     if (!c.transport) return capFail(m, 'La TV estaba ocupada y no se aplicó el cambio. Reintentá en un momento.');
-    if (s.active_catalogue?.id !== a.catalogueId) { m.remote.captions.apply = null; return; }
-    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: a.catalogueId, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin);
+    const ticket = linkCommand(m, fx, 'subtitles', {playback_id: s.playback_id, catalogue_id: s.active_catalogue.id, subtitle_id: a.want.subtitleId, enabled: a.want.enabled, delay_ms: a.want.delayMs}, a.origin);
     if (ticket) { a.stage = 'posting'; a.ticket = ticket; } else m.remote.captions.apply = null;
   } else if (a.stage === 'reading') {
     if (c.busy) return;
