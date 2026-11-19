@@ -305,6 +305,23 @@ class ReceiverOwnershipTest(unittest.TestCase):
                 self.assertEqual(bridge.cast.media_controller.play_media.called, windows == 5, windows)
             self.assertTrue(bridge.media_url.endswith('/old/d-20000/master.m3u8'))
 
+    def test_negative_delay_on_a_file_track_loads_once_three_segments_exist(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            bridge.active_plan = replace(bridge.active_plan, delay_ms=-30000)
+            bridge.loaded = False
+            bridge.process = Mock()
+            bridge.process.poll.return_value = None
+            bridge.last_playing_segments = None
+            bridge.started_at = time.monotonic()
+            (bridge.session / 'master.m3u8').touch()
+            (bridge.session / 'cues.json').write_text('[]')
+            (bridge.session / 'video.m3u8').write_text('#EXTM3U\n' + '#EXTINF:6,\nx.ts\n' * 3)
+            (bridge.session / 'video_vtt.m3u8').write_text('#EXTM3U\n' + ''.join(
+                f'#EXTINF:6.0,\nvideo{index}.vtt\n' for index in range(3)))
+            bridge.tick()
+            bridge.cast.media_controller.play_media.assert_called_once()
+
     def test_ownership_loss_preserves_position_and_stop_leaves_foreign_media(self):
         for player_state in ('PLAYING', 'PAUSED'):
             with self.subTest(player_state=player_state), tempfile.TemporaryDirectory(
