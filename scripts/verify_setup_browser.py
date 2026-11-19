@@ -49,20 +49,21 @@ def on_status(condition):
     return f'(((s) => {condition})(await S()))'
 
 
-def verify(name, expression):
-    result = evaluate(f'(async () => {{ {PRELUDE} return !!({expression}); }})()')
+def _check(name, script):
+    result = evaluate(script)
     if result is not True:
         raise AssertionError(f'{name}: {result!r}')
     checks.append({'name': name, 'result': 'PASS'})
+
+
+def verify(name, expression):
+    _check(name, f'(async () => {{ {PRELUDE} return !!({expression}); }})()')
 
 
 def wait_for(name, expression):
-    result = evaluate(f'(async () => {{ {PRELUDE} const end=performance.now()+10000; '
-                      f'while(performance.now()<end) {{ if(await (async () => !!({expression}))()) return true; '
-                      'await new Promise(resolve=>setTimeout(resolve,100)); } return false; })()')
-    if result is not True:
-        raise AssertionError(f'{name}: {result!r}')
-    checks.append({'name': name, 'result': 'PASS'})
+    _check(name, f'(async () => {{ {PRELUDE} const end=performance.now()+10000; '
+                 f'while(performance.now()<end) {{ if(await (async () => !!({expression}))()) return true; '
+                 'await new Promise(resolve=>setTimeout(resolve,100)); } return false; })()')
 
 
 def capture(name):
