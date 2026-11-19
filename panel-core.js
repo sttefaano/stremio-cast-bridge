@@ -246,7 +246,7 @@ function advanceOnStatus(m, fx) {
   if (l.command?.stage === 'confirming' && l.statusSeq > l.command.afterSeq) {
     const done = l.command;
     l.command = null;
-    onCommandDone(m, done);
+    OWNERS[done.owner]?.done(m, done);
     uiSettleFocus(m, fx);
   }
   startAdvance(m, fx);
@@ -258,11 +258,10 @@ function linkOnCommandReply(m, fx, msg) {
   const c = m.link.command;
   if (c.stage !== 'posting') return;
   c.ok = msg.ok;
-  if (!msg.ok && (OWNERS[c.owner]?.live(m, c) ?? true)) m.ui.errors.local = commandError(msg);
+  if (!msg.ok && (OWNERS[c.owner]?.live?.(m, c) ?? true)) m.ui.errors.local = commandError(msg);
   c.stage = 'confirming';
   c.afterSeq = linkRequestPoll(m, fx);
 }
-const onCommandDone = (m, c) => OWNERS[c.owner]?.done(m, c);
 
 // ───────── plan: movie, catalogue, subtitle decision, Start
 function planTouch(m) {
@@ -738,13 +737,13 @@ function uiScenario(m, fx, value, msg) {
   if (m.link.status?.demo === true) linkCommand(m, fx, 'scenario', {state: String(value)}, {from: msg?.from, n: msg?.n});
 }
 
-const always = () => true;
+/** What settles each command when its confirming poll lands. `live` says whether a failed reply is still worth reporting; absent means always. */
 const OWNERS = {
-  start: {live: always, done: planOnCommandDone},
-  seek: {live: always, done: seekOnCommandDone},
+  start: {done: planOnCommandDone},
+  seek: {done: seekOnCommandDone},
   captions: {live: (m, c) => m.remote.captions.apply?.ticket === c.ticket, done: capOnCommandDone},
-  volume: {live: always, done: m => { m.remote.volumePreview = null; }},
-  stop: {live: always, done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
+  volume: {done: m => { m.remote.volumePreview = null; }},
+  stop: {done: (m, c) => { if (!c.ok) m.ui.stopIssued = false; }},
 };
 
 // ───────── public: init / step
@@ -856,32 +855,32 @@ const ACTS = Object.freeze({
   stremioWrong: m => addonWrong(m, stremioScope(m)),
   stremioAlt: (m, fx, g) => addonAlternative(m, fx, stremioScope(m), Number(g.arg)),
   stremioSearch: (m, fx, g) => addonSearch(m, fx, stremioScope(m), g.arg),
-  start: (m, fx) => planStart(m, fx),
+  start: planStart,
   toggle, stop: remoteStop,
   skip: (m, fx, g) => seekSkip(m, fx, Number(g.arg), g),
   dragSeek: (m, fx, g) => seekDrag(m, Number(g.arg)),
   dropSeek: (m, fx, g) => seekDrop(m, fx, Number(g.arg), g),
-  seekAbandon: m => seekAbandon(m),
+  seekAbandon,
   volumePreview: (m, fx, g) => volumePreview(m, Number(g.arg)),
   volume: (m, fx, g) => volumeSet(m, fx, Number(g.arg), g),
-  mute: (m, fx, g) => muteToggle(m, fx, g),
+  mute: muteToggle,
   capTrack: (m, fx, g) => capEdit(m, 'track', g.arg),
   capNudge: (m, fx, g) => { if (!m.ui.sheet) uiOpen(m, 'subs'); capEdit(m, 'nudge', Number(g.arg)); },
   capReset: m => capEdit(m, 'reset'),
   capVisible: (m, fx, g) => capVisible(m, fx, g.arg === true || g.arg === 'true', g),
-  capApply: (m, fx, g) => capApply(m, fx, g),
-  capDiscard: m => capDiscard(m),
+  capApply,
+  capDiscard,
   exactInput: (m, fx, g) => { m.ui.exact = {text: String(g.arg ?? ''), error: ''}; },
   gotoTime: (m, fx, g) => seekGoto(m, fx, g.arg, g),
-  dismissNotice: m => uiDismissNotice(m),
+  dismissNotice: uiDismissNotice,
   scenario: (m, fx, g) => uiScenario(m, fx, g.arg, g),
   openSubs: m => uiOpen(m, 'subs'),
   openMore: m => uiOpen(m, 'more'),
   openChange: m => uiOpen(m, 'change'),
-  closeSheet: m => uiDismiss(m),
-  dismiss: m => uiDismiss(m),
-  confirmCancel: m => uiDismiss(m),
-  confirmAccept: (m, fx) => uiConfirmAccept(m, fx),
+  closeSheet: uiDismiss,
+  dismiss: uiDismiss,
+  confirmCancel: uiDismiss,
+  confirmAccept: uiConfirmAccept,
 });
 
 const SWALLOWED = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ']);

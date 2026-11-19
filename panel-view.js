@@ -295,4 +295,4 @@ function view(m) {
   };
 }
 
-const Panel = Object.freeze({init, step, view, keyMsg, ACTS, formatTime, parseTime});
+const Panel = Object.freeze({init, step, view, keyMsg, ACTS});

@@ -1,15 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {load, panel, playing, fixture, offline, paused} = require('./helpers/panel-harness.cjs');
-
-test('timestamps parse and format like player conventions', () => {
-  const {Panel} = load();
-  assert.equal(Panel.formatTime(3665), '1:01:05');
-  assert.equal(Panel.formatTime(NaN), '—');
-  assert.equal(Panel.parseTime('1:02:03'), 3723);
-  assert.equal(Panel.parseTime('02:30'), 150);
-  for (const value of ['90', '-1:00', '1:60:00', 'a:b', '1:2:3:4']) assert.equal(Panel.parseTime(value), null);
-});
+const {panel, playing, fixture, offline, paused} = require('./helpers/panel-harness.cjs');
 
 test('one poll in flight; the timer re-arms after each reply and ignores a superseded timer', () => {
   const p = panel(null);

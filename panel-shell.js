@@ -402,7 +402,7 @@ function boot(doc, env) {
   return {dispatch, view: () => view};
 }
 
-if (typeof module !== 'undefined') module.exports = {Panel, boot, paint, paintList};
+if (typeof module !== 'undefined') module.exports = {Panel, boot};
 if (typeof document !== 'undefined') boot(document, {
   fetch: (...args) => fetch(...args), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: id => clearTimeout(id),
   storage: (() => { try { return localStorage; } catch (_) { return null; } })(),

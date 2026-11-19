@@ -139,6 +139,24 @@ test('exact time validates inline, sends nothing when invalid, and applies direc
   assert.equal(p.view.sheet, null, 'the sheet closes: there is no review step');
 });
 
+test('times read as m:ss or h:mm:ss and the exact field takes only those forms', () => {
+  const p = panel({...paused, duration: 7200, absolute_time: 3665});
+  assert.deepEqual([p.view.mando.track.elapsed, p.view.mando.track.total], ['1:01:05', '2:00:00']);
+  assert.equal(panel({...paused, absolute_time: null}).view.mando.track.elapsed, '—');
+  p.tap('openMore');
+  for (const text of ['90', '-1:00', '1:60:00', 'a:b', '1:2:3:4']) {
+    p.tap('gotoTime', text);
+    assert.match(p.view.sheet.exact.error, /m:ss o h:mm:ss/, text);
+  }
+  assert.equal(p.posts().length, 0);
+  p.tap('gotoTime', '1:02:03');
+  assert.equal(p.posted('seek').body.position, 3723);
+  const q = panel(paused);
+  q.tap('openMore');
+  q.tap('gotoTime', '02:30');
+  assert.equal(q.posted('seek').body.position, 150);
+});
+
 test('volume previews while dragging and sends one level on release; mute sends the opposite', () => {
   const p = panel(playing);
   p.tap('volumePreview', 80);
