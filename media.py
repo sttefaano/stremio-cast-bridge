@@ -30,6 +30,7 @@ MAX_STORAGE = 16 * MAX_UPLOAD
 UPLOAD_BODY_LIMIT = 6 * MAX_UPLOAD + 4096
 SUBTITLE_LIMITS = {'upload': 'Límite de subtítulos locales alcanzado.', 'addon': 'Límite de subtítulos de Stremio alcanzado.'}
 EXTERNAL_RESOURCE = re.compile(r'(?i)[a-z][a-z0-9+.-]*://|(?:https?|file|data|javascript):|www\.')
+JOINERS_AND_BIDI = '\u061c\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'
 
 
 @dataclass(frozen=True)
@@ -144,11 +145,12 @@ def normalize_subtitles(format, text, lenient=False):
     text = text.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
     if lenient:
         text = strip_format_characters(text)
-    if any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in text):
+    if has_controls(text, lenient):
         raise MediaError('El archivo contiene controles no permitidos.', 422, 'invalid_subtitle')
+    blocks = re.split(r'\n(?:[ \t]*\n)+', text)
     if format == 'vtt':
-        header, separator, text = text.partition('\n\n')
-        if (not separator or not re.fullmatch(r'WEBVTT(?:[ \t][^\n]*)?', header)
+        header = blocks.pop(0)
+        if (not blocks or not re.fullmatch(r'WEBVTT(?:[ \t][^\n]*)?', header.split('\n', 1)[0])
                 or '-->' in header or EXTERNAL_RESOURCE.search(header)):
             raise MediaError('Encabezado VTT inválido.', 422, 'invalid_subtitle')
     stamp = r'\d{2,6}:[0-5]\d:[0-5]\d,\d{3}' if format == 'srt' else r'(?:\d{2,6}:)?[0-5]\d:[0-5]\d\.\d{3}'
@@ -164,7 +166,7 @@ def normalize_subtitles(format, text, lenient=False):
     def cue(block):
         lines = block.splitlines()
         if lines and not timing.fullmatch(lines[0]):
-            if format == 'srt' and lines[0].isdigit() or format == 'vtt' and len(lines) > 1 and not re.search(r'(?i)STYLE|REGION|NOTE|-->', lines[0]):
+            if format == 'srt' and lines[0].strip().isdigit() or format == 'vtt' and len(lines) > 1 and not re.search(r'(?i)STYLE|REGION|-->', lines[0]):
                 lines = lines[1:]
         match = timing.fullmatch(lines[0]) if lines else None
         content = '\n'.join(lines[1:])
@@ -186,11 +188,12 @@ def normalize_subtitles(format, text, lenient=False):
         content = html.unescape(re.sub(r'<[^>]*>', '', content)).strip()
         if lenient:
             content = strip_format_characters(content).strip()
-        if (end <= start or not content or any(unicodedata.category(c) in ('Cc', 'Cf') and c not in '\n\t' for c in content)
+        if (end <= start or not content or has_controls(content, lenient)
                 or re.search(r'-->|[<>]', content)):
             raise MediaError('Cue de subtítulos inválido.', 422, 'invalid_subtitle')
         return f'{timestamp(start)} --> {timestamp(end)}\n{content}'
-    cues, blocks = [], re.split(r'\n[ \t]*\n', text)
+    cues = []
+    blocks = [block for block in blocks if not (format == 'vtt' and re.match(r'NOTE(?:[ \t\n]|$)', block))]
     for block in blocks:
         try:
             cues.append(cue(block))
@@ -207,7 +210,12 @@ def normalize_subtitles(format, text, lenient=False):
 
 
 def strip_format_characters(text):
-    return ''.join(c for c in text if unicodedata.category(c) != 'Cf')
+    return ''.join(c for c in text if unicodedata.category(c) != 'Cf' or c in JOINERS_AND_BIDI)
+
+
+def has_controls(text, lenient):
+    allowed = '\n\t' + (JOINERS_AND_BIDI if lenient else '')
+    return any(unicodedata.category(c) in ('Cc', 'Cf') and c not in allowed for c in text)
 
 
 def validate_vtt_settings(settings):
@@ -321,9 +329,9 @@ class SetupCatalogue:
                 if self.closed:
                     continue
                 if catalogue:
+                    self.records[catalogue.id] = catalogue
                     if self.addon:
                         catalogue = self._begin_lookup(catalogue, None)
-                    self.records[catalogue.id] = catalogue
                     snapshot = dict(state='ready', catalogue=catalogue.public())
                 else:
                     snapshot = dict(state='error', analysis_id=analysis_id,
@@ -332,12 +340,14 @@ class SetupCatalogue:
 
     def _begin_lookup(self, catalogue, hint):
         revision = catalogue.addon.revision + 1
+        catalogue = replace(catalogue, addon=Listing('loading', revision, message=LOADING))
+        self._commit(catalogue)
         try:
             self.lookups.put_nowait((catalogue.id, revision, dict(catalogue.source), hint))
-            listing = Listing('loading', revision, message=LOADING)
         except queue.Full:
-            listing = Listing('error', revision, message=LISTING_ERROR)
-        return replace(catalogue, addon=listing)
+            catalogue = replace(catalogue, addon=Listing('error', revision, message=LISTING_ERROR))
+            self._commit(catalogue)
+        return catalogue
 
     def _look(self):
         while not self.cancelled.is_set():
@@ -422,7 +432,6 @@ class SetupCatalogue:
             if self.lookups.full():
                 raise MediaError('Hay demasiadas búsquedas pendientes. Esperá unos segundos.', 409, 'busy')
             catalogue = self._begin_lookup(catalogue, hint)
-            self._commit(catalogue)
             return dict(catalogue=catalogue.public())
 
     def offers(self, source_id, catalogue_id, allow_retained=False):

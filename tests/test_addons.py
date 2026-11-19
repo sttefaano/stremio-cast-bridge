@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import threading
 import unittest
 from itertools import count
 from pathlib import Path
@@ -435,13 +436,37 @@ class HttpGetTest(unittest.TestCase):
             self.get(CINEMETA_SEARCH, Endless([]), cap=10 ** 9, deadline=5)
         self.assertEqual(error.exception.code, 'timeout')
 
-    def test_cancellation_stops_the_download(self):
+    def test_a_cancelled_request_is_never_opened(self):
         class Flag:
             def is_set(self):
                 return True
         with self.assertRaises(AddonError) as error:
             self.get(CINEMETA_SEARCH, FakeResponse([b'x']), cancelled=Flag())
+        self.assertEqual((error.exception.code, error.exception.opener.requests), ('cancelled', []))
+
+    def test_cancellation_stops_a_download_between_chunks(self):
+        cancelled = threading.Event()
+        class CancelAfterFirstChunk(FakeResponse):
+            def read1(self, size):
+                cancelled.set()
+                return b'x'
+        with self.assertRaises(AddonError) as error:
+            self.get(CINEMETA_SEARCH, CancelAfterFirstChunk([]), cancelled=cancelled)
         self.assertEqual(error.exception.code, 'cancelled')
+
+    def test_a_lookup_cancelled_during_the_search_never_opens_the_subtitle_request(self):
+        cancelled = threading.Event()
+        class SearchThenCancel(FakeResponse):
+            def read1(self, size):
+                chunk = super().read1(size)
+                if not chunk:
+                    cancelled.set()
+                return chunk
+        opener = FakeOpener(SearchThenCancel([json.dumps(METAS).encode()]))
+        with patch('addons.OPENER', opener), self.assertRaises(AddonError) as error:
+            StremioAddon().list(SOURCE, None, cancelled)
+        self.assertEqual(error.exception.code, 'cancelled')
+        self.assertEqual([request.full_url for request in opener.requests], [CINEMETA_SEARCH])
 
     def test_failures_map_to_a_closed_set_of_codes_and_carry_no_url_or_upstream_text(self):
         secret = 'PRIVATE-UPSTREAM-TEXT'
@@ -482,7 +507,21 @@ class LenientNormalizationTest(unittest.TestCase):
             with self.subTest(name=name):
                 canonical = normalize_subtitles('vtt', self.text(name), lenient=True).decode()
                 self.assertTrue(canonical.startswith('WEBVTT\n\n00:'))
-                self.assertFalse(re.search(r'[\u200b-\u200f\u202a-\u202e\ufeff]', canonical))
+                self.assertFalse(re.search(r'[\u200b\u2060\ufeff]', canonical))
+
+    def test_lenient_keeps_the_joiners_and_bidi_marks_rtl_text_needs(self):
+        lines = ('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645', '\u200f\u05e9\u05dc\u05d5\u05dd!\u200e',
+                 '\u202b\u05e9\u05dc\u05d5\u05dd!\u202c', '\u2067\u0645\u0631\u062d\u0628\u0627\u2069 \u061c1',
+                 'a\u200db')
+        for line in lines:
+            with self.subTest(line=line):
+                text = f'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{line}\n'
+                self.assertEqual(normalize_subtitles('vtt', text, lenient=True).decode(), text)
+
+    def test_lenient_strips_invisible_format_characters_that_carry_no_meaning(self):
+        text = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHo\u200bla\u2060 mun\ufeffdo\u00ad\n'
+        self.assertEqual(normalize_subtitles('vtt', text, lenient=True).decode(),
+                         'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHola mundo\n')
 
     def test_strict_still_rejects_bidi_marks_and_stray_angle_brackets(self):
         for name in self.NAMES:
