@@ -2,142 +2,11 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {PANEL_SOURCE, loadPanel} = require('./helpers/panel-source.cjs');
+const {parse} = require('./helpers/fake-dom.cjs');
+const H = require('./helpers/panel-harness.cjs');
 
 const HTML = fs.readFileSync('player.html', 'utf8');
 const load = () => loadPanel({TextDecoder, AbortController});
-
-// ───────── a small DOM parsed from the real player.html: just enough surface for the shell
-const VOID = new Set(['meta', 'input', 'br', 'hr', 'img', 'link', 'source']);
-
-class Node {
-  constructor(tag, attrs = {}) {
-    this.tagName = tag.toUpperCase();
-    this.attrs = new Map(Object.entries(attrs));
-    this.childNodes = [];
-    this.parentNode = null;
-    this.listeners = {};
-    const props = new Map(), direct = new Set(['width', 'left']);
-    this.styleProps = props;
-    this.style = new Proxy({setProperty: (k, v) => props.set(k, String(v))}, {
-      set(target, k, v) {
-        if (!direct.has(k)) throw new Error(`style.${String(k)} is an expando; use setProperty`);
-        target[k] = v;
-        return true;
-      },
-    });
-    this.open = false;
-    this.value = attrs.value ?? '';
-    this.checked = false;
-    this.files = [];
-    this.text = '';
-    this.document = null;
-  }
-  get id() { return this.attrs.get('id') ?? ''; }
-  get hidden() { return this.attrs.has('hidden'); }
-  set hidden(v) { v ? this.attrs.set('hidden', '') : this.attrs.delete('hidden'); }
-  get disabled() { return this.attrs.has('disabled'); }
-  set disabled(v) { v ? this.attrs.set('disabled', '') : this.attrs.delete('disabled'); }
-  get className() { return this.attrs.get('class') ?? ''; }
-  set className(v) { this.attrs.set('class', v); }
-  get children() { return this.childNodes.filter(c => c instanceof Node); }
-  get firstElementChild() { return this.children[0] ?? null; }
-  get nextElementSibling() { const s = this.parentNode?.children ?? []; return s[s.indexOf(this) + 1] ?? null; }
-  get textContent() { return this.childNodes.map(c => typeof c === 'string' ? c : c.textContent).join(''); }
-  set textContent(v) { this.childNodes.forEach(c => { if (c instanceof Node) c.parentNode = null; }); this.childNodes = v === '' ? [] : [String(v)]; }
-  getAttribute(k) { return this.attrs.get(k) ?? null; }
-  setAttribute(k, v) { this.attrs.set(k, String(v)); }
-  hasAttribute(k) { return this.attrs.has(k); }
-  removeAttribute(k) { this.attrs.delete(k); }
-  appendChild(n) { return this.insertBefore(n, null); }
-  insertBefore(n, ref) {
-    n.parentNode?.childNodes.splice(n.parentNode.childNodes.indexOf(n), 1);
-    const at = ref ? this.childNodes.indexOf(ref) : this.childNodes.length;
-    this.childNodes.splice(at, 0, n);
-    n.parentNode = this;
-    return n;
-  }
-  remove() { this.parentNode?.childNodes.splice(this.parentNode.childNodes.indexOf(this), 1); this.parentNode = null; }
-  contains(n) { for (let c = n; c; c = c.parentNode) if (c === this) return true; return false; }
-  cloneNode() {
-    const n = new Node(this.tagName.toLowerCase(), Object.fromEntries(this.attrs));
-    n.document = this.document;
-    for (const c of this.childNodes) n.appendChild(typeof c === 'string' ? c : c.cloneNode());
-    if (this.content) n.content = this.content.cloneNode();
-    return n;
-  }
-  matches(selector) {
-    return selector.split(',').some(part => {
-      const m = part.trim().match(/^([a-z]+)?(?:#([\w-]+))?((?:\[[^\]]+\])*)$/i);
-      if (!m) throw new Error('fake DOM does not support selector ' + part);
-      if (m[1] && this.tagName !== m[1].toUpperCase()) return false;
-      if (m[2] && this.id !== m[2]) return false;
-      return [...(m[3] || '').matchAll(/\[([\w-]+)(?:=(?:"([^"]*)"|([^\]]*)))?\]/g)].every(([, k, q, u]) => {
-        const want = q ?? u;
-        return want === undefined ? this.attrs.has(k) : this.attrs.get(k) === want;
-      });
-    });
-  }
-  closest(selector) { for (let n = this; n instanceof Node; n = n.parentNode) if (n.matches(selector)) return n; return null; }
-  querySelectorAll(selector) {
-    const out = [];
-    const walk = n => { for (const c of n.children) { if (c.matches(selector)) out.push(c); walk(c); } };
-    walk(this);
-    return out;
-  }
-  querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
-  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-  focus() { if (!this.disabled) this.document.activeElement = this; }
-  getElementById(id) { return this.document.byId.get(id) ?? null; }
-  createElement(tag) { const n = new Node(tag); n.document = this.document; return n; }
-  dispatchEvent(event) {
-    event.target ??= this;
-    event.preventDefault = () => { event.defaultPrevented = true; };
-    const path = [];
-    for (let n = event.target; n; n = n.parentNode) path.push(n);
-    for (const n of event.bubbles === false ? [event.target] : path) for (const fn of n.listeners[event.type] ?? []) fn(event);
-    return !event.defaultPrevented;
-  }
-  getBoundingClientRect() { return {left: 0, top: 0, right: 100, bottom: 100}; }
-  showModal() { if (this.open) throw new Error('InvalidStateError: already open'); this.open = true; this.document.modals.push(this); }
-  close() { this.open = false; const i = this.document.modals.indexOf(this); if (i >= 0) this.document.modals.splice(i, 1); }
-}
-
-function parse(html) {
-  const doc = new Node('#document');
-  doc.document = doc;
-  doc.modals = [];
-  doc.activeElement = null;
-  doc.visibilityState = 'visible';
-  const stack = [doc];
-  const re = /<!--[\s\S]*?-->|<!doctype[^>]*>|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|([^<]+)/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    const [, close, name, rest, selfClose, text] = m;
-    const top = stack[stack.length - 1];
-    if (text !== undefined) { if (text.trim()) top.childNodes.push(text); continue; }
-    if (!name) continue;
-    const tag = name.toLowerCase();
-    if (close) {
-      if (tag === 'template') { const t = stack.pop(); t.content = new Node('#fragment'); t.content.document = doc; for (const c of [...t.childNodes]) t.content.appendChild(c); t.childNodes = []; }
-      else stack.pop();
-      continue;
-    }
-    const attrs = {};
-    for (const x of rest.matchAll(/([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) attrs[x[1]] = x[2] ?? x[3] ?? x[4] ?? '';
-    const node = new Node(tag, attrs);
-    node.document = doc;
-    top.appendChild(node);
-    if (tag === 'script' || tag === 'style') { re.lastIndex = html.indexOf('>', html.indexOf('</' + tag, re.lastIndex)) + 1; continue; }
-    if (!VOID.has(tag) && !selfClose) stack.push(node);
-  }
-  const all = [];
-  (function walk(n) { for (const c of n.children) { all.push(c); walk(c); if (c.content) walk(c.content); } })(doc);
-  doc.all = all;
-  doc.body = all.find(n => n.tagName === 'BODY');
-  doc.byId = new Map();
-  for (const n of all) if (n.id && !doc.byId.has(n.id)) doc.byId.set(n.id, n);
-  return doc;
-}
 
 // ───────── markup integrity: reads player.html only
 test('ids are unique and none lives inside a template', () => {
@@ -193,19 +62,8 @@ test('the page loads nothing from outside and keeps native dialogs outside the p
 
 // ───────── shell against the real markup: fake fetch, timers, storage and wake lock
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const catalogue = (id, addon = {state: 'off', revision: 0, match: null, message: null, count: 0}) => ({
-  id: 'cat-' + id, source_id: id, duration: 500, addon,
-  entries: [{id: 'text-' + id, kind: 'embedded', label: 'Español', language: 'spa', supported: true, reason: null}]});
-const base = {
-  source_discovery: 'ready', device_discovery: 'ready', device_revision: 1, can_change_device: true,
-  sources: [{id: 'a', title: 'Alpha', filename: 'alpha.mkv'}, {id: 'b', title: 'Beta', filename: 'beta.mkv'}],
-  devices: [{id: 'tv-a', name: 'Sala', host: '192.0.2.2', model: 'Chromecast'}, {id: 'tv-b', name: 'Sala', host: '192.0.2.3', model: 'Google TV'}],
-  selected_device: {id: 'tv-a', name: 'Sala', host: '192.0.2.2', model: 'Chromecast', available: true},
-  catalogues: {a: {state: 'ready', catalogue: catalogue('a')}, b: {state: 'ready', catalogue: catalogue('b')}},
-};
-const idle = {...base, phase: 'idle'};
-const playing = {...base, phase: 'playing', can_change_device: false, source_id: 'a', title: 'Alpha', playback_id: 'p1', duration: 500, absolute_time: 50,
-  volume: .3, muted: false, active_catalogue: catalogue('a'), subtitle_choice: {catalogue_id: 'cat-a', subtitle_id: 'text-a', enabled: true, delay_ms: 0, label: 'Español'}};
+const {catalogue, destination} = H;
+const idle = H.fixture(H.idle), playing = H.fixture(H.playing);
 
 function shell(initial, {lastDevice = null, wakeLock = null} = {}) {
   const {boot, Panel} = load(), doc = parse(HTML), requests = [], timers = [], store = new Map(lastDevice ? [['cast.lastDevice', lastDevice]] : []);
@@ -268,11 +126,11 @@ test('a click posts with the bridge token and the device identity', async () => 
 });
 
 test('stop sends device fields only when a TV is selected', async () => {
-  const bare = {...base, selected_device: undefined, phase: 'preparing', pending: true, can_change_device: false};
+  const bare = {...idle, selected_device: undefined, phase: 'preparing', pending: true, can_change_device: false};
   const s = await shell(bare);
   s.click('stop');
   assert.deepEqual(s.pending('stop')[0].body, {});
-  const t = await shell({...bare, selected_device: base.selected_device});
+  const t = await shell({...bare, selected_device: destination.selected_device});
   t.click('stop');
   assert.deepEqual(t.pending('stop')[0].body, {device_id: 'tv-a', device_revision: 1});
   assert.deepEqual([t.$('stop').textContent, t.$('stop').disabled, t.$('waiting-cancel').textContent], ['Deteniendo…', true, 'Deteniendo…'], 'the stop in flight is on screen');
@@ -336,7 +194,7 @@ test('the error scenario shows Detener once: the header hides while the problem 
 });
 
 test('the plan, the problem block and the Stremio block move to where the view puts them', async () => {
-  const s = await shell({...playing, catalogues: {...base.catalogues, a: {state: 'ready', catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1})}},
+  const s = await shell({...playing, catalogues: {...playing.catalogues, a: {state: 'ready', catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1})}},
     active_catalogue: catalogue('a', {state: 'ready', revision: 1, match: {label: 'Alpha', confidence: 'sure'}, message: null, count: 1}), action_error: 'Falló algo', action_error_revision: 1});
   assert.equal(s.$('problem').parentNode.id, 'mando-problem-slot');
   assert.equal(s.$('plan').parentNode.id, 'prep-plan-slot');
