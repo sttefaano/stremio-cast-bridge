@@ -3,14 +3,9 @@
 
 /** @param {{lastDeviceId?:string|null}} [saved] @returns {{model:Model,fx:object[]}} the first poll is in fx */
 function init(saved = {}) {
-  const m = {
-    nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId: saved.lastDeviceId ?? null, autoSelectTried: false},
-    link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, inflight: []},
-    plan: freshPlan(null), remote: freshRemote(playbackKey(NO_STATUS)), ui: freshUi(),
-  };
-  const fx = [];
-  linkRequestPoll(m, fx);
-  return {model: m, fx};
+  const model = freshModel(saved.lastDeviceId ?? null), fx = [];
+  linkRequestPoll(model, fx);
+  return {model, fx};
 }
 
 /**

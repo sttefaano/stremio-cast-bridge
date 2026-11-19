@@ -823,3 +823,9 @@ const freshUi = () => ({
   sheet: null, confirm: null, errors: {local: null, observed: null, dismissed: null, absorbed: null}, focus: null,
   stoppedNotice: false, stopIssued: false, exact: {text: '', error: ''}, mode: null, reseed: false, clock: null, lastSourceId: null, lastDeviceLabel: '',
 });
+/** @param {string|null} lastDeviceId @returns {Model} */
+const freshModel = lastDeviceId => ({
+  nextTicket: 0, now: 0, n: 0, prefs: {lastDeviceId, autoSelectTried: false},
+  link: {status: NO_STATUS, online: false, statusAt: 0, generation: 0, seq: 0, statusSeq: 0, polling: false, repoll: false, pollTimer: null, inflight: []},
+  plan: freshPlan(null), remote: freshRemote(playbackKey(NO_STATUS)), ui: freshUi(),
+});
