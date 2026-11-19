@@ -17,10 +17,15 @@ SEGMENT_SECONDS = 6
 TAIL_SECONDS = 0.25
 SEGMENT_NAME = re.compile(r'segment-(\d{4,})\.ts')
 CUE_NAME = re.compile(r'video(0|[1-9]\d*)\.vtt')
+# FFmpeg's own playlist for a run, listing how long each segment it wrote came out.
+PLAYLIST_NAME = 'video.m3u8'
+# A whole segment ends within a frame of its window (measured 6.000000 s); a stall leaves it seconds short
+# (measured 2.833333 s).
+SHORT_SECONDS = .5
 # A segment this close to the producer arrives within a retry or two of the receiver (~10.5 s each);
 # a farther one is quicker to restart at.
 REACH = 3
-# Held below the receiver's ~45 s give-up, measured from the first request for that segment.
+# Held below the receiver's ~45 s give-up, measured from the first request for that segment since the last seek.
 HOLD_SECONDS = 40
 # The receiver retries every ~10.5 s; a request after this long a pause starts a fresh hold.
 RETRY_GAP_SECONDS = 15
@@ -131,15 +136,15 @@ def segment_action(index, complete, run, caller='arrival', yields=False, reach=R
     return 'restart'
 
 
-def exit_outcome(start, limit, position, count, quiet, stall_seconds=STALL_SECONDS):
+def exit_outcome(start, limit, position, count, short, quiet, returncode, stall_seconds=STALL_SECONDS):
     """How a run that exited by itself ended: complete, end (the source's real end), or stalled.
-    quiet is how long it ran after its previous segment (or its launch) until it exited; a stall also
-    finalizes the segment it was writing, so even a run that reached its bound may have left it short."""
-    if quiet >= stall_seconds:
-        return 'stalled'
-    if position == limit:
+    short says its last segment came out shorter than its window, as a stall finalizes the one it was
+    writing, so even a run that reached its bound may have left it short. quiet is how long it ran after
+    its previous segment (or its launch) until its last one, not counting time suspended. Only a clean
+    exit can be the source's end."""
+    if position == limit and not short:
         return 'complete'
-    if limit == count and position >= count - END_SLACK:
+    if limit == count and position >= count - END_SLACK and quiet < stall_seconds and returncode == 0:
         return 'end'
     return 'stalled'
 
@@ -171,6 +176,7 @@ class Producer:
         self.process = None
         self.start = self.limit = self.position = 0
         self.suspended = self.closed = False
+        self.pauses = []  # (stopped, resumed) wall-clock spans of the current run, to compare with mtimes
         self.holds = {}  # arrival number -> (index, cue), for every request held right now
         self.arrivals = self.seek_arrival = 0  # holds that arrived before the last seek were left behind by it
         self.first_seen = {}  # (index, cue) -> when the receiver first asked, across its retries
@@ -203,13 +209,12 @@ class Producer:
     def _settle(self):
         """Judge a run that exited by itself, once: complete, the source's end, or a failure to retry."""
         self.settled = True
-        try:
-            since = (os.stat(self.directory / self.layout.segment_name(self.position - 2)).st_mtime
-                     if self.position - 2 >= self.start else self.launched_at)
-        except OSError:
-            since = self.launched_at
-        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, time.time() - since,
-                               self.stall_seconds)
+        since = self._written_at(self.position - 2, self.launched_at)
+        until = self._written_at(self.position - 1, time.time())
+        quiet = until - since - sum(max(0, min(until, resumed) - max(since, stopped)) for stopped, resumed in self.pauses)
+        short = self.position == self.start or self._short(self.position - 1)
+        outcome = exit_outcome(self.start, self.limit, self.position, self.layout.count, short, quiet,
+                               self.process.poll(), self.stall_seconds)
         if outcome == 'complete':
             self.failures = 0
         elif outcome == 'end':
@@ -221,6 +226,21 @@ class Producer:
                 (self.directory / self.layout.segment_name(self.position)).unlink(missing_ok=True)
             self.failures = 0 if self.position > self.start else self.failures + 1
             self.retry_at = time.monotonic() + self.backoff_seconds
+
+    def _written_at(self, index, fallback):
+        try:
+            return os.stat(self.directory / self.layout.segment_name(index)).st_mtime if index >= self.start else fallback
+        except OSError:
+            return fallback
+
+    def _short(self, index):
+        try:
+            text = (self.directory / PLAYLIST_NAME).read_text()
+        except OSError:
+            return True
+        name = re.escape(self.layout.segment_name(index))
+        lengths = re.findall(rf'#EXTINF:([\d.]+),\n{name}\n', text)
+        return not lengths or float(lengths[-1]) < self.layout.length(index) - SHORT_SECONDS
 
     def _first_missing(self, index, until):
         return next((i for i in range(index, until) if not self.complete(i)), None)
@@ -237,8 +257,7 @@ class Producer:
             raise MediaError('No se pudo iniciar FFmpeg.', 500, 'producer_failed') from None
         self.launched_at = time.time()
         self.start, self.limit, self.position, self.settled = index, limit, index, False
-        self.suspended = False
-        self.first_seen.clear()
+        self.suspended, self.pauses = False, []
 
     def _kill(self):
         # SIGKILL, not SIGTERM: a terminated FFmpeg drains its input and finalizes a short segment.
@@ -254,6 +273,7 @@ class Producer:
     def _resume(self):
         if self.suspended and self.process and self.process.poll() is None:
             self.process.send_signal(signal.SIGCONT)
+            self.pauses.append((self.stopped_at, time.time()))
         self.suspended = False
 
     def cover(self, index, horizon=None):
@@ -278,6 +298,7 @@ class Producer:
             run = self._run()
             if segment_action(index, self.complete(index), run) == 'restart':
                 self._restart(index)
+                self.first_seen.clear()
 
     def request(self, index, extra=(), cue=False):
         """Hold an HTTP request until segment index is on disk; wait for extra only while they are coming.
@@ -339,9 +360,10 @@ class Producer:
         return None
 
     def _servable(self, index, run):
-        """On disk, and not a running run's newest segment so fresh it may be the short one a stall leaves."""
+        """On disk, and not a running run's newest segment so fresh it may be the short one a stall leaves.
+        One written since the run snapshot is at least as new."""
         complete = self.complete(index)
-        if not complete or run.state != 'running' or not run.start <= index == run.position - 1:
+        if not complete or run.state != 'running' or not max(run.start, run.position - 1) <= index < run.limit:
             return complete
         try:
             return time.time() - os.lstat(self.directory / self.layout.segment_name(index)).st_mtime >= self.fresh_seconds
@@ -359,7 +381,7 @@ class Producer:
             ahead = self.layout.start(self._run().position) - playhead
             if not self.suspended and not self.holds and ahead > SUSPEND_AHEAD:
                 self.process.send_signal(signal.SIGSTOP)
-                self.suspended = True
+                self.suspended, self.stopped_at = True, time.time()
             elif self.suspended and (self.holds or ahead < RESUME_AHEAD):
                 self._resume()
 

@@ -110,20 +110,24 @@ class SegmentActionTest(unittest.TestCase):
 
 class ExitOutcomeTest(unittest.TestCase):
     def test_how_a_run_that_exited_by_itself_ended(self):
-        # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15).
+        # A stall exits 0 too, but only after FFmpeg's read timeout without data (measured ~45 s, never under 15),
+        # and it finalizes the segment it was writing short.
         cases = (
-            ('reached its bound', 10, 20, 20, 0, 'complete'),
-            ('reached its bound by stalling in its last segment', 10, 20, 20, 60, 'stalled'),
-            ('stopped promptly in the last two listed segments', 10, 50, 48, 1, 'end'),
-            ('stopped promptly having written nothing near the end', 49, 50, 49, 1, 'end'),
-            ('stopped in the last two after a silence', 10, 50, 48, 45, 'stalled'),
-            ('wrote nothing near the end after a silence', 49, 50, 49, 45, 'stalled'),
-            ('stopped promptly far from the end', 10, 50, 30, 1, 'stalled'),
-            ('stopped near the end of a run bounded before the list end', 10, 49, 48, 1, 'stalled'),
+            ('reached its bound', 10, 20, 20, False, 0, 0, 'complete'),
+            ('reached its bound slowly with its last segment whole', 10, 20, 20, False, 60, 0, 'complete'),
+            ('reached its bound by stalling in its last segment', 10, 20, 20, True, 60, 0, 'stalled'),
+            ('reached the listed end promptly with a short tail', 10, 50, 50, True, 1, 0, 'end'),
+            ('stopped promptly in the last two listed segments', 10, 50, 48, True, 1, 0, 'end'),
+            ('stopped promptly having written nothing near the end', 49, 50, 49, True, 1, 0, 'end'),
+            ('stopped in the last two after a silence', 10, 50, 48, True, 45, 0, 'stalled'),
+            ('wrote nothing near the end after a silence', 49, 50, 49, True, 45, 0, 'stalled'),
+            ('crashed promptly in the last two listed segments', 10, 50, 48, False, 1, 1, 'stalled'),
+            ('stopped promptly far from the end', 10, 50, 30, False, 1, 0, 'stalled'),
+            ('stopped near the end of a run bounded before the list end', 10, 49, 48, False, 1, 0, 'stalled'),
         )
-        for label, start, limit, position, quiet, expected in cases:
+        for label, start, limit, position, short, quiet, code, expected in cases:
             with self.subTest(label):
-                self.assertEqual(exit_outcome(start, limit, position, 50, quiet, stall_seconds=10), expected)
+                self.assertEqual(exit_outcome(start, limit, position, 50, short, quiet, code, stall_seconds=10), expected)
 
 
 class FakeProcess:
@@ -166,9 +170,18 @@ class ProducerTest(unittest.TestCase):
         return Producer(self.directory, self.layout, lambda start, limit: ['ffmpeg', start, limit],
                         **{'poll_seconds': .01, 'fresh_seconds': 0, **kwargs})
 
-    def write(self, *indices):
+    def until(self, condition, message, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, message)
+            time.sleep(.01)
+
+    def write(self, *indices, length=None):
         for index in indices:
-            (self.directory / self.layout.segment_name(index)).write_bytes(b'ts')
+            name = self.layout.segment_name(index)
+            (self.directory / name).write_bytes(b'ts')
+            with open(self.directory / 'video.m3u8', 'a') as playlist:
+                playlist.write(f'#EXTINF:{self.layout.length(index) if length is None else length:.6f},\n{name}\n')
 
     def test_cover_starts_at_the_first_gap_and_stops_before_segments_already_on_disk(self):
         self.write(0, 1, 2, 8, 9)
@@ -307,6 +320,20 @@ class ProducerTest(unittest.TestCase):
         self.assertEqual(producer.request(2), 'missing')
         self.assertLess(time.monotonic() - started, .6, 'a retry shares the first deadline')
 
+    def test_a_restart_never_extends_the_hold_of_a_segment_the_receiver_already_asked_for(self):
+        producer = self.producer(hold_seconds=.3, backoff_seconds=0)
+        producer.cover(0)
+        result = []
+        first = threading.Thread(target=lambda: result.append(producer.request(2)))
+        first.start()
+        time.sleep(.05)
+        self.launched[0].code = 1
+        first.join(1)
+        self.assertEqual((result, [p.command[1] for p in self.launched]), (['missing'], [0, 2]))
+        started = time.monotonic()
+        self.assertEqual(producer.request(2), 'missing')
+        self.assertLess(time.monotonic() - started, .15, 'the retry shares the deadline from before the restart')
+
     def test_a_cue_request_never_shortens_the_hold_of_the_video_segment_it_shares_an_index_with(self):
         producer = self.producer(hold_seconds=.4)
         producer.cover(0)
@@ -363,15 +390,59 @@ class ProducerTest(unittest.TestCase):
                 self.write(7)
                 producer = self.producer(backoff_seconds=0, stall_seconds=5)
                 producer.cover(5)
-                self.write(5, 6)
-                if stalled:
-                    written = time.time() - 10
-                    os.utime(self.directory / self.layout.segment_name(5), (written, written))
+                self.write(5)
+                # Measured: a source that went silent mid-segment left it listed at 2.833333 s.
+                self.write(6, length=2.833333 if stalled else None)
                 self.launched[0].code = 0
                 producer.cover(5)
                 self.assertEqual([p.command for p in self.launched],
                                  [['ffmpeg', 5, 7], ['ffmpeg', 6, 7]] if stalled else [['ffmpeg', 5, 7], ['ffmpeg', 8, 20]])
                 self.assertEqual((self.directory / self.layout.segment_name(6)).exists(), not stalled)
+
+    def test_a_slow_run_that_wrote_its_last_segment_whole_is_served(self):
+        # Measured: with a source answering each request after 5.5 s, a one-segment run took over 10 s yet
+        # FFmpeg listed its segment at the full 6 s.
+        self.write(7)
+        producer = self.producer(hold_seconds=.3, stall_seconds=.1)
+        producer.cover(6)
+        time.sleep(.15)
+        self.write(6)
+        self.launched[0].code = 0
+        self.assertEqual(producer.request(6), 'serve')
+        self.assertEqual([p.command for p in self.launched], [['ffmpeg', 6, 7]])
+
+    def test_only_time_ffmpeg_spent_writing_counts_toward_a_stall_near_the_end(self):
+        self.layout = VodLayout(120.021)
+        for case in ('settled late', 'suspended'):
+            with self.subTest(case):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                self.launched.clear()
+                producer = self.producer(hold_seconds=.3, stall_seconds=.1)
+                producer.cover(0)
+                self.write(*range(0, 17))
+                if case == 'suspended':
+                    producer.throttle(40)
+                    time.sleep(.15)
+                    producer.throttle(70)
+                    self.assertEqual(self.launched[0].signals, [signal.SIGSTOP, signal.SIGCONT])
+                self.write(17)
+                self.launched[0].code = 0
+                if case == 'settled late':
+                    time.sleep(.15)
+                self.assertEqual(producer.request(18), 'end')
+                self.assertEqual(producer.snapshot().end, 18)
+                self.assertEqual(len(self.launched), 1)
+
+    def test_a_crash_near_the_end_is_retried_not_taken_for_the_end(self):
+        self.layout = VodLayout(60.021)
+        producer = self.producer(backoff_seconds=0)
+        producer.cover(0)
+        self.write(*range(0, 8))
+        self.launched[0].code = 1
+        producer.cover(0)
+        self.assertEqual(self.launched[-1].command, ['ffmpeg', 7, 10])
+        self.assertEqual(producer.snapshot().end, 10)
 
     def test_a_prompt_stop_with_nothing_written_near_the_end_marks_the_end_until_a_run_passes_it(self):
         self.layout = VodLayout(60.021)
@@ -433,7 +504,7 @@ class ProducerTest(unittest.TestCase):
                 for path in self.directory.iterdir():
                     path.unlink()
                 self.launched.clear()
-                producer = self.producer(hold_seconds=2, backoff_seconds=0, fresh_seconds=.3)
+                producer = self.producer(hold_seconds=10, backoff_seconds=0, fresh_seconds=2)
                 producer.cover(0)
                 result = []
                 holder = threading.Thread(target=lambda: result.append(producer.request(2)))
@@ -443,12 +514,26 @@ class ProducerTest(unittest.TestCase):
                 self.assertEqual(result, [], 'too fresh to tell from a stall finalized while FFmpeg still runs')
                 if exits:
                     self.launched[0].code = 0
-                    time.sleep(.1)
+                    self.until(lambda: len(self.launched) == 2, 'the stalled run restarts at its short segment')
                     self.assertEqual([p.command for p in self.launched], [['ffmpeg', 0, 20], ['ffmpeg', 2, 20]])
                     self.write(2)
-                holder.join(1)
+                holder.join(10)
                 self.assertEqual(result, ['serve'])
                 self.assertEqual(len(self.launched), 2 if exits else 1)
+
+    def test_a_segment_written_while_a_request_is_judged_waits_out_the_same_grace(self):
+        # Seen with real FFmpeg: a stall finalized a 2.8 s segment between the run snapshot and the
+        # on-disk check, and the request was served it 2 ms after it appeared.
+        producer = self.producer(hold_seconds=.3, fresh_seconds=10)
+        producer.cover(0)
+        self.write(0, 1)
+        snapshot = producer._run
+        def written_after_the_snapshot():
+            run = snapshot()
+            self.write(2)
+            return run
+        with patch.object(producer, '_run', side_effect=written_after_the_snapshot):
+            self.assertEqual(producer.request(2), 'missing')
 
     def test_failures_without_a_new_segment_spend_a_bounded_retry_budget(self):
         producer = self.producer(backoff_seconds=0)
@@ -513,22 +598,26 @@ class ProducerTest(unittest.TestCase):
         for stopped in (False, True):
             with self.subTest(stopped=stopped):
                 self.launched.clear()
-                producer = self.producer(hold_seconds=1, backoff_seconds=0)
+                producer = self.producer(hold_seconds=10, backoff_seconds=0)
                 result = {}
                 def ask(index):
                     result[index] = producer.request(index)
                 first = threading.Thread(target=ask, args=(100,))
                 first.start()
-                time.sleep(.05)
+                self.until(lambda: self.launched, 'the first request starts a run')
                 if stopped:
                     self.launched[0].code = 0
                 second = threading.Thread(target=ask, args=(104,))
                 second.start()
+                if stopped:
+                    self.until(lambda: len(self.launched) == 2, 'the stopped run is revived')
+                else:
+                    self.until(lambda: (104, False) in producer.holds.values(), 'the request ahead is held')
                 time.sleep(.1)
                 self.assertEqual([p.command[1] for p in self.launched], [100, 100] if stopped else [100])
                 self.write(*range(100, 105))
-                first.join(1)
-                second.join(1)
+                first.join(10)
+                second.join(10)
                 self.assertEqual(result, {100: 'serve', 104: 'serve'})
                 for index in range(100, 105):
                     (self.directory / self.layout.segment_name(index)).unlink()

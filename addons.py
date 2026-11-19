@@ -338,6 +338,8 @@ OPENER = build_opener(ProxyHandler({}), _NoRedirect)
 def http_get(url, *, cap, deadline, cancelled=None):
     if not _allowed(url):
         raise AddonError('bad_response')
+    if cancelled is not None and cancelled.is_set():
+        raise AddonError('cancelled')
     limit = time.monotonic() + deadline
     try:
         with OPENER.open(Request(url, headers={'User-Agent': USER_AGENT}), timeout=min(deadline / 2, 4.0)) as response:

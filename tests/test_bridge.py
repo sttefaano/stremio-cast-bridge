@@ -16,8 +16,8 @@ from uuid import UUID
 from pychromecast import Chromecast
 from pychromecast.models import CastInfo
 
-from bridge import (main, Bridge, media_request, CLIP_SEEK_PREROLL, FFMPEG, FFPROBE, public_status,
-                    ffmpeg_command, probe, parse_cues, BridgeError)
+from bridge import (main, Bridge, media_request, DROP_SEEK_PREROLL, FFMPEG, FFPROBE, public_status,
+                    ffmpeg_command, probe, parse_cues, write_file_cues, BridgeError)
 from media import Catalogue, PlaybackPlan, Subtitle, normalize_subtitles
 from vod import Producer, VodLayout
 from backend_fixtures import (install_media, apply_data, media_server, served_cues, finished_producer,
@@ -56,6 +56,32 @@ class RestartPolicyTest(unittest.TestCase):
             content_id='http://unrelated/movie', player_state='PLAYING',
             adjusted_current_time=65, current_subtitle_tracks=[], subtitle_tracks=[], media_session_id=1)
         return bridge
+
+    def test_a_seek_keeps_file_cues_from_before_the_seek_point_for_a_positive_delay(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            root = Path(folder)
+            bridge = self.fixture(root)
+            upload = root / 'upload.vtt'
+            upload.write_text('WEBVTT\n\n00:00:55.000 --> 00:00:57.000\nGone\n\n'
+                              '00:00:57.000 --> 00:00:59.000\nBefore\n\n00:00:59.000 --> 00:01:02.000\nCrossing\n\n'
+                              '00:01:01.000 --> 00:01:02.000\nAfter\n')
+            plan = replace(bridge.active_plan, subtitle=Subtitle('file', 'upload', 'File', path=upload))
+            with patch('bridge.subprocess.Popen', return_value=Mock(pid=123, **{'poll.return_value': None})) as launch, \
+                 patch('bridge.shutil.disk_usage', return_value=SimpleNamespace(free=2**40)):
+                bridge.begin(0, plan=plan)
+                bridge.loaded, bridge.media_url = True, f'http://192.0.2.1:18766/{bridge.session.name}/d0/master.m3u8'
+                receiver = bridge.cast.media_controller.status
+                receiver.content_id, receiver.adjusted_current_time = bridge.media_url, 1
+                bridge.mutate('seek', {'device_id':'fixture-device', 'device_revision':1, 'position': 60})
+                command = launch.call_args.args[0]
+            self.assertEqual(command[command.index('-start_number') + 1], '10')
+            for index in range(9, 12):
+                (bridge.session / f'video{index}.vtt').write_text('WEBVTT\n')
+            with media_server(root, bridge.producer) as fetch:
+                self.assertEqual(served_cues(fetch, bridge.session.name, 0),
+                                 {'Gone': (55, 57), 'Before': (57, 59), 'Crossing': (59, 62), 'After': (61, 62)})
+                self.assertEqual(served_cues(fetch, bridge.session.name, 3000),
+                                 {'Gone': (58, 60), 'Before': (60, 62), 'Crossing': (62, 65), 'After': (64, 65)})
 
     def test_track_change_restarts_at_the_receiver_position_and_waits_for_matching_receiver(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
@@ -161,6 +187,18 @@ class RestartPolicyTest(unittest.TestCase):
             bridge.mutate('stop', {'device_id': 'fixture-device', 'device_revision': 1,
                                    'playback_id': 'playback'})
             controller.stop.assert_called_once()
+
+    def test_file_track_delay_change_is_not_held_back_by_unwritten_segments(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            bridge.state['playback_id'] = 'playback'
+            bridge.receiver_confirmed = True
+            running_producer(bridge)
+            receiver = bridge.cast.media_controller.status
+            receiver.content_id, receiver.adjusted_current_time = bridge.media_url, 10
+            (bridge.session / 'cues.json').write_text('[]')
+            bridge.mutate('subtitles', apply_data(bridge, delay=-30000))
+            self.assertEqual(bridge.cast.media_controller.play_media.call_args.kwargs['current_time'], 10)
 
     def test_failed_delay_reload_keeps_the_previous_plan_and_url(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
@@ -317,6 +355,9 @@ class ReceiverSeekTest(unittest.TestCase):
             with media_server(Path(folder), bridge.producer) as fetch:
                 answer = fetch(f'/{bridge.session.name}/d0/segment-0014.ts')
                 self.assertEqual((answer.status, answer.headers['Content-Length'], answer.read()), (200, '0', b''))
+                ranged = fetch(f'/{bridge.session.name}/d0/segment-0014.ts', Range='bytes=0-')
+                self.assertEqual((ranged.status, ranged.headers['Content-Length'], ranged.headers['Content-Range'],
+                                  ranged.read()), (200, '0', None, b''), 'an empty body has no range to satisfy')
 
     def test_a_seek_while_the_receiver_buffers_the_previous_one_is_applied(self):
         with tempfile.TemporaryDirectory() as folder, patch('vod.subprocess.Popen'):
@@ -393,6 +434,20 @@ class ReceiverOwnershipTest(unittest.TestCase):
             bridge.tick()
             bridge.tick()
             self.assertTrue(bridge.status()['generation_complete'])
+
+    def test_negative_delay_on_a_file_track_loads_once_three_segments_exist(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:
+            bridge = self.fixture(Path(folder))
+            bridge.active_plan = replace(bridge.active_plan, delay_ms=-30000)
+            bridge.loaded = False
+            bridge.update(absolute_time=0)
+            running_producer(bridge)
+            bridge.started_at = time.monotonic()
+            (bridge.session / 'master.m3u8').touch()
+            (bridge.session / 'cues.json').write_text('[]')
+            produce(bridge.session, 0, 1, 2)
+            bridge.tick()
+            bridge.cast.media_controller.play_media.assert_called_once()
 
     def test_ownership_loss_preserves_position_and_stop_leaves_foreign_media(self):
         for player_state in ('PLAYING', 'PAUSED'):
@@ -481,7 +536,8 @@ class MediaPathsTest(unittest.TestCase):
                      '/session-123/d0/%2e%2e/session-123/video.m3u8', '/session-123/%2e%2e/video.m3u8',
                      '/session-123/d0/file%00.vtt', '/session-123/d0/a%5cb.vtt',
                      '/session-123/d-0/video.m3u8', '/session-123/d+5/video.m3u8', '/session-123/d05/video.m3u8',
-                     '/session-123/d30001/video.m3u8', '/session-123/dx/video.m3u8', '/session-123/500/video.m3u8'):
+                     '/session-123/d30001/video.m3u8', '/session-123/dx/video.m3u8', '/session-123/500/video.m3u8',
+                     '/session-123/d1%D9%A5%D9%A0%D9%A0/video.m3u8', '/session-123/d5%EF%BC%90/video.m3u8'):
             with self.subTest(path=path):
                 self.assertIsNone(media_request(path))
 
@@ -569,7 +625,7 @@ class SubtitleTimingTest(unittest.TestCase):
             source = Path(folder) / 'seek.srt'
             source.write_text('1\n00:01:02,355 --> 00:01:04,000\nHola\n')
             result = subprocess.run([FFMPEG, '-v', 'error', '-ss', '60', '-i', str(source),
-                '-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL, '-f', 'webvtt', '-'],
+                '-c:s', 'webvtt', '-bsf:s', DROP_SEEK_PREROLL, '-f', 'webvtt', '-'],
                 capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertIn(b'00:02.355 --> 00:04.000', result.stdout)
@@ -663,6 +719,19 @@ class DelayedSubtitleViewTest(unittest.TestCase):
             with media_server(Path(folder), finished_producer(session, 18)) as fetch:
                 self.assertEqual(fetch('/session-view/d0/video1.vtt').read().decode(),
                                  'WEBVTT\n\n00:00:05.043 --> 00:00:07.043\nCrossing\n')
+
+    def test_a_file_track_window_answers_at_once_from_its_own_cues(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = self.session(Path(folder))
+            (session / 'cues.json').write_text(json.dumps([[30500, 31000, '', 'Ahead']]))
+            producer = finished_producer(session, 60, hold_seconds=5)
+            producer.process.poll.return_value = None
+            producer.start = producer.position = 3
+            with media_server(Path(folder), producer) as fetch:
+                started = time.monotonic()
+                self.assertEqual(fetch('/session-view/d-30000/video0.vtt').read().decode(),
+                                 'WEBVTT\n\n00:00:00.500 --> 00:00:01.000\nAhead\n')
+                self.assertLess(time.monotonic() - started, 1, 'no wait for the segments a negative delay pulls from')
 
     def test_video_passes_through_and_unknown_or_escaping_paths_are_refused(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -819,12 +888,12 @@ class RestartSeamTest(unittest.TestCase):
                             restarted.add(text)
                             with self.subTest(index=index, cue=text):
                                 self.assertAlmostEqual(end, zero_cues[text][1], delta=self.TOLERANCE * 1000)
-                                if text != 'Spanning':
-                                    self.assertAlmostEqual(start, zero_cues[text][0], delta=self.TOLERANCE * 1000)
-                    # An uploaded file is clipped at the restart point; an embedded track drops the cue.
-                    self.assertEqual(restarted, {'Spanning', 'After', 'Later'} if entry.path else {'After', 'Later'})
+                                self.assertAlmostEqual(start, zero_cues[text][0], delta=self.TOLERANCE * 1000)
+                    # The restart drops the cue in progress at its start; an uploaded file keeps it in cues.json.
+                    self.assertEqual(restarted, {'After', 'Later'})
                     mixed = root / f'session-{entry.kind}'
                     mixed.mkdir()
+                    write_file_cues(mixed, plan)
                     layout = VodLayout(analysis.duration, subtitles=True)
                     for index in range(layout.count):
                         run = zero if index < k else restart

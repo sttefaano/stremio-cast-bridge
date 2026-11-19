@@ -27,7 +27,7 @@ from urllib.request import urlopen
 from dataclasses import replace
 from addons import StremioAddon
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
-from vod import READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
+from vod import PLAYLIST_NAME, READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
 
 FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
@@ -36,13 +36,14 @@ PRIVATE_SOURCE_KEYS = ('url', 'release')
 MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
-DELAY_PART = re.compile(r'd(0|-?[1-9]\d{0,4})')
+DELAY_PART = re.compile(r'd(0|-?[1-9][0-9]{0,4})')
 SUBTITLE_PLAYLIST = 'video_vtt.m3u8'
 # The receiver keeps asking for the target segment for about 45 s before it gives up on a seek.
 SEEK_CONFIRM_SECONDS = 45
 # Cues that start this many segments before a window can still be on screen in it.
 CUE_LOOKBACK = 2
 DUPLICATE_MS = 100
+FILE_CUES = 'cues.json'
 CUE_TIMING = re.compile(r'((?:\d+:)?\d{2}:\d{2}\.\d{3})[ \t]+-->[ \t]+((?:\d+:)?\d{2}:\d{2}\.\d{3})(.*)')
 
 
@@ -78,9 +79,18 @@ def open_media(root, path):
 
 
 def subtitle_segment(root, producer, index, delay_ms):
-    """Window index of the layout, built from every source segment whose cues can land in it after the delay."""
+    """Window index of the layout, after the delay: a file track's own cues, else the cues FFmpeg wrote."""
+    window = producer.layout.window(index)
+    try:
+        cues = segment_cues(root, producer.directory / FILE_CUES)
+    except FileNotFoundError:
+        cues = produced_cues(root, producer, index, window, delay_ms)
+    return io.BytesIO(shifted_cues(cues, window, delay_ms).encode())
+
+
+def produced_cues(root, producer, index, window, delay_ms):
+    """Every cue from the source segments whose cues can land in the window after the delay."""
     layout = producer.layout
-    window = layout.window(index)
     # A negative delay pulls cues from later segments, so wait for those while the producer is making them.
     # Out of its reach the window is answered at once from what is on disk, never with a 404.
     last = max(index, layout.index_at((window[1] - 1 - delay_ms) / 1000))
@@ -94,7 +104,14 @@ def subtitle_segment(root, producer, index, delay_ms):
                 cues += segment_cues(root, producer.directory / layout.cue_name(source))
             except OSError:
                 pass
-    return io.BytesIO(shifted_cues(cues, window, delay_ms).encode())
+    # Two runs' segments can both hold a cue, with timestamps tens of milliseconds apart; show it once.
+    kept = []
+    for cue in sorted(cues, key=lambda cue: (cue[3], cue[2], cue[1])):
+        if kept and kept[-1][2:] == cue[2:] and cue[1] - kept[-1][1] <= DUPLICATE_MS:
+            kept[-1] = min(kept[-1], cue)
+        else:
+            kept.append(cue)
+    return kept
 
 
 def segment_cues(root, path):
@@ -105,19 +122,20 @@ def segment_cues(root, path):
 @functools.lru_cache(maxsize=8192)
 def file_cues(root, path, *identity):
     with open_media(root, path) as stream:
+        if path.name == FILE_CUES:
+            return tuple(map(tuple, json.load(stream)))
         return tuple(parse_cues(stream.read().decode('utf-8', 'replace')))
 
 
+def write_file_cues(session, plan):
+    """FFmpeg drops a file track's cues from before each restart; keep them all, at movie time."""
+    if plan.subtitle and plan.subtitle.path:
+        cues = parse_cues(plan.subtitle.path.read_text(encoding='utf-8'))
+        (session / FILE_CUES).write_text(json.dumps(cues))
+
+
 def shifted_cues(cues, window, delay_ms):
-    # A restart clips a cue that crosses its first segment, so the earlier run may hold the same cue
-    # with an earlier start; the two runs' timestamps differ by tens of milliseconds.
-    kept = []
-    for cue in sorted(cues, key=lambda cue: (cue[3], cue[2], cue[1])):
-        if kept and kept[-1][2:] == cue[2:] and cue[1] - kept[-1][1] <= DUPLICATE_MS:
-            kept[-1] = min(kept[-1], cue)
-        else:
-            kept.append(cue)
-    shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text) for start, end, settings, text in kept
+    shown = sorted((max(0, start + delay_ms), end + delay_ms, settings, text) for start, end, settings, text in cues
                    if end + delay_ms > window[0] and max(0, start + delay_ms) < window[1])
     return 'WEBVTT\n' + ''.join(f'\n{timestamp(start)} --> {timestamp(end)}{settings}\n{text}\n'
                                 for start, end, settings, text in shown)
@@ -145,10 +163,8 @@ def timestamp(ms):
     return f'{ms // 3600000:02}:{ms // 60000 % 60:02}:{ms // 1000 % 60:02}.{ms % 1000:03}'
 
 
-CLIP_SEEK_PREROLL = ("noise=amount=0:drop='lte(pts+duration,0)',"
-                   "setts=pts='max(PTS,0)':dts='max(DTS,0)':duration='max(0,DURATION+min(0,PTS))'")
-# setts holds each packet until the next one arrives, so a sparse embedded track would write a cue
-# segments after its window. A stored file is read ahead and is not delayed, so it keeps the clip.
+# Clipping the cue in progress at the seek needs setts, which holds each packet until the next one arrives,
+# so a sparse embedded track would write a cue segments after its window. A file track keeps it in FILE_CUES.
 DROP_SEEK_PREROLL = "noise=amount=0:drop='lt(pts,0)'"
 
 
@@ -172,7 +188,7 @@ def ffmpeg_command(source, session, plan, start_index=0, duration=None, readrate
     mapping = 'v:0,a:0'
     if subtitle:
         language = subtitle.language or 'und'
-        captions = ['-c:s', 'webvtt', '-bsf:s', CLIP_SEEK_PREROLL if subtitle.path else DROP_SEEK_PREROLL,
+        captions = ['-c:s', 'webvtt', '-bsf:s', DROP_SEEK_PREROLL,
                     '-metadata:s:s:0', f'language={language}']
         mapping += f',s:0,sgroup:subs,language:{language}'
     return command + ['-vf', 'scale=1280:-2', '-c:v', 'libx264', '-preset', 'ultrafast',
@@ -183,7 +199,7 @@ def ffmpeg_command(source, session, plan, start_index=0, duration=None, readrate
         '-f', 'hls', '-hls_time', str(SEGMENT_SECONDS), '-hls_list_size', '0',
         '-hls_flags', 'independent_segments+temp_file', '-hls_playlist_type', 'event',
         '-master_pl_name', 'master.m3u8', '-var_stream_map', mapping,
-        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / 'video.m3u8')]
+        '-hls_segment_filename', str(session / 'segment-%04d.ts'), str(session / PLAYLIST_NAME)]
 
 
 STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'absolute_time',
@@ -393,6 +409,7 @@ class Bridge:
         self.device_lock = threading.Lock()
         self.source_lock = threading.Lock()
         self.device_snapshot = dict(device_discovery='idle', device_error=None, devices=[])
+        self.device_scans = 0
         self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[])
         self.device_wake, self.source_wake = threading.Event(), threading.Event()
         self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local',
@@ -449,7 +466,7 @@ class Bridge:
         """The explicit CLI opt-in waits for metadata, never inside playback work."""
         deadline = time.monotonic() + 70
         generation = self.cancel_generation
-        selection_submitted = False
+        attempted_scan = None
         source = None
         while not self.quit.is_set() and time.monotonic() < deadline:
             with self.state_lock:
@@ -457,17 +474,15 @@ class Bridge:
                     return
                 selected = self.state.get('selected_device')
                 pending = self.state.get('command_pending', False)
-            if not selection_submitted:
+            if not selected and not pending:
                 with self.device_lock:
-                    discovery = self.device_snapshot['device_discovery']
-                if discovery == 'ready':
+                    discovery, scan = self.device_snapshot['device_discovery'], self.device_scans
+                if discovery == 'ready' and scan != attempted_scan:
+                    attempted_scan = scan
                     try:
                         self.submit('configure_device', {}, expected_generation=generation)
                     except MediaError:
                         return
-                    selection_submitted = True
-                elif discovery == 'error':
-                    return
             elif selected and not pending:
                 if not self.args.autostart:
                     return
@@ -590,6 +605,7 @@ class Bridge:
                 if not self.quit.is_set():
                     self.devices = devices
                     self.device_snapshot.update(devices=[receiver_metadata(i) for i in devices.values()], device_discovery='ready')
+                    self.device_scans += 1
         except Exception:
             with self.device_lock:
                 if not self.quit.is_set():
@@ -941,6 +957,7 @@ class Bridge:
         check_cancelled()
         self.session = session = self.sessions / ('session-' + secrets.token_hex(8))
         session.mkdir()
+        write_file_cues(session, self.active_plan)
         layout = VodLayout(self.duration, subtitles=self.active_plan.subtitle is not None)
         source, playback, readrate = self.selected['url'], self.active_plan, self.args.readrate
         # Never persist raw arguments or producer stderr (both may contain private URLs).
@@ -1348,7 +1365,8 @@ class MediaHandler(BaseHTTPRequestHandler):
             with stream:
                 size = stream.seek(0, os.SEEK_END)
                 start, end = 0, size - 1
-                value = self.headers.get('Range')
+                # An empty segment past the source's end has no range to satisfy; answer it whole.
+                value = size and self.headers.get('Range')
                 if value:
                     match = re.fullmatch(r'bytes=(\d+)-(\d*)', value)
                     if not match:
