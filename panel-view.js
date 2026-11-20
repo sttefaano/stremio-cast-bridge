@@ -4,8 +4,10 @@
  * @typedef {{enabled:boolean}} Ctl
  * @typedef {{id:string,label:string,note?:string,selected:boolean,enabled:boolean,reason?:string,tag?:string}} Row
  * @typedef {object} PlanView  Rendered in Preparar (segments 01 and 03 and the stub) and inside the "Cambiar película" sheet.
- * @property {Row[]} sources
+ * @property {Row[]} seasons  one tab per series season plus Películas; empty when everything fits one group
+ * @property {Row[]} sources  only the shown group, episodes in order
  * @property {string} sourceStatus
+ * @property {{shown:boolean,rows:Row[],status:string}} torrents  the versions of the episode being fetched or played
  * @property {Ctl} refreshSources
  * @property {{id:'none'|'file'|'stremio'|'upload',label:string,selected:boolean,hidden:boolean,enabled:boolean}[]} branches
  * @property {string} subsStatus  the one status line of the chosen branch
@@ -80,6 +82,61 @@ function subsStatusLine(m, st) {
   return st?.status || (chosen ? `Subtítulo listo: ${chosen.label}.` : st?.use.shown ? 'Elegí un idioma y una versión.' : '');
 }
 
+/**
+ * Series group by show and season, in episode order; everything else is Películas. A ready guide (Cinemeta, via the bridge)
+ * adds every episode of the show: the ones without a cached file come back with `source: null`.
+ */
+function sourceGroups(sources, guides = {}) {
+  const series = new Map(), shows = new Map(), movies = [];
+  const groupOf = (show, season) => {
+    const key = `${show.toLowerCase()}|${season}`;
+    if (!series.has(key)) series.set(key, {key, show, season, episodes: []});
+    return series.get(key);
+  };
+  for (const x of sources) {
+    if (!x.episode) { movies.push(x); continue; }
+    const show = x.episode.show || 'Serie';
+    if (!shows.has(show.toLowerCase())) shows.set(show.toLowerCase(), show);
+    groupOf(show, x.episode.season).episodes.push({number: x.episode.number, name: null, released: null, source: x});
+  }
+  for (const [lower, show] of shows) {
+    const guide = guides[lower];
+    if (guide?.state !== 'ready') continue;
+    for (const e of guide.episodes) {
+      const g = groupOf(show, e.season), cached = g.episodes.filter(x => x.number === e.number);
+      if (cached.length) for (const x of cached) Object.assign(x, {name: e.name, released: e.released});
+      else g.episodes.push({number: e.number, name: e.name, released: e.released, source: null});
+    }
+  }
+  const ordered = [...series.values()].sort((a, b) => a.show.localeCompare(b.show) || a.season - b.season);
+  for (const g of ordered) {
+    g.episodes.sort((a, b) => a.number - b.number);
+    g.label = shows.size > 1 ? `${g.show} · T${g.season}` : `Temporada ${g.season}`;
+  }
+  return movies.length ? [{key: 'movies', label: 'Películas', episodes: movies.map(source => ({source}))}, ...ordered] : ordered;
+}
+const premiere = (released, today) => released && released > today ? `Se estrena el ${released.split('-').reverse().join('/')}.` : '';
+const swarm = x => typeof x.seeders === 'number' ? `👤 ${x.seeders} seeders` : typeof x.peers === 'number' ? `${x.peers} conectados` : '';
+const fileNote = x => [x.filename, swarm(x)].filter(Boolean).join(' · ');
+function episodeRow(g, e, p, online, today, t) {
+  const x = e.source;
+  if (!('number' in e)) return {id: x.id, label: x.title || 'Película sin nombre', note: fileNote(x), selected: p.sourceId === x.id, enabled: online};
+  const label = e.name ? `${e.number}. ${e.name}` : `Episodio ${e.number}`;
+  if (x) return {id: x.id, label, note: fileNote(x), selected: p.sourceId === x.id, enabled: online};
+  const id = `ep:${g.key}|${e.number}`, soon = premiere(e.released, today), mine = t?.key === id;
+  const note = soon || (mine && t.s === 'loading' ? 'Buscando torrents…' : mine && t.s === 'error' ? t.message : 'Sin cargar · tocá para buscar torrents');
+  return {id, label, note, selected: mine, enabled: online && !soon};
+}
+function viewTorrents(t, group, online) {
+  const shown = !!t && !!group?.episodes.some(e => 'number' in e && t.key === `ep:${group.key}|${e.number}`) && t.s !== 'error';
+  if (!shown) return {shown: false, rows: [], status: ''};
+  const rows = t.streams.map(x => ({id: x.id, label: x.filename, selected: t.chosen === x.id, enabled: online && !t.use,
+    note: [typeof x.seeders === 'number' ? `👤 ${x.seeders} seeders` : 'Seeders desconocidos', x.size, x.resolution].filter(Boolean).join(' · ')}));
+  const status = t.s === 'loading' ? 'Buscando torrents en Stremio…' : t.use || t.pending ? 'Cargando la versión elegida…'
+    : t.message || 'Ordenadas por resolución y seeders. Tocá otra para cambiar.';
+  return {shown, rows, status};
+}
+
 function viewPlan(m) {
   const s = m.link.status, p = m.plan, c = caps(m), cat = p.catalogue, sel = s.selected_device;
   const can = planCanStart(m), same = samePlan(m), online = c.online, idleLoad = p.load.s === 'idle';
@@ -88,15 +145,23 @@ function viewPlan(m) {
   const branchOk = online && !!p.sourceId && !!cat && idleLoad;
   const uploadFree = branchOk && p.upload.s === 'idle' && p.addon.op?.kind !== 'fetch';
   const picked = entryOf(cat, p.choice.entryId), stremio = viewStremio(m, 'plan');
+  const groups = sourceGroups(s.sources, s.guides), t = m.ui.torrents;
+  const owner = id => id && groups.find(g => g.episodes.some(e => e.source?.id === id || 'number' in e && `ep:${g.key}|${e.number}` === id));
+  const shown = groups.find(g => g.key === m.ui.season) || owner(p.sourceId) || owner(t?.key) || owner(s.source_id)
+    || groups.findLast(g => g.episodes.some(e => e.source)) || groups.at(-1);
+  const today = new Date(m.now).toISOString().slice(0, 10);
   let note = '';
   if (!online) note = 'Sin conexión con el puente.';
   else if (!can.ok && !can.missing.length) note = 'Leyendo la película…';
   else if (!c.start) note = c.foreign ? 'La TV está con otro contenido.' : c.busy ? 'La TV está ocupada.' : sel?.available === true ? 'Hay listas sin confirmar. Actualizá.' : '';
   return {
-    sources: s.sources.map(x => ({id: x.id, label: x.title || 'Película sin nombre', note: x.filename || '', selected: p.sourceId === x.id, enabled: online})),
+    seasons: groups.length > 1 ? groups.map(g => ({id: g.key, label: g.label, selected: g === shown, enabled: true})) : [],
+    sources: (shown?.episodes || []).map(e => episodeRow(shown, e, p, online, today, t)),
+    torrents: viewTorrents(t, shown, online),
     sourceStatus: sourceError ? `No se pudo actualizar la lista de películas. Usá Actualizar para reintentar. ${sourceError}`
       : s.source_discovery === 'loading' || p.refresh.discover.ticket ? 'Buscando películas…'
-      : s.sources.length ? '' : 'No hay películas todavía. Abrí una en Stremio y volvé a actualizar.',
+      : !s.sources.length ? 'No hay películas todavía. Abrí una en Stremio y volvé a actualizar.'
+      : shown?.episodes.some(e => !e.source) ? 'Tocá un capítulo sin cargar para buscar sus torrents.' : '',
     refreshSources: {enabled: online && !p.refresh.discover.ticket && s.source_discovery !== 'loading'},
     branches: SUBS_BRANCHES.map(([id, label]) => ({id, label, selected: p.choice.branch === id, hidden: id === 'stremio' && stremioOff, enabled: branchOk})),
     subsStatus: subsStatusLine(m, stremio),

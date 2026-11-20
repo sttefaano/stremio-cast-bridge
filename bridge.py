@@ -1,6 +1,7 @@
 """Local, explicitly controlled Stremio → HLS → Chromecast bridge."""
 import argparse
 import functools
+import glob
 import hashlib
 import io
 import ipaddress
@@ -23,9 +24,9 @@ import tempfile
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from dataclasses import replace
-from addons import StremioAddon
+from addons import AddonError, StremioAddon, parse_release, rank_streams, torrentio_base
 from media import SetupCatalogue, MediaError, analyse, validate_choice, UPLOAD_BODY_LIMIT
 from vod import PLAYLIST_NAME, READ_TIMEOUT_SECONDS, SEGMENT_SECONDS, SUSPEND_AHEAD, Producer, VodLayout
 
@@ -33,6 +34,9 @@ FFMPEG = '/Applications/Stremio.app/Contents/MacOS/ffmpeg'
 FFPROBE = '/Applications/Stremio.app/Contents/MacOS/ffprobe'
 ROOT = Path(__file__).resolve().parent
 PRIVATE_SOURCE_KEYS = ('url', 'release')
+ENGINE_READY_SECONDS = 60
+ENGINE_FILE = re.compile(r'http://127\.0\.0\.1:11470/([a-f0-9]{40})/\d+')
+STREMIO_PROFILES = '~/Library/WebKit/com.westbridge.stremio5-mac/WebsiteData/Default/*/*/LocalStorage/localstorage.sqlite3'
 MIME = {'.m3u8': 'application/vnd.apple.mpegurl', '.ts': 'video/mp2t', '.vtt': 'text/vtt'}
 
 
@@ -207,7 +211,7 @@ STATUS_KEYS = {'phase', 'message', 'title', 'duration', 'absolute_time',
                'devices', 'selected_device', 'device_discovery', 'device_error', 'device_revision', 'can_change_device',
                'receiver_state', 'active_subtitle_track_ids', 'subtitle_delay_ms',
                'session', 'ffmpeg_pid', 'ffmpeg_alive', 'producer_suspended', 'segment_count',
-               'generation_complete', 'sources', 'pending', 'storage_bytes',
+               'generation_complete', 'sources', 'guides', 'pending', 'storage_bytes',
                'volume', 'muted', 'subtitles_enabled', 'action_error', 'command_pending', 'demo',
                'action_error_revision', 'source_id', 'buffer_ahead_seconds', 'buffered_start', 'buffered_end'}
 
@@ -258,6 +262,18 @@ def validate_stop_identity(state, data):
             raise BridgeError('La reproducción cambió. Revisá la película activa.', 409, 'stale_playback')
     elif state.get('phase') in ('playing', 'paused'):
         raise BridgeError('Confirmá la reproducción que querés detener.', 409, 'stale_playback')
+
+
+def episode_of(filename, release=''):
+    guess = parse_release(filename, release)
+    if guess.season is None:
+        return None
+    show = guess.title.title() if guess.title and guess.title.islower() else guess.title
+    return dict(show=show, season=guess.season, number=guess.episode)
+
+
+def episode_title(episode):
+    return f"{episode['show'] or 'Serie'} · T{episode['season']} E{episode['number']}"
 
 
 def discover_receivers(known_host=None):
@@ -410,10 +426,13 @@ class Bridge:
         self.source_lock = threading.Lock()
         self.device_snapshot = dict(device_discovery='idle', device_error=None, devices=[])
         self.device_scans = 0
-        self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[])
+        self.source_snapshot = dict(source_discovery='idle', source_error=None, sources=[], guides={})
+        self.addon = None if args.no_stremio_subtitles else StremioAddon()
+        self.torrentio = None
+        self.streams = {}
+        self.added_sources = {}
         self.device_wake, self.source_wake = threading.Event(), threading.Event()
-        self.catalogue = SetupCatalogue(lambda source, cancelled: probe(source, cancelled), ROOT / '.local',
-                                        None if args.no_stremio_subtitles else StremioAddon())
+        self.catalogue = SetupCatalogue(self._probe, ROOT / '.local', self.addon)
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
         self.metadata_workers = [threading.Thread(target=self._scan_loop, args=(self.scan_devices, self.device_wake), daemon=True),
@@ -762,24 +781,127 @@ class Bridge:
                         sources.append({'url': f'http://127.0.0.1:11470/{infohash}/{index}',
                                         'title': Path(name).stem.replace('.', ' ').replace('_', ' ')[:180],
                                         'filename': Path(name).name, 'length': file.get('length'),
-                                        'index': int(index), 'release': str(torrent.get('name') or '')[:180]})
+                                        'index': int(index), 'release': str(torrent.get('name') or '')[:180],
+                                        'peers': torrent['peers'] if type(torrent.get('peers')) is int else None})
         except Exception:
             if not sources:
                 with self.source_lock:
                     if not self.quit.is_set():
                         self.source_snapshot.update(source_discovery='error', source_error='No se pudieron buscar películas. Abrí Stremio y reintentá.')
                 return
+        with self.source_lock:
+            sources = [dict(s) for s in self.added_sources.values()] + sources
         unique = {}
         for source in sources:
             source['id'] = hashlib.sha256(source['url'].encode()).hexdigest()[:24]
+            if 'episode' not in source:
+                source['episode'] = episode_of(source.get('filename') or '', source.get('release') or '')
+            if source['episode']:
+                source['title'] = episode_title(source['episode'])
             existing = unique.setdefault(source['url'], source)
             if not existing.get('filename') and source.get('filename'):
                 existing.update(title=source['title'], filename=source['filename'])
+            if existing is not source and source.get('peers') is not None:
+                existing['peers'] = source['peers']
+        missing = []
         with self.source_lock:
             if not self.quit.is_set():
                 self.sources = list(unique.values())
                 self.source_snapshot.update(sources=[{k: v for k, v in s.items() if k not in PRIVATE_SOURCE_KEYS} for s in self.sources],
                                             source_discovery='ready', source_error=None)
+                guides = self.source_snapshot['guides']
+                wanted = {s['episode']['show'].lower(): s['episode']['show'] for s in self.sources
+                          if s.get('episode') and s['episode']['show'] and self.addon}
+                missing = [(key, show) for key, show in wanted.items() if guides.get(key, {}).get('state') in (None, 'error')]
+                self.source_snapshot['guides'] = {**guides, **{key: dict(state='loading', title=show, episodes=[]) for key, show in missing}}
+        for key, show in missing:
+            threading.Thread(target=self._load_guide, args=(key, show), daemon=True).start()
+
+    def episode_streams(self, data):
+        if self.quit.is_set():
+            raise BridgeError('El puente se está cerrando.', 503, 'shutdown')
+        if (set(data) != {'show', 'season', 'number'} or not isinstance(data['show'], str)
+                or type(data['season']) is not int or type(data['number']) is not int):
+            raise BridgeError('Solicitud de capítulo inválida.')
+        if self.addon is None:
+            raise BridgeError('La búsqueda en Stremio está desactivada.', 409, 'addon_off')
+        with self.source_lock:
+            guide = self.source_snapshot['guides'].get(data['show'])
+            loaded = [s for s in self.sources if (s.get('episode') or {}).get('show') and s['episode']['show'].lower() == data['show']]
+        if (not guide or guide['state'] != 'ready'
+                or not any(e['season'] == data['season'] and e['number'] == data['number'] for e in guide['episodes'])):
+            raise BridgeError('Ese capítulo no está en la guía de la serie.', 404, 'unknown_episode')
+        if self.torrentio is None:
+            self.torrentio = torrentio_base(glob.glob(os.path.expanduser(STREMIO_PROFILES)))
+        try:
+            found = self.addon.streams(self.torrentio, guide['imdb'], data['season'], data['number'], self.quit)
+        except AddonError as error:
+            raise BridgeError(f'No se pudieron buscar torrents. {error}', 502, 'stream_lookup') from None
+        hashes = {m[1] for s in loaded if (m := ENGINE_FILE.fullmatch(s['url']))}
+        ranked = rank_streams(found, [s.get('filename') or '' for s in loaded], hashes)
+        episode = dict(show=guide['title'], season=data['season'], number=data['number'])
+        with self.source_lock:
+            if len(self.streams) > 500:
+                self.streams.clear()
+            self.streams.update({s.id: (s, episode) for s in ranked})
+        return dict(streams=[s.public() for s in ranked])
+
+    def use_stream(self, data):
+        if set(data) != {'stream_id'} or not isinstance(data['stream_id'], str):
+            raise BridgeError('Solicitud de versión inválida.')
+        with self.source_lock:
+            entry = self.streams.get(data['stream_id'])
+            if entry is None:
+                raise BridgeError('Esa versión ya no está disponible. Buscá de nuevo.', 404, 'unknown_stream')
+            stream, episode = entry
+            url = f'http://127.0.0.1:11470/{stream.info_hash}/{stream.file_idx}'
+            source = dict(url=url, id=hashlib.sha256(url.encode()).hexdigest()[:24], title=episode_title(episode),
+                          filename=stream.filename, length=None, index=stream.file_idx, release='', episode=episode,
+                          seeders=stream.seeders, peers=None)
+            self.added_sources[url] = source
+            if not any(s['url'] == url for s in self.sources):
+                self.sources = [*self.sources, dict(source)]
+                self.source_snapshot.update(sources=[{k: v for k, v in s.items() if k not in PRIVATE_SOURCE_KEYS} for s in self.sources])
+        threading.Thread(target=self._create_torrent, args=(stream,), daemon=True).start()
+        return dict(source={k: v for k, v in source.items() if k not in PRIVATE_SOURCE_KEYS})
+
+    def _create_torrent(self, stream):
+        """Starts the torrent now, with the trackers Torrentio listed when there are any, instead of at the first read."""
+        search = dict(peerSearch=dict(sources=[f'tracker:{t}' for t in stream.trackers] + [f'dht:{stream.info_hash}'], min=40, max=200))
+        body = json.dumps(search if stream.trackers else {}).encode()
+        try:
+            with urlopen(Request(f'http://127.0.0.1:11470/{stream.info_hash}/create', body, {'Content-Type': 'application/json'}),
+                         timeout=15) as response:
+                response.read(64 * 1024)
+        except Exception:
+            pass
+
+    def _probe(self, url, cancelled):
+        """A torrent added from Torrentio needs its metadata before ffprobe's 15 s read timeout can be meaningful."""
+        engine = ENGINE_FILE.fullmatch(url)
+        with self.source_lock:
+            fresh = url in self.added_sources
+        deadline = time.monotonic() + ENGINE_READY_SECONDS
+        while engine and fresh and time.monotonic() < deadline and not (cancelled and cancelled.is_set()):
+            try:
+                with urlopen(f'http://127.0.0.1:11470/{engine[1]}/stats.json', timeout=3) as response:
+                    stats = json.loads(response.read(1024 ** 2))
+                if isinstance(stats, dict) and stats.get('files'):
+                    break
+            except Exception:
+                pass
+            (cancelled or self.quit).wait(1)
+        return probe(url, cancelled)
+
+    def _load_guide(self, key, show):
+        try:
+            found = self.addon.guide(show, self.quit)
+            guide = dict(state='ready', **found) if found else dict(state='unidentified', title=show, episodes=[])
+        except AddonError:
+            guide = dict(state='error', title=show, episodes=[])
+        with self.source_lock:
+            if not self.quit.is_set():
+                self.source_snapshot['guides'] = {**self.source_snapshot['guides'], key: guide}
 
     def connect(self, revision=None):
         # This is the connection's commitment point, serialized with Stop acceptance.
@@ -1484,6 +1606,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.reply(200, self.server.bridge.subtitle_offers(data))
             elif self.path == '/api/subtitle_fetch':
                 self.reply(201, self.server.bridge.subtitle_fetch(data))
+            elif self.path == '/api/episode_streams':
+                self.reply(200, self.server.bridge.episode_streams(data))
+            elif self.path == '/api/use_stream':
+                self.reply(201, self.server.bridge.use_stream(data))
             else:
                 self.server.bridge.submit(self.path[5:], data)
                 self.reply(202, {'accepted': True})

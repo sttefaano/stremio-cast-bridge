@@ -103,8 +103,13 @@ function paintPlan(doc, v) {
   const p = v.plan, plan = byId(doc, 'plan'), sheetPlan = v.sheet?.kind === 'change';
   const home = byId(doc, sheetPlan ? 'sheet-change-slot' : 'prep-plan-slot');
   if (plan.parentNode !== home) home.appendChild(plan);
+  paintList(byId(doc, 'season-tabs'), p.seasons);
+  put(byId(doc, 'season-tabs'), 'hidden', !p.seasons.length);
   paintList(byId(doc, 'source-list'), p.sources);
   put(byId(doc, 'source-status'), 'textContent', p.sourceStatus);
+  put(byId(doc, 'torrent-block'), 'hidden', !p.torrents.shown);
+  paintList(byId(doc, 'torrent-list'), p.torrents.rows);
+  put(byId(doc, 'torrent-status'), 'textContent', p.torrents.status);
   ctl(byId(doc, 'refresh-sources'), p.refreshSources);
   let chosen = 'none';
   for (const b of p.branches) {

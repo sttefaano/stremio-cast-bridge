@@ -26,7 +26,7 @@ function step(m, msg) {
 }
 /** Each owner claims its own tickets. A ticket nobody holds is dropped: that is the fence. */
 function routeReply(m, fx, msg) {
-  if (!linkOnReply(m, fx, msg) && !planOnReply(m, fx, msg)) addonRouteReply(m, fx, msg);
+  if (!linkOnReply(m, fx, msg) && !planOnReply(m, fx, msg) && !torrentsOnReply(m, fx, msg)) addonRouteReply(m, fx, msg);
 }
 function onTimer(m, fx, msg) {
   const l = m.link;
@@ -42,6 +42,7 @@ function reconcile(m, fx) {
   const l = m.link, s = l.status, u = m.ui, c = caps(m);
   if (c.owned && !c.foreign && s.selected_device) { u.lastSourceId = s.source_id ?? u.lastSourceId; u.lastDeviceLabel = deviceLabel(s.selected_device); }
   uiValidLayers(m);
+  torrentsAdopt(m, fx);
   const mode = modeOf(m);
   if (u.mode === 'mando' && mode === 'preparar') { planReset(m, null); u.reseed = true; u.stoppedNotice = u.stopIssued; u.stopIssued = false; }
   if (mode === 'mando') u.stoppedNotice = false;
@@ -75,7 +76,14 @@ function reconcile(m, fx) {
  * number); every handler re-checks caps() before it does anything, so a stale click, a key and a test hit one guard.
  */
 const ACTS = Object.freeze({
-  pickSource: (m, fx, g) => planPickSource(m, fx, String(g.arg)),
+  pickSource: (m, fx, g) => {
+    const id = String(g.arg);
+    if (id.startsWith('ep:')) { torrentsLookup(m, fx, id); return; }
+    m.ui.torrents = null;
+    planPickSource(m, fx, id);
+  },
+  pickTorrent: (m, fx, g) => torrentsUse(m, fx, String(g.arg)),
+  pickSeason: (m, fx, g) => { m.ui.season = String(g.arg); },
   refreshSources: (m, fx) => planRefresh(m, fx, 'discover'),
   pickDevice: (m, fx, g) => planPickDevice(m, fx, String(g.arg), g),
   refreshDevices: (m, fx) => planRefresh(m, fx, 'discover_devices'),

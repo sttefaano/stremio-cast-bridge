@@ -159,7 +159,8 @@ class DiscoveryTest(unittest.TestCase):
         bridge = Bridge.__new__(Bridge)
         bridge.args = SimpleNamespace(source_file=None)
         bridge.quit, bridge.source_lock = threading.Event(), threading.Lock()
-        bridge.sources, bridge.source_snapshot = [], dict(source_discovery='idle', source_error=None, sources=[])
+        bridge.sources, bridge.source_snapshot = [], dict(source_discovery='idle', source_error=None, sources=[], guides={})
+        bridge.addon, bridge.added_sources = None, {}
         with patch('bridge.urlopen', return_value=response):
             bridge.discover()
         return bridge
@@ -205,3 +206,99 @@ class StatusLeakTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EpisodeTorrentsTest(unittest.TestCase):
+    SHOW_FILE = 'mobland.s02e01.1080p.web.h264-poke[EZTVx.to].mkv'
+    GUIDE = dict(state='ready', title='MobLand', imdb='tt31510819', episodes=[dict(season=2, number=2, name='Song 2', released=None)])
+
+    def bridge(self):
+        from addons import TorrentStream
+        loaded = 'b' * 40
+        streams = [TorrentStream('st-weak', 'c' * 40, 0, 'MobLand.S02E02.1080p.web.h264-poke.mkv', 6, '3 GB', '1080p', 'poke'),
+                   TorrentStream('st-4k', 'd' * 40, 3, 'MobLand.S02E02.2160p.DV.mkv', 900, '9 GB', '2160p', None, ('udp://t.example:1337',)),
+                   TorrentStream('st-good', 'e' * 40, 1, 'MobLand.S02E02.1080p.AMZN.mkv', 1396, '3.2 GB', '1080p', 'playweb')]
+        addon = Mock()
+        addon.streams.return_value = streams
+        bridge = Bridge.__new__(Bridge)
+        bridge.args = SimpleNamespace(source_file=None)
+        bridge.quit, bridge.source_lock = threading.Event(), threading.Lock()
+        bridge.addon, bridge.torrentio, bridge.streams, bridge.added_sources = addon, 'https://torrentio.strem.fun/cfg', {}, {}
+        bridge.sources = [dict(url=f'http://127.0.0.1:11470/{loaded}/0', id='s2e1', filename=self.SHOW_FILE,
+                               episode=dict(show='Mobland', season=2, number=1))]
+        bridge.source_snapshot = dict(source_discovery='ready', source_error=None, sources=[], guides={'mobland': self.GUIDE})
+        return bridge, addon
+
+    def test_versions_rank_by_the_loaded_resolution_then_healthy_seeders_and_never_leak_the_hash(self):
+        bridge, addon = self.bridge()
+        body = bridge.episode_streams(dict(show='mobland', season=2, number=2))
+        addon.streams.assert_called_once_with('https://torrentio.strem.fun/cfg', 'tt31510819', 2, 2, bridge.quit)
+        self.assertEqual([s['id'] for s in body['streams']], ['st-good', 'st-weak', 'st-4k'])
+        self.assertEqual(body['streams'][0], dict(id='st-good', filename='MobLand.S02E02.1080p.AMZN.mkv', seeders=1396, size='3.2 GB', resolution='1080p'))
+        self.assertNotIn('e' * 40, json.dumps(body))
+
+    def test_an_episode_outside_the_guide_is_refused(self):
+        bridge, addon = self.bridge()
+        with self.assertRaises(Exception) as caught:
+            bridge.episode_streams(dict(show='mobland', season=9, number=1))
+        self.assertEqual(caught.exception.code, 'unknown_episode')
+        addon.streams.assert_not_called()
+
+    def test_a_used_version_becomes_a_local_engine_source_that_survives_rediscovery(self):
+        bridge, _ = self.bridge()
+        bridge.episode_streams(dict(show='mobland', season=2, number=2))
+        with patch('bridge.urlopen') as engine:
+            source = bridge.use_stream(dict(stream_id='st-4k'))['source']
+            for _ in range(50):
+                if engine.called:
+                    break
+                time.sleep(.01)
+        self.assertEqual(source['title'], 'MobLand · T2 E2')
+        self.assertEqual(source['seeders'], 900)
+        self.assertNotIn('url', source)
+        request = engine.call_args[0][0]
+        self.assertEqual(request.full_url, f'http://127.0.0.1:11470/{"d" * 40}/create')
+        self.assertEqual(json.loads(request.data)['peerSearch']['sources'], ['tracker:udp://t.example:1337', f'dht:{"d" * 40}'])
+        self.assertIn(source['id'], [s['id'] for s in bridge.source_snapshot['sources']])
+
+        stats = {'d' * 40: {'infoHash': 'd' * 40, 'name': 'pack', 'peers': 12, 'files': [{'name': f'x{i}.mkv'} for i in range(4)]}}
+        response = Mock()
+        response.__enter__ = lambda *_: response
+        response.__exit__ = lambda *_: False
+        response.read.return_value = json.dumps(stats).encode()
+        with patch('bridge.urlopen', return_value=response):
+            bridge.discover()
+        again = next(s for s in bridge.source_snapshot['sources'] if s['id'] == source['id'])
+        self.assertEqual((again['title'], again['seeders'], again['peers']), ('MobLand · T2 E2', 900, 12))
+        self.assertEqual(len([s for s in bridge.source_snapshot['sources'] if s['id'] == source['id']]), 1)
+
+    def test_an_unknown_version_is_refused(self):
+        bridge, _ = self.bridge()
+        with self.assertRaises(Exception) as caught:
+            bridge.use_stream(dict(stream_id='nope'))
+        self.assertEqual(caught.exception.code, 'unknown_stream')
+
+    def test_a_fresh_torrent_is_probed_only_once_the_engine_lists_its_files(self):
+        bridge, _ = self.bridge()
+        fresh = f'http://127.0.0.1:11470/{"d" * 40}/3'
+        bridge.added_sources[fresh] = dict(url=fresh)
+        replies = iter([b'null', json.dumps({'files': []}).encode(), json.dumps({'files': [{'name': 'a.mkv'}]}).encode()])
+
+        def engine(url, timeout):
+            response = Mock()
+            response.__enter__ = lambda *_: response
+            response.__exit__ = lambda *_: False
+            response.read.return_value = next(replies)
+            return response
+
+        waits = Mock()
+        waits.is_set.return_value = False
+        with patch('bridge.urlopen', side_effect=engine) as asked, patch('bridge.probe', return_value='analysis') as probed:
+            self.assertEqual(bridge._probe(fresh, waits), 'analysis')
+        self.assertEqual(asked.call_count, 3, 'polled until the metadata arrived')
+        self.assertEqual(waits.wait.call_count, 2)
+        probed.assert_called_once_with(fresh, waits)
+
+        with patch('bridge.urlopen') as asked, patch('bridge.probe', return_value='analysis'):
+            bridge._probe(bridge.sources[0]['url'], waits)
+        asked.assert_not_called()
