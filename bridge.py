@@ -1312,7 +1312,28 @@ class Bridge:
             raise BridgeError(message)
 
 
-PANEL = (ROOT / "player.html").read_text().replace("__SCRIPT__", (ROOT / "player.js").read_text())
+FONT_NAMES = ('archivo.woff2', 'jetbrains-mono.woff2')
+PANEL_SCRIPTS = ('panel-core.js', 'panel-addon.js', 'panel-view.js', 'panel.js', 'panel-shell.js')
+
+
+def build_panel(root):
+    script = '\n'.join((root / name).read_text() for name in PANEL_SCRIPTS)
+    if '</script' in script.lower():
+        raise RuntimeError('Un script del panel contiene </script y cortaría la página.')
+    html = (root / 'player.html').read_text().replace('__SCRIPT__', script)
+    fonts = {}
+    for name in FONT_NAMES:
+        payload = (root / 'fonts' / name).read_bytes()
+        stem, ext = name.rsplit('.', 1)
+        url = f'/fonts/{stem}.{hashlib.sha256(payload).hexdigest()[:16]}.{ext}'
+        if f'/fonts/{name}' not in html:
+            raise RuntimeError(f'player.html no usa /fonts/{name}')
+        html = html.replace(f'/fonts/{name}', url)
+        fonts[url] = payload
+    return html, fonts
+
+
+PANEL, FONTS = build_panel(ROOT)
 
 
 class MediaHandler(BaseHTTPRequestHandler):
@@ -1407,23 +1428,25 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def reply(self, code, body, content_type='application/json'):
         payload = body.encode() if isinstance(body, str) else json.dumps(body, ensure_ascii=False).encode()
+        self.reply_bytes(code, payload, f'{content_type}; charset=utf-8')
+
+    def reply_bytes(self, code, payload, content_type, cache='no-store'):
         self.send_response(code)
-        self.send_header('Content-Type', content_type + '; charset=utf-8')
+        self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
         if not self.trusted_host():
             self.reply(403, {})
+        elif self.path in FONTS:
+            self.reply_bytes(200, FONTS[self.path], 'font/woff2', 'public, max-age=31536000, immutable')
         elif self.path == '/':
-            import html
-            panel = PANEL.replace('__TOKEN__', self.server.token).replace('__DEVICE__', html.escape(self.server.bridge.args.device_name or 'Sin dispositivo')).replace('__DELAY__', str(self.server.bridge.args.subtitle_delay_ms))
-            if self.server.bridge.status().get('demo'):
-                panel = panel.replace('id="demo-banner" hidden', 'id="demo-banner"')
+            panel = PANEL.replace('__TOKEN__', self.server.token)
             self.reply(200, panel, 'text/html')
         elif self.path == '/api/status':
             self.reply(200, self.server.bridge.status())

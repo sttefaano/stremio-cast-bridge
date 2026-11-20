@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-17T00:00:00Z",
+  "title": "Design System: Cast · Stremio",
+  "extensions": {
+    "colorMeta": {
+      "platform-black": {"role": "neutral", "displayName": "Platform Black", "canonical": "#101214"},
+      "pass-stock": {"role": "neutral", "displayName": "Pass Stock", "canonical": "#171a1d"},
+      "cell": {"role": "neutral", "displayName": "Cell", "canonical": "#1f2327"},
+      "cell-raised": {"role": "neutral", "displayName": "Cell Raised", "canonical": "#262b30"},
+      "rule": {"role": "neutral", "displayName": "Rule", "canonical": "#2b3036"},
+      "perforation": {"role": "neutral", "displayName": "Perforation", "canonical": "#3a4047"},
+      "ink": {"role": "neutral", "displayName": "Ink", "canonical": "#f2f2ee"},
+      "ink-soft": {"role": "neutral", "displayName": "Ink Soft", "canonical": "#c4c6c0"},
+      "mute": {"role": "neutral", "displayName": "Mute", "canonical": "#8a929c"},
+      "signal-yellow": {"role": "primary", "displayName": "Signal Yellow", "canonical": "#ffcc00"},
+      "signal-ink": {"role": "neutral", "displayName": "Signal Ink", "canonical": "#15130a"}
+    },
+    "typographyMeta": {
+      "title": {"displayName": "Title", "purpose": "The pass heading."},
+      "headline": {"displayName": "Headline", "purpose": "Movie on the board, sheet and confirm headings."},
+      "selected": {"displayName": "Selected", "purpose": "The chosen movie or TV."},
+      "label": {"displayName": "Label", "purpose": "Segment headings and board field names."},
+      "readout": {"displayName": "Readout", "purpose": "Times, hosts, counts, status."}
+    },
+    "shadows": [
+      {"name": "column-outline", "value": "0 0 0 1px #2b3036", "purpose": "Frames the column from 700px and the bottom sheet."},
+      {"name": "pressed-underline", "value": "inset 0 -3px 0 #f2f2ee", "purpose": "Pressed segment in the subtitle control."}
+    ],
+    "motion": [
+      {"name": "ease-rise", "value": "cubic-bezier(.2,.8,.2,1)", "purpose": "Sheet (240ms) and confirm (200ms) entering."}
+    ],
+    "breakpoints": [
+      {"name": "narrow", "value": "359px"},
+      {"name": "frame", "value": "700px"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Boarding Button", "kind": "button", "refersTo": "button-board",
+      "description": "The one commit action of Preparar, full width on the stub.",
+      "html": "<button class=\"ds-board\">Iniciar en Sala <span>→</span></button>",
+      "css": ".ds-board{width:100%;min-height:64px;border:0;border-radius:8px;background:#ffcc00;color:#15130a;display:flex;align-items:center;justify-content:space-between;padding:10px 20px;font:800 18px/1.1 Archivo,system-ui,sans-serif;font-stretch:85%}.ds-board:hover{filter:brightness(1.07)}.ds-board:focus-visible{outline:2px solid #f2f2ee;outline-offset:2px}"
+    },
+    {
+      "name": "Quiet Button", "kind": "button", "refersTo": "button-quiet",
+      "description": "Outlined secondary action such as Detener or Cancelar.",
+      "html": "<button class=\"ds-quiet\">Detener</button>",
+      "css": ".ds-quiet{min-height:44px;min-width:44px;padding:0 14px;background:none;border:1px solid #2b3036;border-radius:6px;color:#c4c6c0;font:600 12px/1 'JetBrains Mono',monospace;letter-spacing:.1em;text-transform:uppercase}.ds-quiet:hover{color:#f2f2ee;border-color:#8a929c}.ds-quiet:focus-visible{outline:2px solid #f2f2ee;outline-offset:2px}"
+    },
+    {
+      "name": "Option Row", "kind": "custom", "refersTo": "pass",
+      "description": "Selectable list row with a square mark; the chosen row grows to the 24px name.",
+      "html": "<div class=\"ds-opt\"><span class=\"ds-mark\"></span><span>Película</span></div>",
+      "css": ".ds-opt{display:flex;align-items:center;gap:12px;min-height:48px;border-top:1px dashed #2b3036;color:#c4c6c0;font:600 16px/1.15 Archivo,system-ui,sans-serif;font-stretch:90%;background:#171a1d}.ds-mark{width:18px;height:18px;border:1.5px solid #8a929c;border-radius:2px}"
+    },
+    {
+      "name": "Split-flap Clock", "kind": "custom", "refersTo": "flap",
+      "description": "Display-only clock cells with a hairline seam.",
+      "html": "<div class=\"ds-flaps\"><span class=\"ds-flap\">1</span><span class=\"ds-flap\">2</span></div>",
+      "css": ".ds-flaps{display:flex;gap:3px}.ds-flap{position:relative;width:22px;height:34px;display:grid;place-items:center;background:#262b30;border-radius:3px;color:#f2f2ee;font:700 21px/1 'JetBrains Mono',monospace}.ds-flap::after{content:'';position:absolute;left:0;right:0;top:50%;height:1px;background:#101214;opacity:.9}"
+    },
+    {
+      "name": "Problem Block", "kind": "card", "refersTo": "problem",
+      "description": "The single problem block with a signal-yellow left rule.",
+      "html": "<section class=\"ds-problem\"><h2>No hay conexión</h2><p>Revisá la red.</p></section>",
+      "css": ".ds-problem{border:1px solid #2b3036;border-left:4px solid #ffcc00;border-radius:6px;background:#171a1d;padding:12px 14px;color:#c4c6c0;font:500 14px/1.4 Archivo,system-ui,sans-serif}.ds-problem h2{margin:0;color:#f2f2ee;font:700 17px/1.2 Archivo,system-ui,sans-serif;font-stretch:88%}.ds-problem p{margin:5px 0 0}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Pase y tablero",
+    "overview": "A boarding pass for preparing a movie and a departures board with a remote for watching it, on one near-black platform with one signal yellow.",
+    "keyCharacteristics": ["One dark platform, one paper-stock surface, one signal yellow.", "Condensed Archivo for choices, JetBrains Mono for system readouts.", "Square marks, dotted perforation, hairline rules; no shadows.", "Tonal layering is the whole depth system.", "Every tap target is at least 44px."],
+    "rules": [
+      {"name": "The One Signal Rule", "body": "Yellow is the only hue: a fill on a committing action or a marker on a pending or unconfirmed state.", "section": "colors"},
+      {"name": "The Ink Is The Selection Rule", "body": "A chosen option is white ink, a filled square mark and a larger name, never a color.", "section": "colors"},
+      {"name": "The Two Voices Rule", "body": "Archivo speaks for the person, mono for the machine.", "section": "typography"},
+      {"name": "The Thumb Floor Rule", "body": "Every control is 44px or larger in both axes.", "section": "layout"},
+      {"name": "The Flat Card Rule", "body": "Cards separate by lightness alone, not shadow.", "section": "elevation"}
+    ],
+    "dos": ["Do spend Signal Yellow (#ffcc00) on a committing action or a pending state, and nothing else.", "Do set times, hosts and counts in JetBrains Mono with tabular numerals.", "Do keep one problem block and one Detener visible."],
+    "donts": ["Don't add a second hue or a gradient fill.", "Don't use drop shadows to lift a card.", "Don't round controls into pills."]
+  }
+}

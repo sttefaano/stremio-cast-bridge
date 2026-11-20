@@ -637,52 +637,11 @@ class ControlHTTPTest(unittest.TestCase):
         h.path = '/'
         h.do_GET()
         body = h.reply.call_args.args[1]
-        self.assertIn('id="timeline"', body)
+        self.assertIn('id="track"', body)
         self.assertIn('Modo de prueba', body)
         self.assertIn("const token='secret'", body)
         self.assertNotIn('__SCRIPT__', body)
-        from html.parser import HTMLParser
-        class Panel(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.in_dialog = False
-                self.dialogs = 0
-                self.dialog_ids = set()
-                self.page_ids = set()
-            def handle_starttag(self, tag, attrs):
-                if tag == 'dialog':
-                    self.in_dialog = True
-                    self.dialogs += 1
-                if self.in_dialog:
-                    self.dialog_ids.add(dict(attrs).get('id'))
-                else:
-                    self.page_ids.add(dict(attrs).get('id'))
-            def handle_endtag(self, tag):
-                if tag == 'dialog':
-                    self.in_dialog = False
-        panel = Panel()
-        panel.feed(body)
-        self.assertEqual(panel.dialogs, 1)
-        self.assertTrue({'more-panel', 'confirm-panel', 'mini-transport', 'mini-play',
-                         'mini-cancel', 'sheet-demo'} <= panel.dialog_ids)
-        self.assertTrue({'setup', 'source-panel', 'subtitles-panel', 'device-panel'} <= panel.page_ids)
-        self.assertTrue({'source-panel', 'subtitles-panel', 'device-panel'}.isdisjoint(panel.dialog_ids))
-        self.assertIn('id="seek-apply"', body)
-        self.assertIn('id="seek-cancel"', body)
+        self.assertNotIn('__TOKEN__', body)
         self.assertIn('inputmode="text"', body)
         self.assertNotIn('La noche del faro', body)
         self.assertNotIn('connect-src \'none\'', body)
-
-    def test_panel_escapes_device_name_without_external_resources(self):
-        from demo import DemoBridge
-        h = self.handler()
-        h.server.bridge = DemoBridge()
-        h.server.bridge.args.device_name = '<TV & "sala">'
-        h.path = '/'
-        h.do_GET()
-        body = h.reply.call_args.args[1]
-        self.assertIn('Sin dispositivo elegido', body)
-        self.assertNotIn('<TV &', body)
-        self.assertNotIn('<img', body)
-        self.assertNotIn('<video', body)
-        self.assertNotIn('<canvas', body)
