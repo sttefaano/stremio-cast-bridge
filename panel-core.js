@@ -90,7 +90,21 @@
  * @property {boolean} reseed
  * @property {Ticket|null} clock
  * @property {string|null} lastSourceId
+ * @property {string|null} season  the source group tab the user picked; null follows the chosen or playing source
+ * @property {Torrents|null} torrents  the Torrentio versions of one episode without a file; outlives plan resets
  * @property {string} lastDeviceLabel
+ */
+/**
+ * @typedef {{id:string,filename:string,seeders:number|null,size:string|null,resolution:string|null}} TorrentStream
+ * @typedef {object} Torrents
+ * @property {string} key  'ep:<show>|<season>|<number>'
+ * @property {'loading'|'ready'|'error'} s
+ * @property {Ticket|null} ticket  the episode_streams lookup
+ * @property {TorrentStream[]} streams  best first, as the bridge ranked them
+ * @property {string|null} chosen
+ * @property {Ticket|null} use  the use_stream post in flight
+ * @property {string|null} pending  source id the bridge registered; becomes the plan once a status lists it
+ * @property {string} message
  */
 /** @typedef {{link:Link,plan:Plan,remote:Remote,ui:Ui,prefs:{lastDeviceId:string|null,autoSelectTried:boolean},nextTicket:number,now:number,n:number}} Model */
 
@@ -387,6 +401,46 @@ function planOnCatalogueReply(m, msg) {
   if (msg.body?.catalogue) { planAcceptCatalogue(m, msg.body.catalogue); p.load = {s: 'idle'}; }
   else if (msg.body?.analysis_id) p.load = {...p.load, ticket: null, analysisId: msg.body.analysis_id};
   else p.load = {s: 'error', message: 'Respuesta inválida del puente. Actualizá las pistas.'};
+}
+
+// ───────── torrents: an episode without a file, its Torrentio versions, and the one handed to the engine
+const EPISODE_KEY = /^ep:(.+)\|(\d{1,4})\|(\d{1,5})$/;
+function torrentsLookup(m, fx, key) {
+  const found = EPISODE_KEY.exec(key), t = m.ui.torrents;
+  if (!m.link.online || !found || (t?.key === key && (t.s === 'loading' || t.use || t.pending))) return;
+  const ticket = ticketOf(m);
+  m.ui.torrents = {key, s: 'loading', ticket, streams: [], chosen: null, use: null, pending: null, message: ''};
+  fx.push({fx: 'post', ticket, action: 'episode_streams', body: {show: found[1], season: Number(found[2]), number: Number(found[3])}});
+}
+function torrentsUse(m, fx, id) {
+  const t = m.ui.torrents;
+  if (!m.link.online || t?.s !== 'ready' || t.use || !t.streams.some(x => x.id === id)) return;
+  const ticket = ticketOf(m);
+  Object.assign(t, {chosen: id, use: ticket, pending: null, message: ''});
+  fx.push({fx: 'post', ticket, action: 'use_stream', body: {stream_id: id}});
+}
+function torrentsOnReply(m, fx, msg) {
+  const t = m.ui.torrents;
+  if (t?.s === 'loading' && t.ticket === msg.ticket) {
+    const streams = msg.ok && Array.isArray(msg.body?.streams) ? msg.body.streams : [];
+    Object.assign(t, {s: streams.length ? 'ready' : 'error', ticket: null, streams,
+      message: !msg.ok ? commandError(msg) : streams.length ? '' : 'No hay torrents para este capítulo.'});
+    if (streams.length) torrentsUse(m, fx, streams[0].id);
+    return true;
+  }
+  if (!t?.use || t.use !== msg.ticket) return false;
+  t.use = null;
+  if (msg.ok && typeof msg.body?.source?.id === 'string') { t.pending = msg.body.source.id; linkRequestPoll(m, fx); }
+  else Object.assign(t, {chosen: null, message: commandError(msg)});
+  return true;
+}
+/** Standing rule: the version the bridge registered becomes the plan as soon as a status lists it. */
+function torrentsAdopt(m, fx) {
+  const t = m.ui.torrents;
+  if (!t?.pending || !m.link.status.sources.some(x => x.id === t.pending)) return;
+  const id = t.pending;
+  t.pending = null;
+  planPickSource(m, fx, id);
 }
 
 function planSubsBranch(m, branch) {
@@ -719,7 +773,7 @@ function uiSay(m, text, lost = false) {
 /** openSubs / openMore / openChange. 'change' starts from an empty plan. */
 function uiOpen(m, sheet) {
   if (m.ui.confirm || !caps(m).sheets[sheet].open) return;
-  if (sheet === 'change') planReset(m, null);
+  if (sheet === 'change') { planReset(m, null); m.ui.season = null; m.ui.torrents = null; }
   if (sheet === 'more') m.ui.exact = {text: '', error: ''};
   m.ui.sheet = sheet;
 }
@@ -730,7 +784,7 @@ function uiDismiss(m) {
   const was = u.sheet;
   u.sheet = null;
   planTouch(m);
-  if (was === 'change') planReset(m, null);
+  if (was === 'change') { planReset(m, null); m.ui.season = null; m.ui.torrents = null; }
 }
 function uiConfirmAccept(m, fx) {
   const c = m.ui.confirm, p = m.plan;
@@ -819,7 +873,7 @@ const freshPlan = sourceId => ({
 const freshRemote = key => ({key, seek: {s: 'idle'}, captions: {draft: null, apply: null}, volumePreview: null, stop: null, overlay: null, addon: freshAddon()});
 const freshUi = () => ({
   sheet: null, confirm: null, errors: {local: null, observed: null, dismissed: null, absorbed: null}, focus: null,
-  stoppedNotice: false, stopIssued: false, exact: {text: '', error: ''}, mode: null, reseed: false, clock: null, lastSourceId: null, lastDeviceLabel: '',
+  stoppedNotice: false, stopIssued: false, exact: {text: '', error: ''}, mode: null, reseed: false, clock: null, lastSourceId: null, lastDeviceLabel: '', season: null, torrents: null,
 });
 /** @param {string|null} lastDeviceId @returns {Model} */
 const freshModel = lastDeviceId => ({

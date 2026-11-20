@@ -1,5 +1,6 @@
 import io
 import json
+import tempfile
 import re
 import threading
 import unittest
@@ -561,3 +562,74 @@ class LenientNormalizationTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SourceEpisodeTest(unittest.TestCase):
+    def test_sources_carry_their_season_and_an_episode_title(self):
+        from bridge import episode_of, episode_title
+        pack = episode_of('Mobland 2025 S01E07 1080p BluRay HEVC x265 5.1 BONE.mkv', 'Mobland 2025 S01 1080p BluRay')
+        single = episode_of('mobland.s02e01.1080p.web.h264-poke[EZTVx.to].mkv')
+        self.assertEqual(pack, dict(show='Mobland', season=1, number=7))
+        self.assertEqual(single, dict(show='Mobland', season=2, number=1))
+        self.assertEqual(episode_title(single), 'Mobland · T2 E1')
+        for movie in ('Inception.2010.1080p.mkv', '1917.2019.1920x1080.x264.mkv'):
+            self.assertIsNone(episode_of(movie))
+
+
+class SeriesGuideTest(unittest.TestCase):
+    def test_the_guide_lists_every_episode_of_the_show_without_specials(self):
+        from addons import StremioAddon
+        meta = {'meta': {'videos': [
+            {'season': 2, 'episode': 1, 'name': 'Back', 'released': '2026-09-25T03:00:00.000Z'},
+            {'season': 1, 'episode': 2, 'name': 'Jigsaw Puzzle', 'released': '2025-04-06T03:00:00.000Z'},
+            {'season': 1, 'number': 1, 'name': 'Stick or Twist'},
+            {'season': 0, 'episode': 1, 'name': 'Trailer'},
+            {'season': '1', 'episode': 3}, {'season': 1, 'episode': 2, 'name': 'duplicate'}]}}
+        asked = []
+
+        def get(url, *, cap, deadline, cancelled=None):
+            asked.append(url)
+            if '/catalog/' in url:
+                return json.dumps({'metas': [{'id': 'tt31510819', 'name': 'MobLand', 'releaseInfo': '2025'},
+                                             {'id': 'tt6046238', 'name': 'Molang', 'releaseInfo': '2015'}]}).encode()
+            return json.dumps(meta).encode()
+
+        guide = StremioAddon(get=get).guide('Mobland', None)
+        self.assertEqual(asked[1], 'https://v3-cinemeta.strem.io/meta/series/tt31510819.json')
+        self.assertEqual(guide['title'], 'MobLand')
+        self.assertEqual([(e['season'], e['number'], e['name'], e['released']) for e in guide['episodes']],
+                         [(1, 1, 'Stick or Twist', None), (1, 2, 'Jigsaw Puzzle', '2025-04-06'), (2, 1, 'Back', '2026-09-25')])
+
+    def test_an_unknown_show_has_no_guide(self):
+        from addons import StremioAddon
+        get = lambda url, **_: json.dumps({'metas': [{'id': 'tt6046238', 'name': 'Molang', 'releaseInfo': '2015'}]}).encode()
+        self.assertIsNone(StremioAddon(get=get).guide('Mobland', None))
+
+
+class TorrentioTest(unittest.TestCase):
+    def test_streams_keep_seeders_size_and_trackers_and_drop_broken_entries(self):
+        from addons import parse_streams
+        good = {'infoHash': 'A' * 40, 'fileIdx': 3, 'title': 'Pack name\n./S02/MobLand.S02E02.1080p.WEB-DL-playWEB.mkv\n\U0001F464 1396 \U0001F4BE 3.23 GB \u2699\ufe0f EXT',
+                'behaviorHints': {'filename': 'MobLand.S02E02.1080p.WEB-DL-playWEB.mkv'},
+                'sources': ['tracker:udp://tracker.opentrackr.org:1337/announce', 'dht:' + 'a' * 40, 'tracker:javascript:alert(1)']}
+        streams = parse_streams({'streams': [good, dict(good), {'infoHash': 'zz', 'fileIdx': 1}, {'infoHash': 'b' * 40, 'title': 'no file index'},
+                                             {'infoHash': 'c' * 40, 'fileIdx': 0, 'title': 'Show.S02E02.2160p.mkv'}]})
+        self.assertEqual(len(streams), 2, 'duplicates, bad hashes and streams without a file index are dropped')
+        first = streams[0]
+        self.assertEqual((first.info_hash, first.file_idx, first.filename, first.seeders, first.size, first.resolution, first.group),
+                         ('a' * 40, 3, 'MobLand.S02E02.1080p.WEB-DL-playWEB.mkv', 1396, '3.23 GB', '1080p', 'playweb'))
+        self.assertEqual(first.trackers, ('udp://tracker.opentrackr.org:1337/announce',))
+        self.assertEqual((streams[1].seeders, streams[1].resolution), (None, '2160p'))
+        self.assertNotIn('info_hash', first.public())
+
+    def test_the_users_torrentio_configuration_comes_from_the_stremio_profile(self):
+        import sqlite3
+        from addons import TORRENTIO, torrentio_base
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'localstorage.sqlite3'
+            with sqlite3.connect(path) as db:
+                db.execute('create table ItemTable (key text, value blob)')
+                profile = '{"addons":[{"transportUrl":"https://torrentio.strem.fun/qualityfilter=480p,scr|limit=5/manifest.json"}]}'
+                db.execute('insert into ItemTable values (?, ?)', ('profile', profile.encode('utf-16-le')))
+            self.assertEqual(torrentio_base([str(path)]), f'{TORRENTIO}/qualityfilter=480p,scr|limit=5')
+            self.assertEqual(torrentio_base([str(Path(folder) / 'missing.sqlite3')]), TORRENTIO)

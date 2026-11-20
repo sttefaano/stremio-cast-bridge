@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import json
 import re
 import secrets
+import sqlite3
 import time
 import unicodedata
 from urllib.error import HTTPError, URLError
@@ -11,8 +12,12 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 USER_AGENT = 'stremio-cast-bridge/1'
 CINEMETA = 'https://v3-cinemeta.strem.io'
 OPENSUBTITLES = 'https://opensubtitles-v3.strem.io'
+TORRENTIO = 'https://torrentio.strem.fun'
+MAX_STREAMS = 12
+HEALTHY_SEEDERS = 20
 ENGINE = 'http://127.0.0.1:11470/subtitles.vtt?from='
 MAX_SUBTITLE = 1024 ** 2
+MAX_META = 4 * 1024 ** 2
 MAX_OFFERS = 200
 CHUNK = 64 * 1024
 
@@ -255,6 +260,103 @@ def choose_meta(guess, metas):
     return Match(meta, match_label(chosen.title, chosen.year, meta), 'exact' if len(exact) == 1 else 'doubtful'), others
 
 
+def parse_videos(payload):
+    meta = payload.get('meta') if isinstance(payload, dict) else None
+    videos = meta.get('videos') if isinstance(meta, dict) else None
+    if not isinstance(videos, list):
+        raise AddonError('bad_response')
+    episodes = {}
+    for video in videos:
+        if not isinstance(video, dict):
+            continue
+        season, number = video.get('season'), video.get('episode', video.get('number'))
+        if type(season) is not int or type(number) is not int or not 1 <= season < 1000 or not 0 <= number < 10000:
+            continue
+        name, released = video.get('name') or video.get('title'), video.get('released')
+        released = released[:10] if isinstance(released, str) and re.match(r'\d{4}-\d\d-\d\d', released) else None
+        episodes.setdefault((season, number), dict(season=season, number=number,
+                                                   name=clean(name, 120) or None if isinstance(name, str) else None,
+                                                   released=released))
+    return [episodes[k] for k in sorted(episodes)]
+
+
+@dataclass(frozen=True)
+class TorrentStream:
+    id: str
+    info_hash: str
+    file_idx: int
+    filename: str
+    seeders: int | None
+    size: str | None
+    resolution: str | None
+    group: str | None
+    trackers: tuple[str, ...] = field(repr=False, default=())
+
+    def public(self):
+        return dict(id=self.id, filename=self.filename, seeders=self.seeders, size=self.size, resolution=self.resolution)
+
+
+def release_traits(filename):
+    stem = EXTENSION.sub('', filename or '')
+    resolution = re.search(r'(?i)(?<![0-9])(2160|1080|720|480)p', stem)
+    group = re.search(r'-([A-Za-z0-9]{2,20})(?:\[[^\]]*\])?$', stem)
+    return (resolution[1] + 'p' if resolution else '2160p' if re.search(r'(?i)\b(4k|uhd)\b', stem) else None,
+            group[1].lower() if group else None)
+
+
+def parse_streams(payload):
+    items = payload.get('streams') if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise AddonError('bad_response')
+    streams, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        info_hash, file_idx, title = item.get('infoHash'), item.get('fileIdx'), item.get('title')
+        if (not isinstance(info_hash, str) or not re.fullmatch(r'[a-fA-F0-9]{40}', info_hash)
+                or type(file_idx) is not int or not 0 <= file_idx < 100000 or (info_hash.lower(), file_idx) in seen):
+            continue
+        seen.add((info_hash.lower(), file_idx))
+        hints = item.get('behaviorHints') if isinstance(item.get('behaviorHints'), dict) else {}
+        lines = title.split('\n') if isinstance(title, str) else []
+        filename = hints.get('filename') if isinstance(hints.get('filename'), str) else lines[0] if lines else ''
+        filename = clean(filename.rsplit('/', 1)[-1], 180)
+        seeders = re.search(r'\U0001F464\s*(\d{1,7})', title or '')
+        size = re.search(r'\U0001F4BE\s*(\d{1,5}(?:\.\d{1,2})?\s*[KMGT]B)', title or '')
+        trackers = tuple(s[8:] for s in item.get('sources') or () if isinstance(s, str) and s.startswith('tracker:')
+                         and re.fullmatch(r'(?:udp|https?)://[\x21-\x7e]{1,300}', s[8:]))[:20]
+        resolution, group = release_traits(filename)
+        streams.append(TorrentStream(secrets.token_hex(12), info_hash.lower(), file_idx, filename or 'Archivo sin nombre',
+                                     int(seeders[1]) if seeders else None, size[1] if size else None,
+                                     resolution, group, trackers))
+    return streams
+
+
+def rank_streams(streams, reference_filenames=(), loaded_hashes=()):
+    """Same torrent as a loaded episode, the loaded resolution, enough seeders, the loaded release group, more seeders."""
+    traits = [release_traits(name) for name in reference_filenames]
+    resolutions, groups = {r for r, _ in traits if r}, {g for _, g in traits if g}
+    return sorted(streams, key=lambda s: (s.info_hash not in loaded_hashes, s.resolution not in resolutions,
+                                          (s.seeders or 0) < HEALTHY_SEEDERS, s.group not in groups,
+                                          -(s.seeders or 0)))[:MAX_STREAMS]
+
+
+def torrentio_base(profile_paths):
+    """The user's Torrentio URL from Stremio's own profile, so its filters apply; the public one otherwise."""
+    for path in profile_paths:
+        try:
+            with sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1) as db:
+                row = db.execute("select value from ItemTable where key = 'profile'").fetchone()
+        except sqlite3.Error:
+            continue
+        value = row[0] if row else b''
+        text = value.decode('utf-16-le', 'ignore') if isinstance(value, bytes) else str(value)
+        found = re.search(r'https://torrentio\.strem\.fun/([A-Za-z0-9=|,%._-]{1,500})/manifest\.json', text)
+        if found:
+            return f'{TORRENTIO}/{found[1]}'
+    return TORRENTIO
+
+
 def match_label(title, year, meta):
     label = f'{title} ({year})' if title and year else title or meta.imdb
     return label if meta.season is None else f'{label} · T{meta.season} E{meta.episode}'
@@ -322,7 +424,7 @@ def _allowed(url):
     if not (url.isascii() and url.isprintable() and ' ' not in url) or parts.fragment or parts.username or parts.password:
         return False
     if parts.scheme == 'https':
-        return parts.netloc in ('v3-cinemeta.strem.io', 'opensubtitles-v3.strem.io') and parts.path.startswith('/')
+        return parts.netloc in ('v3-cinemeta.strem.io', 'opensubtitles-v3.strem.io', 'torrentio.strem.fun') and parts.path.startswith('/')
     return (parts.scheme == 'http' and parts.netloc == '127.0.0.1:11470' and parts.path == '/subtitles.vtt'
             and parts.query.startswith('from='))
 
@@ -376,9 +478,9 @@ class StremioAddon:
     def __init__(self, get=http_get):
         self.get = get
 
-    def _json(self, url, cancelled):
+    def _json(self, url, cancelled, cap=MAX_SUBTITLE):
         try:
-            return json.loads(self.get(url, cap=MAX_SUBTITLE, deadline=8, cancelled=cancelled))
+            return json.loads(self.get(url, cap=cap, deadline=8, cancelled=cancelled))
         except (ValueError, RecursionError):
             raise AddonError('bad_response') from None
 
@@ -408,6 +510,21 @@ class StremioAddon:
         extra = f'/filename={quote(filename, safe="")}' if filename else ''
         payload = self._json(f'{OPENSUBTITLES}/subtitles/{match.meta.path()}{extra}.json', cancelled)
         return Listing('ready', match=match, alternatives=alternatives, offers=parse_offers(payload, filename))
+
+    def guide(self, show, cancelled):
+        metas = self._json(f'{CINEMETA}/catalog/series/top/search={quote(show, safe="")}.json', cancelled)
+        metas = metas.get('metas') if isinstance(metas, dict) else None
+        if not isinstance(metas, list):
+            raise AddonError('bad_response')
+        match, _ = choose_meta(Guess(show, None, 1, 1), metas)
+        if match is None:
+            return None
+        payload = self._json(f'{CINEMETA}/meta/series/{match.meta.imdb}.json', cancelled, cap=MAX_META)
+        return dict(title=match.label.split(' (')[0].split(' · ')[0], imdb=match.meta.imdb, episodes=parse_videos(payload))
+
+    def streams(self, base, imdb, season, episode, cancelled):
+        meta = MetaId(imdb, season, episode)
+        return parse_streams(self._json(f'{base}/stream/{meta.path()}.json', cancelled, cap=MAX_META))
 
     def fetch(self, offer, cancelled):
         if not valid_subtitle_url(offer.url):

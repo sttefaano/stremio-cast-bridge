@@ -84,7 +84,8 @@ def install_media(bridge, source=None, duration=120, delay=500):
     source = source or dict(id='fixture-source', url='offline-fixture', title='Fixture')
     bridge.device_lock, bridge.source_lock = threading.Lock(), threading.Lock()
     bridge.device_snapshot = dict(devices=[], device_discovery='ready', device_error=None)
-    bridge.source_snapshot = dict(sources=[], source_discovery='ready', source_error=None)
+    bridge.source_snapshot = dict(sources=[], source_discovery='ready', source_error=None, guides={})
+    bridge.addon, bridge.added_sources = None, {}
     bridge.device_wake, bridge.source_wake = threading.Event(), threading.Event()
     bridge.metadata_workers = []
     bridge.quit = getattr(bridge, 'quit', threading.Event())

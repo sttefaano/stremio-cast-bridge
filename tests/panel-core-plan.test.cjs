@@ -384,3 +384,79 @@ test('upload needs a movie and is refused while another is in flight', () => {
   p.send({t: 'filePicked', arg: {name: 'b.srt', size: 3}});
   assert.equal(p.effects('read').length, 1);
 });
+
+test('series files split into season tabs; Cambiar película opens on the playing season', () => {
+  const ep = (id, season, number) => ({id, title: `Mobland · T${season} E${number}`, filename: `${id}.mkv`, episode: {show: 'Mobland', season, number}});
+  const sources = [ep('s1e7', 1, 7), ep('s1e1', 1, 1), ep('s2e1', 2, 1), {id: 'm', title: 'Movie'}];
+  const labels = v => v.plan.sources.map(r => r.label);
+  const p = panel({...idle, sources});
+  assert.deepEqual(p.view.plan.seasons.map(t => [t.label, t.selected]), [['Películas', false], ['Temporada 1', false], ['Temporada 2', true]]);
+  assert.deepEqual(labels(p.view), ['Episodio 1'], 'the latest season shows by default, without the older one');
+  p.tap('pickSeason', 'mobland|1');
+  assert.deepEqual(labels(p.view), ['Episodio 1', 'Episodio 7']);
+  p.tap('pickSource', 's1e7');
+  assert.equal(p.view.plan.sources.find(r => r.selected)?.id, 's1e7');
+
+  const q = panel({...playing, source_id: 's1e7', title: 'Mobland · T1 E7', sources});
+  q.tap('openChange');
+  assert.deepEqual(labels(q.view), ['Episodio 1', 'Episodio 7'], 'the change sheet opens on the season on the TV');
+  q.tap('pickSeason', 'mobland|2');
+  assert.deepEqual(labels(q.view), ['Episodio 1']);
+  assert.equal(q.view.plan.sources[0].id, 's2e1');
+
+  const r = panel({...idle, sources: [{id: 'a', title: 'Alpha'}, {id: 'b', title: 'Beta'}]});
+  assert.deepEqual(r.view.plan.seasons, [], 'movies alone need no tabs');
+  assert.deepEqual(labels(r.view), ['Alpha', 'Beta']);
+});
+
+test('a ready guide lists every episode of every season, and an unloaded one looks its torrents up', () => {
+  const ep = (id, season, number) => ({id, title: `Mobland · T${season} E${number}`, filename: `${id}.mkv`, peers: 5, episode: {show: 'Mobland', season, number}});
+  const guide = {state: 'ready', title: 'MobLand', imdb: 'tt31510819', episodes: [
+    {season: 1, number: 1, name: 'Stick or Twist', released: '2025-03-30'}, {season: 1, number: 2, name: 'Jigsaw Puzzle', released: null},
+    {season: 2, number: 1, name: 'Back', released: '2026-09-25'}, {season: 2, number: 2, name: 'Later', released: '2999-01-01'},
+    {season: 3, number: 1, name: 'Far', released: '2999-02-01'}]};
+  const base = {...idle, sources: [ep('s2e1', 2, 1)], guides: {mobland: guide}};
+  const p = panel(base);
+  p.tick(Date.parse('2026-11-20T12:00:00Z'));
+  assert.deepEqual(p.view.plan.seasons.map(t => [t.label, t.selected]), [['Temporada 1', false], ['Temporada 2', true], ['Temporada 3', false]],
+    'every season is a tab, and the latest one with a file opens');
+  assert.deepEqual(p.view.plan.sources.map(r => [r.label, r.enabled, r.note]), [
+    ['1. Back', true, 's2e1.mkv · 5 conectados'], ['2. Later', false, 'Se estrena el 01/01/2999.']]);
+
+  p.tap('pickSeason', 'mobland|1');
+  assert.equal(p.view.plan.sourceStatus, 'Tocá un capítulo sin cargar para buscar sus torrents.');
+  p.tap('pickSource', 'ep:mobland|1|2');
+  assert.deepEqual(p.posted('episode_streams').body, {show: 'mobland', season: 1, number: 2});
+  assert.equal(p.view.plan.sources[1].note, 'Buscando torrents…');
+  const streams = [{id: 'st-a', filename: 'MobLand.S01E02.1080p.mkv', seeders: 1396, size: '3.23 GB', resolution: '1080p'},
+    {id: 'st-b', filename: 'MobLand.S01E02.2160p.mkv', seeders: null, size: null, resolution: '2160p'}];
+  p.reply(p.posted('episode_streams'), {ok: true, body: {streams}});
+  assert.deepEqual(p.posted('use_stream').body, {stream_id: 'st-a'}, 'the best ranked version is used without asking');
+  assert.deepEqual(p.view.plan.torrents.rows.map(r => [r.label, r.note, r.selected]), [
+    ['MobLand.S01E02.1080p.mkv', '👤 1396 seeders · 3.23 GB · 1080p', true], ['MobLand.S01E02.2160p.mkv', 'Seeders desconocidos · 2160p', false]]);
+  assert.equal(p.view.plan.torrents.status, 'Cargando la versión elegida…');
+
+  const added = {id: 'src-a', title: 'MobLand · T1 E2', filename: 'MobLand.S01E02.1080p.mkv', seeders: 1396, peers: null, episode: {show: 'MobLand', season: 1, number: 2}};
+  p.reply(p.posted('use_stream'), {ok: true, body: {source: added}});
+  p.status({...base, sources: [...base.sources, added]});
+  assert.equal(p.posted('catalogue').body.source_id, 'src-a', 'the registered version becomes the plan once the status lists it');
+  assert.deepEqual(p.view.plan.sources.map(r => [r.label, r.selected, r.note]), [
+    ['1. Stick or Twist', false, 'Sin cargar · tocá para buscar torrents'], ['2. Jigsaw Puzzle', true, 'MobLand.S01E02.1080p.mkv · 👤 1396 seeders']]);
+  assert.equal(p.view.plan.torrents.shown, true, 'the versions stay to switch');
+
+  p.tap('pickTorrent', 'st-b');
+  assert.deepEqual(p.posts('use_stream').at(-1).body, {stream_id: 'st-b'});
+  p.reply(p.posts('use_stream').at(-1), {ok: false, message: 'Esa versión ya no está disponible. Buscá de nuevo.'});
+  assert.equal(p.view.plan.torrents.status, 'Esa versión ya no está disponible. Buscá de nuevo.');
+
+  const q = panel(base);
+  q.tick(Date.parse('2026-11-20T12:00:00Z'));
+  q.tap('pickSeason', 'mobland|1');
+  q.tap('pickSource', 'ep:mobland|1|1');
+  q.reply(q.posted('episode_streams'), {ok: true, body: {streams: []}});
+  assert.equal(q.view.plan.sources[0].note, 'No hay torrents para este capítulo.');
+  assert.equal(q.posts('use_stream').length, 0);
+
+  const loading = panel({...idle, sources: [ep('s2e1', 2, 1)], guides: {mobland: {state: 'loading', title: 'Mobland', episodes: []}}});
+  assert.deepEqual(loading.view.plan.sources.map(r => r.label), ['Episodio 1'], 'without a guide the cached files still list');
+});
